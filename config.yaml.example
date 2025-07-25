@@ -1,0 +1,75 @@
+# Voice AI System Configuration
+# Copy this file to config.yaml and fill in your API keys
+
+# API Keys
+api_keys:
+  deepgram: "your_deepgram_api_key_here"
+  elevenlabs: "your_elevenlabs_api_key_here" 
+  openai: "your_openai_api_key_here"
+
+# Voice Settings
+voice:
+  id: "T2KZm9rWPG5TgXTyjt7E"  # Catalyst voice (default)
+  # Other popular voices:
+  # "pNInz6obpgDQGcFmaJgB"  # Rachel
+  # "yjJ45q8TVCrtMhEKurxY"  # Von Fusion
+  # "EXAVITQu4vr4xnSDxMaL"  # Sarah
+  # "21m00Tcm4TlvDq8ikWAM"  # Rachel (alternative)
+
+# Speech-to-Text Settings  
+stt:
+  model: "nova-3"
+  language: "en-US"
+  sample_rate: 16000
+  chunk_size: 8000
+  interim_results: true
+  punctuate: true
+  diarize: true
+  utterance_end_ms: 1000
+  vad_events: true
+  enable_speaker_id: false
+  speaker_profiles_path: null
+
+# Text-to-Speech Settings
+tts:
+  model_id: "eleven_multilingual_v2"
+  output_format: "pcm_22050"
+  sample_rate: 22050
+  speed: 1.0
+  stability: 0.5
+  similarity_boost: 0.8
+  chunk_size: 1024
+  buffer_size: 2048
+
+# Conversation Management
+conversation:
+  # Timing settings
+  pause_threshold: 2.0        # seconds of silence before LLM submission
+  min_words_for_submission: 3 # minimum words before submitting
+  max_wait_time: 10.0         # maximum time to wait before force submission
+  
+  # Interruption settings
+  interruption_confidence: 0.8 # minimum confidence for interruption
+  
+  # LLM settings
+  llm_model: "chatgpt-4o-latest"
+  max_tokens: 300
+  system_prompt: "You are a helpful AI assistant in a voice conversation. Give natural, conversational responses that work well when spoken aloud. Keep responses concise but engaging."
+
+# Audio Device Settings (optional)
+audio:
+  input_device_index: null   # null for default microphone
+  output_device_index: null  # null for default speakers
+  
+# Logging Settings
+logging:
+  level: "INFO"              # DEBUG, INFO, WARNING, ERROR
+  show_interim_results: true
+  show_tts_chunks: false
+  show_audio_debug: false
+
+# Development/Testing Settings
+development:
+  enable_debug_mode: false
+  test_mode: false
+  mock_apis: false 
