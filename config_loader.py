@@ -7,7 +7,7 @@ Loads YAML configuration and creates appropriate dataclass configurations.
 import yaml
 import os
 from dataclasses import dataclass
-from typing import Optional, Dict, Any
+from typing import Optional, Dict, Any, List
 from pathlib import Path
 
 # Import our configuration dataclasses
@@ -21,6 +21,7 @@ class ConversationConfig:
     deepgram_api_key: str
     elevenlabs_api_key: str
     openai_api_key: str
+    anthropic_api_key: str = ""
     
     # Voice settings
     voice_id: str = "T2KZm9rWPG5TgXTyjt7E"
@@ -45,9 +46,23 @@ class ConversationConfig:
     tts_similarity_boost: float = 0.8
     
     # LLM settings
+    llm_provider: str = "openai"  # openai or anthropic
     llm_model: str = "chatgpt-4o-latest"
+    conversation_mode: str = "chat"  # chat or prefill
     max_tokens: int = 300
     system_prompt: str = "You are a helpful AI assistant in a voice conversation. Give natural, conversational responses that work well when spoken aloud. Keep responses concise but engaging."
+    
+    # Prefill mode settings
+    prefill_user_message: str = '<cmd>cat untitled.txt</cmd>'
+    prefill_participants: List[str] = None
+    prefill_system_prompt: str = 'The assistant is in CLI simulation mode, and responds to the user\'s CLI commands only with outputs of the commands.'
+    
+    # History file settings
+    history_file: Optional[str] = None
+    
+    def __post_init__(self):
+        if self.prefill_participants is None:
+            self.prefill_participants = ['H', 'Claude']
 
 @dataclass
 class AudioConfig:
@@ -148,11 +163,15 @@ class ConfigLoader:
         if missing_keys:
             raise ValueError(f"Missing required API keys: {missing_keys}")
         
+        # Check for Anthropic key if Anthropic provider is selected
+        conversation_config_data = config_data.get('conversation', {})
+        if conversation_config_data.get('llm_provider') == 'anthropic' and not api_keys.get('anthropic'):
+            raise ValueError("Anthropic API key is required when using Anthropic as LLM provider")
+        
         # Extract configuration sections
         voice_config = config_data.get('voice', {})
         stt_config_data = config_data.get('stt', {})
         tts_config_data = config_data.get('tts', {})
-        conversation_config_data = config_data.get('conversation', {})
         audio_config_data = config_data.get('audio', {})
         logging_config_data = config_data.get('logging', {})
         dev_config_data = config_data.get('development', {})
@@ -194,6 +213,7 @@ class ConfigLoader:
             deepgram_api_key=api_keys['deepgram'],
             elevenlabs_api_key=api_keys['elevenlabs'],
             openai_api_key=api_keys['openai'],
+            anthropic_api_key=api_keys.get('anthropic', ''),
             voice_id=voice_config.get('id', 'T2KZm9rWPG5TgXTyjt7E'),
             pause_threshold=conversation_config_data.get('pause_threshold', 2.0),
             min_words_for_submission=conversation_config_data.get('min_words_for_submission', 3),
@@ -206,10 +226,17 @@ class ConfigLoader:
             tts_speed=tts_config_data.get('speed', 1.0),
             tts_stability=tts_config_data.get('stability', 0.5),
             tts_similarity_boost=tts_config_data.get('similarity_boost', 0.8),
+            llm_provider=conversation_config_data.get('llm_provider', 'openai'),
             llm_model=conversation_config_data.get('llm_model', 'chatgpt-4o-latest'),
+            conversation_mode=conversation_config_data.get('conversation_mode', 'chat'),
             max_tokens=conversation_config_data.get('max_tokens', 300),
             system_prompt=conversation_config_data.get('system_prompt', 
-                "You are a helpful AI assistant in a voice conversation. Give natural, conversational responses that work well when spoken aloud. Keep responses concise but engaging.")
+                "You are a helpful AI assistant in a voice conversation. Give natural, conversational responses that work well when spoken aloud. Keep responses concise but engaging."),
+            prefill_user_message=conversation_config_data.get('prefill_user_message', '<cmd>cat untitled.txt</cmd>'),
+            prefill_participants=conversation_config_data.get('prefill_participants', ['H', 'Claude']),
+            prefill_system_prompt=conversation_config_data.get('prefill_system_prompt', 
+                'The assistant is in CLI simulation mode, and responds to the user\'s CLI commands only with outputs of the commands.'),
+            history_file=conversation_config_data.get('history_file')
         )
         
         # Create other configurations

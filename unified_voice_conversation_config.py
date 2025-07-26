@@ -6,10 +6,15 @@ Integrates modular STT and TTS systems with YAML-based configuration management.
 
 import asyncio
 import re
+import logging
+import time
+import json
+from pathlib import Path
 from dataclasses import dataclass, field
-from typing import Optional, List, Dict, Any
+from typing import Optional, List, Dict, Any, AsyncGenerator
 from datetime import datetime, timedelta
 from openai import OpenAI
+import anthropic
 
 # Import our modular systems and config loader
 from async_stt_module import AsyncSTTStreamer, STTEventType, STTResult
@@ -34,8 +39,16 @@ class UnifiedVoiceConversation:
         self.config = config
         self.state = ConversationState()
         
-        # Initialize LLM client
-        self.openai_client = OpenAI(api_key=config.conversation.openai_api_key)
+        # Initialize LLM clients
+        self.openai_client = None
+        self.anthropic_client = None
+        
+        if config.conversation.llm_provider == "openai":
+            self.openai_client = OpenAI(api_key=config.conversation.openai_api_key)
+        elif config.conversation.llm_provider == "anthropic":
+            if not config.conversation.anthropic_api_key:
+                raise ValueError("Anthropic API key is required when using Anthropic provider")
+            self.anthropic_client = anthropic.Anthropic(api_key=config.conversation.anthropic_api_key)
         
         # Initialize STT system
         self.stt = AsyncSTTStreamer(config.stt)
@@ -43,18 +56,94 @@ class UnifiedVoiceConversation:
         # Initialize TTS system
         self.tts = AsyncTTSStreamer(config.tts)
         
-        # Conversation management task
-        self.conversation_task = None
-        
         # Set up STT callbacks
         self._setup_stt_callbacks()
         
         # Apply logging configuration
         self._setup_logging()
+        
+        # Create llm_logs directory
+        self.llm_logs_dir = Path("llm_logs")
+        self.llm_logs_dir.mkdir(exist_ok=True)
+        
+        # Create conversation_logs directory and initialize conversation log
+        self.conversation_logs_dir = Path("conversation_logs")
+        self.conversation_logs_dir.mkdir(exist_ok=True)
+        
+        # Initialize conversation log file
+        self._init_conversation_log()
+        
+        # Load conversation history if specified
+        self._load_history_file()
+        
+        # Log any loaded history to the conversation log
+        self._log_loaded_history()
+        
+        # Conversation management task
+        self.conversation_task = None
+    
+    def _init_conversation_log(self):
+        """Initialize conversation log file with timestamp."""
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        self.conversation_log_file = self.conversation_logs_dir / f"conversation_{timestamp}.md"
+        
+        # Write header
+        with open(self.conversation_log_file, 'w', encoding='utf-8') as f:
+            f.write(f"# Conversation Log - {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n\n")
+        
+        print(f"📝 Conversation logging to: {self.conversation_log_file}")
+    
+    def _log_conversation_turn(self, role: str, content: str):
+        """Log a conversation turn in history file format.
+        
+        Args:
+            role: 'user' or 'assistant'
+            content: The message content
+        """
+        try:
+            # Determine participant name based on role
+            if role == "user":
+                participant = "H"
+            else:  # assistant
+                # Use the AI participant name from prefill config if available
+                participant = "Claude"
+                if (hasattr(self.config.conversation, 'prefill_participants') and 
+                    self.config.conversation.prefill_participants and 
+                    len(self.config.conversation.prefill_participants) > 1):
+                    participant = self.config.conversation.prefill_participants[1]
+            
+            # Append to conversation log
+            with open(self.conversation_log_file, 'a', encoding='utf-8') as f:
+                f.write(f"{participant}: {content}\n\n")
+                
+        except Exception as e:
+            print(f"⚠️ Failed to log conversation turn: {e}")
+            self.logger.error(f"Failed to log conversation turn: {e}")
+    
+    def _log_loaded_history(self):
+        """Log any existing conversation history to the conversation log."""
+        if not self.state.conversation_history:
+            return
+            
+        try:
+            with open(self.conversation_log_file, 'a', encoding='utf-8') as f:
+                f.write("## Loaded History\n\n")
+                
+            # Log each message from loaded history
+            for msg in self.state.conversation_history:
+                self._log_conversation_turn(msg["role"], msg["content"])
+                
+            with open(self.conversation_log_file, 'a', encoding='utf-8') as f:
+                f.write("## New Conversation\n\n")
+                
+            print(f"📜 Logged {len(self.state.conversation_history)} history messages to conversation log")
+            
+        except Exception as e:
+            print(f"⚠️ Failed to log loaded history: {e}")
+            self.logger.error(f"Failed to log loaded history: {e}")
     
     def _setup_logging(self):
         """Configure logging based on configuration."""
-        import logging
         
         # Set logging level
         level = getattr(logging, self.config.logging.level.upper(), logging.INFO)
@@ -67,6 +156,189 @@ class UnifiedVoiceConversation:
         self.show_tts_chunks = self.config.logging.show_tts_chunks
         self.show_audio_debug = self.config.logging.show_audio_debug
     
+    def _generate_log_filename(self, log_type: str, timestamp: float = None) -> str:
+        """Generate a unique filename for LLM logs."""
+        if timestamp is None:
+            timestamp = time.time()
+        
+        dt = datetime.fromtimestamp(timestamp)
+        formatted_time = dt.strftime("%Y%m%d_%H%M%S_%f")[:-3]  # Include milliseconds
+        
+        return f"{formatted_time}_{log_type}.json"
+    
+    def _log_llm_request(self, messages: List[Dict[str, str]], model: str, timestamp: float, provider: str = None) -> str:
+        """Log LLM request to a file and return the filename."""
+        filename = self._generate_log_filename("request", timestamp)
+        filepath = self.llm_logs_dir / filename
+        
+        request_data = {
+            "timestamp": timestamp,
+            "datetime": datetime.fromtimestamp(timestamp).isoformat(),
+            "provider": provider or self.config.conversation.llm_provider,
+            "model": model,
+            "messages": messages,
+            "max_tokens": self.config.conversation.max_tokens,
+            "stream": True,
+            "conversation_mode": self.config.conversation.conversation_mode,
+            "request_type": "llm_completion"
+        }
+        
+        try:
+            with open(filepath, 'w', encoding='utf-8') as f:
+                json.dump(request_data, f, indent=2, ensure_ascii=False)
+            print(f"📝 LLM request logged: {filename}")
+        except Exception as e:
+            print(f"❌ Failed to log LLM request: {e}")
+        
+        return filename
+    
+    def _log_llm_response(self, response_content: str, request_filename: str, timestamp: float, 
+                         was_interrupted: bool = False, error: str = None, provider: str = None) -> str:
+        """Log LLM response to a file and return the filename."""
+        filename = self._generate_log_filename("response", timestamp)
+        filepath = self.llm_logs_dir / filename
+        
+        response_data = {
+            "timestamp": timestamp,
+            "datetime": datetime.fromtimestamp(timestamp).isoformat(),
+            "provider": provider or self.config.conversation.llm_provider,
+            "request_file": request_filename,
+            "response_content": response_content,
+            "was_interrupted": was_interrupted,
+            "error": error,
+            "content_length": len(response_content) if response_content else 0,
+            "response_type": "llm_completion"
+        }
+        
+        try:
+            with open(filepath, 'w', encoding='utf-8') as f:
+                json.dump(response_data, f, indent=2, ensure_ascii=False)
+            print(f"📝 LLM response logged: {filename}")
+        except Exception as e:
+            print(f"❌ Failed to log LLM response: {e}")
+        
+        return filename
+
+    def _convert_to_prefill_format(self, messages: List[Dict[str, str]]) -> tuple[str, str]:
+        """Convert chat messages to prefill format.
+        Returns (user_message, assistant_message_prefix).
+        """
+        user_message = self.config.conversation.prefill_user_message
+        
+        # Build conversation turns from history
+        conversation_turns = []
+        human_name = self.config.conversation.prefill_participants[0]  # Default: 'H'
+        ai_name = self.config.conversation.prefill_participants[1]     # Default: 'Claude'
+        
+        for msg in messages:
+            if msg["role"] == "system":
+                continue  # Skip system messages in prefill mode
+            elif msg["role"] == "user":
+                conversation_turns.append(f"{human_name}: {msg['content']}")
+            elif msg["role"] == "assistant":
+                conversation_turns.append(f"{ai_name}: {msg['content']}")
+        
+        # Join turns with double newlines
+        assistant_content = "\n\n".join(conversation_turns)
+        if assistant_content:
+            assistant_content += f"\n\n{ai_name}:"
+        else:
+            assistant_content = f"{ai_name}:"
+            
+        return user_message, assistant_content
+
+    def _convert_from_prefill_format(self, prefill_response: str) -> str:
+        """Extract the actual response from prefill format.
+        Removes the participant prefix if present.
+        """
+        ai_name = self.config.conversation.prefill_participants[1]  # Default: 'Claude'
+        
+        # Remove leading AI name prefix if present
+        if prefill_response.startswith(f"{ai_name}:"):
+            return prefill_response[len(f"{ai_name}:"):].strip()
+        
+        return prefill_response.strip()
+
+    def _parse_history_file(self, file_path: str) -> List[Dict[str, str]]:
+        """Parse history file and convert to message format.
+        
+        Expects format:
+        H: human message
+        
+        Claude: assistant response
+        
+        H: next human message
+        """
+        try:
+            with open(file_path, 'r', encoding='utf-8') as f:
+                content = f.read().strip()
+            
+            messages = []
+            current_role = None
+            current_content = []
+            
+            for line in content.split('\n'):
+                line = line.strip()
+                
+                if line.startswith('H: '):
+                    # Save previous message if exists
+                    if current_role and current_content:
+                        messages.append({
+                            "role": "user" if current_role == "H" else "assistant",
+                            "content": '\n'.join(current_content).strip()
+                        })
+                    
+                    # Start new human message
+                    current_role = "H"
+                    current_content = [line[3:]]  # Remove "H: " prefix
+                    
+                elif line.startswith('Claude: '):
+                    # Save previous message if exists
+                    if current_role and current_content:
+                        messages.append({
+                            "role": "user" if current_role == "H" else "assistant",
+                            "content": '\n'.join(current_content).strip()
+                        })
+                    
+                    # Start new assistant message
+                    current_role = "Claude"
+                    current_content = [line[8:]]  # Remove "Claude: " prefix
+                    
+                elif line and current_role:
+                    # Continue current message
+                    current_content.append(line)
+                # Skip empty lines or lines without a role
+            
+            # Add final message if exists
+            if current_role and current_content:
+                messages.append({
+                    "role": "user" if current_role == "H" else "assistant",
+                    "content": '\n'.join(current_content).strip()
+                })
+            
+            return messages
+            
+        except Exception as e:
+            print(f"❌ Failed to parse history file {file_path}: {e}")
+            return []
+
+    def _load_history_file(self):
+        """Load conversation history from file if specified."""
+        if not self.config.conversation.history_file:
+            return
+            
+        file_path = self.config.conversation.history_file
+        print(f"📜 Loading conversation history from: {file_path}")
+        
+        history_messages = self._parse_history_file(file_path)
+        
+        if history_messages:
+            self.state.conversation_history.extend(history_messages)
+            print(f"✅ Loaded {len(history_messages)} messages from history file")
+            print(f"📊 Conversation context: {sum(len(msg['content']) for msg in history_messages)} characters")
+        else:
+            print(f"⚠️  No messages loaded from history file")
+
     def _setup_stt_callbacks(self):
         """Set up callbacks for STT events."""
         
@@ -393,12 +665,15 @@ class UnifiedVoiceConversation:
                 "content": user_input
             })
             
+            # Log conversation turn
+            self._log_conversation_turn("user", user_input)
+            
             print("🤖 Getting LLM response...")
             
             # Prepare messages
             messages = [
                 {"role": "system", "content": self.config.conversation.system_prompt}
-            ] + self.state.conversation_history[-10:]  # Keep last 10 exchanges
+            ] + self.state.conversation_history[-200:]  # Keep last 200 exchanges
             
             # Stream LLM response to TTS
             await self._stream_llm_to_tts(messages)
@@ -414,83 +689,233 @@ class UnifiedVoiceConversation:
     async def _stream_llm_to_tts(self, messages: List[Dict[str, str]]):
         """Stream LLM completion to TTS."""
         assistant_response = ""  # Initialize at method level to fix scoping
+        request_timestamp = time.time()
+        request_filename = ""
+        was_interrupted = False
+        error_msg = None
         
         try:
             self.state.is_speaking = True
             
             # Create async generator for LLM response
             async def llm_generator():
-                nonlocal assistant_response  # Access the method-level variable
-                # Use the configured model from YAML
-                models_to_try = [self.config.conversation.llm_model]
-                response = None
+                nonlocal assistant_response, request_filename, was_interrupted, error_msg  # Access the method-level variables
                 
-                for model in models_to_try:
-                    try:
-                        response = self.openai_client.chat.completions.create(
-                            model=model,
-                            messages=messages,
-                            stream=True,
-                            max_tokens=self.config.conversation.max_tokens
-                        )
-                        break
-                    except Exception as e:
-                        print(f"Failed with model {model}: {e}")
-                        if model == models_to_try[-1]:
-                            yield "Sorry, I couldn't connect to any available models."
+                if self.config.conversation.llm_provider == "openai":
+                    async for chunk in self._stream_openai_response(messages, request_timestamp):
+                        # Check for interruption during LLM generation
+                        if not self.state.is_speaking or not self.state.is_processing_llm:
+                            print("🛑 LLM streaming interrupted by user")
+                            was_interrupted = True
+                            break
+                        
+                        if chunk is None:  # Error occurred
+                            error_msg = "OpenAI API error"
+                            yield "Sorry, I encountered an error with the language model."
                             return
-                        continue
-                
-                if not response:
-                    yield "Sorry, no models are available right now."
-                    return
-                
-                for chunk in response:
-                    # Check for interruption during LLM generation
-                    if not self.state.is_speaking or not self.state.is_processing_llm:
-                        print("🛑 LLM streaming interrupted by user")
-                        break
-                        
-                    if chunk.choices[0].delta.content:
-                        content = chunk.choices[0].delta.content
-                        assistant_response += content
-                        
+                            
+                        assistant_response += chunk
                         if self.show_tts_chunks:
-                            print(f"🔊 TTS chunk: {content}")
+                            print(f"🔊 TTS chunk: {chunk}")
+                        yield chunk
                         
-                        yield content
+                elif self.config.conversation.llm_provider == "anthropic":
+                    async for chunk in self._stream_anthropic_response(messages, request_timestamp):
+                        # Check for interruption during LLM generation
+                        if not self.state.is_speaking or not self.state.is_processing_llm:
+                            print("🛑 LLM streaming interrupted by user")
+                            was_interrupted = True
+                            break
+                        
+                        if chunk is None:  # Error occurred
+                            error_msg = "Anthropic API error"
+                            yield "Sorry, I encountered an error with the language model."
+                            return
+                            
+                        assistant_response += chunk
+                        if self.show_tts_chunks:
+                            print(f"🔊 TTS chunk: {chunk}")
+                        yield chunk
+                        
+                else:
+                    error_msg = f"Unsupported LLM provider: {self.config.conversation.llm_provider}"
+                    yield f"Sorry, unsupported language model provider: {self.config.conversation.llm_provider}"
                 
 
             
             # Use TTS to speak the streaming response
             result = await self.tts.speak_stream(llm_generator())
             
-            if result and self.state.is_speaking:
-                # Only add to history if response completed successfully AND wasn't interrupted
-                if assistant_response.strip():
-                    self.state.conversation_history.append({
-                        "role": "assistant", 
-                        "content": assistant_response.strip()
-                    })
-                    
-                    if self.config.development.enable_debug_mode:
-                        self.logger.debug(f"Complete assistant response added to history: {len(assistant_response)} chars")
+            # Use heuristic approach for conversation history (preserves exact LLM text)
+            spoken_heuristic = self.tts.get_spoken_text_heuristic().strip()
+            generated_vs_spoken = self.tts.get_generated_vs_spoken()
+            was_fully_spoken = self.tts.was_fully_spoken()
+            
+            if spoken_heuristic or generated_vs_spoken.get('spoken_whisper'):
+                print(f"🎙️ WHISPER TRACKING RESULTS:")
+                print(f"   Generated: {len(generated_vs_spoken['generated'])} chars")
+                print(f"   Whisper raw: {len(generated_vs_spoken['spoken_whisper'])} chars")
+                print(f"   Heuristic: {len(spoken_heuristic)} chars")
+                print(f"   Fully spoken: {was_fully_spoken}")
+                print(f"   Heuristic text: '{spoken_heuristic[:200]}...'")
+            
+            # Determine content for history using heuristic approach
+            content_for_history = spoken_heuristic if spoken_heuristic else assistant_response
+            
+            # Only add to history if we have meaningful content
+            if content_for_history.strip():
+                if was_fully_spoken:
+                    print(f"💬 History updated with full generated content: '{content_for_history[:100]}...'")
+                else:
+                    print(f"💬 History updated with HEURISTIC content: '{content_for_history[:100]}...'")
                 
-                print("✅ Response completed successfully")
-            else:
-                print("🛑 Response was interrupted - no history added")
+                self.state.conversation_history.append({
+                    "role": "assistant",
+                    "content": content_for_history
+                })
                 
+                # Log conversation turn
+                self._log_conversation_turn("assistant", content_for_history)
+            elif was_interrupted and not content_for_history:
+                print("🛑 Response was interrupted - no spoken content to add")
+            
         except Exception as e:
-            print(f"TTS streaming error: {e}")
-            self.logger.error(f"TTS streaming error: {e}")
+            error_msg = str(e)
+            print(f"Error in _stream_llm_to_tts: {e}")
+            self.logger.error(f"Error in _stream_llm_to_tts: {e}")
+            await self._speak_text("Sorry, I encountered an error processing your request.")
         finally:
+            # Log the response (or error) after completion
+            response_timestamp = time.time()
+            if request_filename:  # Only log if we made a request
+                self._log_llm_response(
+                    assistant_response, 
+                    request_filename, 
+                    response_timestamp, 
+                    was_interrupted, 
+                    error_msg,
+                    self.config.conversation.llm_provider
+                )
+            
             self.state.is_speaking = False
+            print("✅ Response completed successfully")
+
+    async def _stream_openai_response(self, messages: List[Dict[str, str]], request_timestamp: float):
+        """Stream response from OpenAI API."""
+        models_to_try = [self.config.conversation.llm_model]
+        
+        for model in models_to_try:
+            try:
+                # Log the request before making the API call
+                request_filename = self._log_llm_request(messages, model, request_timestamp, "openai")
+                
+                response = self.openai_client.chat.completions.create(
+                    model=model,
+                    messages=messages,
+                    stream=True,
+                    max_tokens=self.config.conversation.max_tokens
+                )
+                
+                for chunk in response:
+                    if chunk.choices[0].delta.content:
+                        yield chunk.choices[0].delta.content
+                return  # Success
+                
+            except Exception as e:
+                print(f"Failed with OpenAI model {model}: {e}")
+                if model == models_to_try[-1]:
+                    yield None  # Signal error
+                    return
+
+    async def _stream_anthropic_response(self, messages: List[Dict[str, str]], request_timestamp: float):
+        """Stream response from Anthropic API."""
+        models_to_try = [self.config.conversation.llm_model]
+        
+        for model in models_to_try:
+            try:
+                # Convert to appropriate format based on conversation mode
+                if self.config.conversation.conversation_mode == "prefill":
+                    user_message, assistant_prefix = self._convert_to_prefill_format(messages)
+                    
+                    # Log the request before making the API call
+                    prefill_messages = [
+                        {"role": "user", "content": user_message},
+                        {"role": "assistant", "content": assistant_prefix}
+                    ]
+                    request_filename = self._log_llm_request(prefill_messages, model, request_timestamp, "anthropic")
+                    
+                    # Use Anthropic's completion API with prefill and CLI system prompt
+                    response = self.anthropic_client.messages.create(
+                        model=model,
+                        max_tokens=self.config.conversation.max_tokens,
+                        system=self.config.conversation.prefill_system_prompt,
+                        messages=[
+                            {"role": "user", "content": user_message},
+                            {"role": "assistant", "content": assistant_prefix}
+                        ],
+                        stop_sequences=["\n\nH:", "\n\nClaude:"],
+                        stream=True
+                    )
+                else:
+                    # Chat mode - convert system message if present
+                    anthropic_messages = []
+                    system_message = None
+                    
+                    for msg in messages:
+                        if msg["role"] == "system":
+                            system_message = msg["content"]
+                        else:
+                            anthropic_messages.append(msg)
+                    
+                    # Log the request before making the API call
+                    request_filename = self._log_llm_request(anthropic_messages, model, request_timestamp, "anthropic")
+                    
+                    # Use Anthropic's chat API
+                    kwargs = {
+                        "model": model,
+                        "max_tokens": self.config.conversation.max_tokens,
+                        "messages": anthropic_messages,
+                        "stream": True
+                    }
+                    
+                    if system_message:
+                        kwargs["system"] = system_message
+                    
+                    response = self.anthropic_client.messages.create(**kwargs)
+                
+                # Stream the response
+                accumulated_response = ""
+                for chunk in response:
+                    if chunk.type == "content_block_delta":
+                        if hasattr(chunk.delta, 'text'):
+                            content = chunk.delta.text
+                            accumulated_response += content
+                            yield content
+                
+                # Convert from prefill format if needed
+                if self.config.conversation.conversation_mode == "prefill":
+                    # The response should already be clean since we prefilled with the participant name
+                    pass  # No additional processing needed
+                    
+                return  # Success
+                
+            except Exception as e:
+                print(f"Failed with Anthropic model {model}: {e}")
+                if model == models_to_try[-1]:
+                    yield None  # Signal error
+                    return
     
     async def _speak_text(self, text: str):
         """Speak a simple text message."""
         try:
             self.state.is_speaking = True
             result = await self.tts.speak_text(text)
+            
+            # Log Whisper tracking for testing
+            spoken_heuristic = self.tts.get_spoken_text_heuristic().strip()
+            if spoken_heuristic:
+                print(f"🎙️ Simple speech heuristic result: '{spoken_heuristic[:100]}...'")
+            
             if not result:
                 print("🛑 Speech was interrupted")
         finally:

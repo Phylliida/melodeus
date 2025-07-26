@@ -2,6 +2,7 @@
 """
 Async TTS Module for ElevenLabs WebSocket Streaming
 Provides interruptible text-to-speech with real-time audio playback.
+Now includes Whisper-based tracking of actual spoken content.
 """
 
 import asyncio
@@ -12,8 +13,19 @@ import pyaudio
 import threading
 import queue
 import time
-from typing import Optional, AsyncGenerator, Dict, Any
+import numpy as np
+from typing import Optional, AsyncGenerator, Dict, Any, List
 from dataclasses import dataclass
+from scipy import signal
+
+# Import Whisper TTS Tracker
+try:
+    from whisper_tts_tracker import WhisperTTSTracker, SpokenContent
+    WHISPER_AVAILABLE = True
+except ImportError:
+    print("⚠️ Whisper TTS Tracker not available - spoken content tracking disabled")
+    WHISPER_AVAILABLE = False
+    SpokenContent = None
 
 @dataclass
 class TTSConfig:
@@ -30,7 +42,7 @@ class TTSConfig:
     buffer_size: int = 2048
 
 class AsyncTTSStreamer:
-    """Async TTS Streamer with interruption capabilities."""
+    """Async TTS Streamer with interruption capabilities and spoken content tracking."""
     
     def __init__(self, config: TTSConfig):
         self.config = config
@@ -49,6 +61,22 @@ class AsyncTTSStreamer:
         self._stop_requested = False
         self._interrupted = False
         
+        # Whisper tracking
+        self.whisper_tracker: Optional[WhisperTTSTracker] = None
+        self.track_spoken_content = WHISPER_AVAILABLE
+        self.current_spoken_content: List[SpokenContent] = []
+        self.generated_text = ""  # Text that was sent to TTS
+        
+        # Initialize Whisper tracker if available
+        if WHISPER_AVAILABLE:
+            try:
+                self.whisper_tracker = WhisperTTSTracker(sample_rate=16000)
+                print("✅ Whisper TTS tracking enabled")
+            except Exception as e:
+                print(f"⚠️ Failed to initialize Whisper tracker: {e}")
+                self.whisper_tracker = None
+                self.track_spoken_content = False
+        
     async def speak_text(self, text: str) -> bool:
         """
         Speak the given text with interruption support.
@@ -66,8 +94,20 @@ class AsyncTTSStreamer:
             self._stop_requested = False
             self._interrupted = False
             
+            # Store generated text and start Whisper tracking
+            self.generated_text = text
+            self.current_spoken_content.clear()
+            
+            if self.whisper_tracker and self.track_spoken_content:
+                self.whisper_tracker.start_tracking(f"tts_session_{int(time.time())}")
+            
             await self._start_streaming(text)
-            return not self._interrupted
+            
+            # If we reached here without stop being requested, it completed successfully
+            completed_successfully = not self._stop_requested
+            self._interrupted = self._stop_requested  # Set interrupted flag based on actual completion
+            
+            return completed_successfully
             
         except Exception as e:
             print(f"TTS error: {e}")
@@ -92,8 +132,20 @@ class AsyncTTSStreamer:
             self._stop_requested = False
             self._interrupted = False
             
+            # Initialize for Whisper tracking
+            self.generated_text = ""
+            self.current_spoken_content.clear()
+            
+            if self.whisper_tracker and self.track_spoken_content:
+                self.whisper_tracker.start_tracking(f"tts_stream_session_{int(time.time())}")
+            
             await self._start_streaming_generator(text_generator)
-            return not self._interrupted
+            
+            # If we reached here without stop being requested, it completed successfully
+            completed_successfully = not self._stop_requested
+            self._interrupted = self._stop_requested  # Set interrupted flag based on actual completion
+            
+            return completed_successfully
             
         except Exception as e:
             print(f"TTS streaming error: {e}")
@@ -171,6 +223,8 @@ class AsyncTTSStreamer:
                 break
                 
             text_buffer += text_chunk
+            # Accumulate for Whisper tracking
+            self.generated_text += text_chunk
             
             # Send chunks at natural breaks
             if any(punct in text_buffer for punct in ['.', '!', '?', ',', ';']) or len(text_buffer) > 40:
@@ -348,7 +402,7 @@ class AsyncTTSStreamer:
         print("✅ Audio playback fully stopped")
     
     def _audio_playback_worker(self):
-        """Worker thread for audio playback with responsive stop handling."""
+        """Worker thread for audio playback with responsive stop handling and audio capture."""
         print("🎵 Audio playback worker started")
         
         while self.is_playing and not self._stop_requested:
@@ -359,7 +413,31 @@ class AsyncTTSStreamer:
                 # Double-check stop status before writing
                 if audio_chunk and self.stream and not self._stop_requested and self.is_playing:
                     try:
+                        # Play the audio
                         self.stream.write(audio_chunk)
+                        
+                        # Capture audio for Whisper tracking
+                        if self.whisper_tracker and self.track_spoken_content:
+                            try:
+                                # Convert bytes to numpy array for Whisper
+                                # ElevenLabs returns PCM 22050Hz, Whisper needs 16kHz
+                                audio_np = np.frombuffer(audio_chunk, dtype=np.int16).astype(np.float32) / 32768.0
+                                
+                                # Proper resampling from 22050Hz to 16000Hz using scipy
+                                if len(audio_np) > 0:
+                                    # Use scipy's high-quality resampling with anti-aliasing
+                                    original_rate = self.config.sample_rate  # 22050
+                                    target_rate = 16000
+                                    
+                                    # Calculate target number of samples
+                                    num_samples = int(len(audio_np) * target_rate / original_rate)
+                                    if num_samples > 0:
+                                        # Use scipy.signal.resample for high-quality resampling
+                                        audio_16k = signal.resample(audio_np, num_samples)
+                                        self.whisper_tracker.add_audio_chunk(audio_16k.astype(np.float32))
+                            except Exception as e:
+                                print(f"Whisper audio capture error: {e}")
+                        
                         self.audio_queue.task_done()
                     except Exception as e:
                         print(f"Audio write error: {e}")
@@ -409,7 +487,103 @@ class AsyncTTSStreamer:
             self.audio_task = None
         
         self._stop_audio_playback()
+        
+        # Stop Whisper tracking and collect spoken content
+        if self.whisper_tracker and self.track_spoken_content:
+            try:
+                self.current_spoken_content = self.whisper_tracker.stop_tracking()
+                print(f"🎙️ Captured {len(self.current_spoken_content)} spoken segments")
+            except Exception as e:
+                print(f"Error stopping Whisper tracking: {e}")
     
+    def get_spoken_content(self) -> List[SpokenContent]:
+        """
+        Get the actual spoken content from the last TTS session.
+        
+        Returns:
+            List of SpokenContent objects representing what was actually spoken
+        """
+        return self.current_spoken_content.copy()
+    
+    def get_spoken_text(self) -> str:
+        """
+        Get the actual spoken text as a single string.
+        
+        Returns:
+            Combined text of what was actually spoken
+        """
+        return " ".join(content.text for content in self.current_spoken_content)
+    
+    def get_spoken_text_heuristic(self) -> str:
+        """
+        Get spoken text using character-count heuristic from original generated text.
+        Uses Whisper's character count but preserves exact LLM vocabulary/formatting.
+        Only applies heuristic when there was an interruption - otherwise returns full text.
+        
+        Returns:
+            Portion of original generated text that was likely spoken
+        """
+        if not self.generated_text:
+            return ""
+        
+        # If TTS was interrupted, use Whisper character count heuristic
+        if self._interrupted and self.current_spoken_content:
+            # Get total character count from Whisper
+            whisper_char_count = sum(len(content.text) for content in self.current_spoken_content)
+            
+            if whisper_char_count == 0:
+                return ""
+            
+            # Find this position in original text
+            target_position = min(whisper_char_count, len(self.generated_text))
+            
+            # Round up to nearest complete word boundary
+            if target_position >= len(self.generated_text):
+                # If Whisper captured more than generated (shouldn't happen), return full text
+                return self.generated_text
+            
+            # Find the end of the word at target position
+            word_end_position = target_position
+            
+            # If we're in the middle of a word, find the end
+            while (word_end_position < len(self.generated_text) and 
+                   self.generated_text[word_end_position] not in [' ', '.', ',', '!', '?', ';', ':', '\n']):
+                word_end_position += 1
+            
+            return self.generated_text[:word_end_position].strip()
+        
+        else:
+            # TTS completed successfully - return full generated text
+            return self.generated_text
+    
+    def get_generated_vs_spoken(self) -> Dict[str, str]:
+        """
+        Compare generated text vs actually spoken text.
+        
+        Returns:
+            Dictionary with 'generated', 'spoken_whisper', and 'spoken_heuristic' keys
+        """
+        return {
+            "generated": self.generated_text,
+            "spoken_whisper": self.get_spoken_text(),
+            "spoken_heuristic": self.get_spoken_text_heuristic()
+        }
+    
+    def was_fully_spoken(self) -> bool:
+        """
+        Check if the generated text was fully spoken (not interrupted).
+        Uses heuristic approach based on character count.
+        
+        Returns:
+            True if likely fully spoken, False if interrupted
+        """
+        spoken_heuristic = self.get_spoken_text_heuristic()
+        if not self.generated_text or not spoken_heuristic:
+            return False
+        
+        # If heuristic captured at least 90% of generated text, consider it fully spoken
+        return len(spoken_heuristic) >= (len(self.generated_text) * 0.9)
+
     async def cleanup(self):
         """Clean up all resources."""
         await self.stop()
