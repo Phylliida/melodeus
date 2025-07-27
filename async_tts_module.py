@@ -67,6 +67,12 @@ class AsyncTTSStreamer:
         self._stop_requested = False
         self._interrupted = False
         
+        # Multi-voice completion tracking
+        self._websockets_completed = 0
+        self._total_websockets = 0
+        self._audio_completion_event = asyncio.Event()
+        self._final_audio_received = False
+        
         # Whisper tracking
         self.whisper_tracker: Optional[WhisperTTSTracker] = None
         self.track_spoken_content = WHISPER_AVAILABLE
@@ -184,6 +190,10 @@ class AsyncTTSStreamer:
             # Store generated text and start Whisper tracking
             self.generated_text = ""
             self.current_spoken_content.clear()
+            self._websockets_completed = 0
+            self._total_websockets = 0
+            self._audio_completion_event.clear()
+            self._final_audio_received = False
             
             if self.track_spoken_content and self.whisper_tracker:
                 self.whisper_tracker.start_tracking()
@@ -229,9 +239,10 @@ class AsyncTTSStreamer:
             
             # Wait for all audio to finish playing
             if not self._stop_requested:
-                print("⏳ Waiting for audio queue to drain...")
+                print("⏳ Waiting for audio completion...")
                 await self._wait_for_audio_completion()
-                print("✅ Audio queue drained")
+                print("✅ Audio completion finished")
+            
             
             # Stop Whisper tracking
             if self.track_spoken_content and self.whisper_tracker:
@@ -267,6 +278,9 @@ class AsyncTTSStreamer:
             if text_part.strip():
                 voice_id = self.config.emotive_voice_id if is_emotive else self.config.voice_id
                 voice_settings = self._get_voice_settings(is_emotive)
+                
+                # Track total websockets for completion detection
+                self._total_websockets += 1
                 
                 # Create a separate connection for this voice part
                 await self._speak_text_part(text_part, voice_id, voice_settings)
@@ -346,10 +360,24 @@ class AsyncTTSStreamer:
                     audio_data = base64.b64decode(data["audio"])
                     self.audio_queue.put(audio_data)
                     
+                    # Update last audio time for completion tracking
+                    self._last_audio_time = time.time()
+                    
                     # NOTE: For multi-voice, Whisper tracking is handled by the audio playback thread
                     # to avoid double-tracking from multiple websocket connections
                 
                 elif data.get("isFinal"):
+                    # This websocket connection has finished
+                    self._websockets_completed += 1
+                    print(f"🔊 Websocket completed ({self._websockets_completed}/{self._total_websockets})")
+                    
+                    # Check if all websockets are complete
+                    if self._websockets_completed >= self._total_websockets:
+                        self._final_audio_received = True
+                        print("🔊 All websockets completed, starting final audio detection")
+                        # Start monitoring for audio queue to finish
+                        asyncio.create_task(self._monitor_audio_queue_completion())
+                    
                     break
                     
         except websockets.exceptions.ConnectionClosed:
@@ -357,30 +385,51 @@ class AsyncTTSStreamer:
         except Exception as e:
             print(f"WebSocket audio handling error: {e}")
 
-    async def _wait_for_audio_completion(self):
-        """Wait for the audio queue to drain completely in multi-voice mode."""
+    async def _monitor_audio_queue_completion(self):
+        """Monitor for audio queue completion after all websockets finish."""
         try:
-            # Wait for queue to drain (similar to regular streaming)
-            max_wait_time = 15.0  # Maximum wait time in seconds
-            wait_start = time.time()
+            max_wait = 30.0  # Maximum wait time
+            start_time = time.time()
             
-            print(f"🔊 Waiting for audio queue (current size: {self.audio_queue.qsize()})")
+            print("🔊 Monitoring audio queue for completion...")
             
-            while not self.audio_queue.empty() and not self._stop_requested:
-                if time.time() - wait_start > max_wait_time:
-                    print("⏰ Audio queue drain timeout")
+            while not self._stop_requested and (time.time() - start_time) < max_wait:
+                await asyncio.sleep(0.2)  # Check more frequently
+                
+                # If queue is empty or very small, assume playback is done
+                queue_size = self.audio_queue.qsize()
+                if queue_size <= 5:  # Allow small buffer
+                    print(f"🔊 Audio queue nearly empty ({queue_size} chunks), signaling completion")
+                    # Wait a tiny bit more for final chunks
+                    await asyncio.sleep(1.0)
+                    self._audio_completion_event.set()
                     break
-                    
+                
                 # Show progress occasionally
-                if int(time.time() - wait_start) % 2 == 0:
-                    print(f"🔊 Still waiting... queue size: {self.audio_queue.qsize()}")
-                    
-                await asyncio.sleep(0.1)
+                if int(time.time() - start_time) % 3 == 0:
+                    print(f"🔊 Queue monitoring: {queue_size} chunks remaining")
             
-            # Additional small wait to ensure last audio chunk finishes playing
+            # Timeout case
+            if not self._stop_requested and not self._audio_completion_event.is_set():
+                print("⏰ Audio queue monitor timeout")
+                self._audio_completion_event.set()
+                
+        except Exception as e:
+            print(f"Audio queue monitor error: {e}")
+            self._audio_completion_event.set()
+
+    async def _wait_for_audio_completion(self):
+        """Wait for audio playback to complete in multi-voice mode."""
+        try:
+            print(f"🔊 Waiting for all websockets and audio queue completion")
+            
+            # Wait for the completion event to be set by the queue monitor
+            await self._audio_completion_event.wait()
+            
             if not self._stop_requested:
-                print("🔊 Queue empty, waiting for final playback to complete...")
-                await asyncio.sleep(1.0)  # Give more time for final audio to play
+                print("✅ Audio completion detected")
+            else:
+                print("🛑 Audio completion wait interrupted")
                 
         except Exception as e:
             print(f"Audio completion wait error: {e}")

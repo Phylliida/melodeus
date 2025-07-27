@@ -31,6 +31,8 @@ class ConversationState:
     utterance_buffer: List[str] = field(default_factory=list)
     conversation_history: List[Dict[str, str]] = field(default_factory=list)
     current_speaker: Optional[int] = None
+    # Track what utterance is currently being processed
+    current_processing_utterance: Optional[str] = None
 
 class UnifiedVoiceConversation:
     """Unified voice conversation system with YAML configuration."""
@@ -546,20 +548,27 @@ class UnifiedVoiceConversation:
             self.state.is_speaking = False
             self.state.is_processing_llm = False
             print("🔄 All AI processing interrupted and state cleared")
-            print(f"🔄 Utterance buffer now has: {len(self.state.utterance_buffer)} items")
             
-            # Force immediate processing of the interrupting utterance
-            if len(self.state.utterance_buffer) > 0:
-                print("🚀 Force processing interrupting utterance immediately")
-                asyncio.create_task(self._force_process_buffer())
-        
-        # Add to utterance buffer
+            # The currently processing utterance gets interrupted, but we keep 
+            # any unprocessed utterances in the buffer and add the new one
+            if self.state.current_processing_utterance:
+                print(f"🗑️ Discarding interrupted utterance: '{self.state.current_processing_utterance}'")
+                self.state.current_processing_utterance = None
+            
+            print(f"📝 Keeping {len(self.state.utterance_buffer)} unprocessed utterances and adding interruption")
+            
+        # Always add the new utterance to buffer (whether interrupting or not)
         self.state.utterance_buffer.append(result.text)
         self.state.last_utterance_time = result.timestamp
         self.state.current_speaker = result.speaker_id
         
         print(f"📝 Added to buffer: '{result.text}' at {result.timestamp}")
         print(f"📊 Buffer size: {len(self.state.utterance_buffer)}, Last time: {self.state.last_utterance_time}")
+        
+        if interrupted:
+            # Force immediate processing of the interrupting utterance
+            print("🚀 Force processing after interruption")
+            asyncio.create_task(self._force_process_buffer())
         
         if self.config.development.enable_debug_mode:
             self.logger.debug(f"Utterance added to buffer. Buffer size: {len(self.state.utterance_buffer)}")
@@ -693,12 +702,15 @@ class UnifiedVoiceConversation:
                     if self.config.development.enable_debug_mode:
                         self.logger.debug(f"LLM submission triggered: {reason}")
                     
-                    await self._process_with_llm(combined_transcript)
+                    # Take a snapshot of current buffer to process
+                    buffer_snapshot = self.state.utterance_buffer.copy()
                     
-                    # Clear buffer and reset timing
+                    # Clear buffer immediately to allow new utterances during processing
                     self.state.utterance_buffer.clear()
                     self.state.last_utterance_time = None
-                    print(f"🧹 Buffer cleared after successful LLM submission")
+                    print(f"🧹 Buffer cleared before LLM submission (processing {len(buffer_snapshot)} utterances)")
+                    
+                    await self._process_with_llm(combined_transcript)
                 else:
                     # Debug: show why we're not submitting
                     if self.state.utterance_buffer and (now - last_debug_time).total_seconds() >= 2.0:
@@ -742,26 +754,20 @@ class UnifiedVoiceConversation:
         
         try:
             self.state.is_processing_llm = True
+            self.state.current_processing_utterance = user_input
             print(f"🔄 Starting LLM processing for: '{user_input}'")
             
-            # Add to conversation history
-            self.state.conversation_history.append({
-                "role": "user",
-                "content": user_input
-            })
-            
-            # Log conversation turn
-            self._log_conversation_turn("user", user_input)
+            # Prepare messages with the new user input (but don't add to history yet)
+            messages = [
+                {"role": "system", "content": self.config.conversation.system_prompt}
+            ] + self.state.conversation_history[-200:] + [
+                {"role": "user", "content": user_input}
+            ]
             
             print("🤖 Getting LLM response...")
             
-            # Prepare messages
-            messages = [
-                {"role": "system", "content": self.config.conversation.system_prompt}
-            ] + self.state.conversation_history[-200:]  # Keep last 200 exchanges
-            
-            # Stream LLM response to TTS
-            await self._stream_llm_to_tts(messages)
+            # Stream LLM response to TTS (this will add both user and assistant to history if successful)
+            await self._stream_llm_to_tts(messages, user_input)
             
         except Exception as e:
             print(f"LLM processing error: {e}")
@@ -769,15 +775,17 @@ class UnifiedVoiceConversation:
             await self._speak_text("Sorry, I encountered an error processing your request.")
         finally:
             self.state.is_processing_llm = False
+            self.state.current_processing_utterance = None
             print(f"🔄 LLM processing finished, state cleared")
     
-    async def _stream_llm_to_tts(self, messages: List[Dict[str, str]]):
+    async def _stream_llm_to_tts(self, messages: List[Dict[str, str]], user_input: str):
         """Stream LLM completion to TTS."""
         assistant_response = ""  # Initialize at method level to fix scoping
         request_timestamp = time.time()
         request_filename = ""
         was_interrupted = False
         error_msg = None
+        tts_processing_complete = False  # Flag to prevent duplicate processing
         
         try:
             self.state.is_speaking = True
@@ -832,6 +840,7 @@ class UnifiedVoiceConversation:
             print("🎭 Using multi-voice streaming")
             result = await self.tts.speak_stream_multi_voice(llm_generator())
             print(f"🎭 Multi-voice result: {result}")
+            tts_processing_complete = True
             
             if not result:
                 print("⚠️ Multi-voice TTS failed or was interrupted")
@@ -853,22 +862,30 @@ class UnifiedVoiceConversation:
             # Determine content for history using heuristic approach
             content_for_history = spoken_heuristic if spoken_heuristic else assistant_response
             
-            # Only add to history if we have meaningful content
+            # Add both user and assistant to history ONLY if we have meaningful assistant content
             if content_for_history.strip():
+                # First add the user input
+                self.state.conversation_history.append({
+                    "role": "user",
+                    "content": user_input
+                })
+                self._log_conversation_turn("user", user_input)
+                print(f"💬 Added user input to history: '{user_input[:100]}...'")
+                
+                # Then add the assistant response
                 if was_fully_spoken:
-                    print(f"💬 History updated with full generated content: '{content_for_history[:100]}...'")
+                    print(f"💬 Added assistant response to history: '{content_for_history[:100]}...' (full)")
                 else:
-                    print(f"💬 History updated with HEURISTIC content: '{content_for_history[:100]}...'")
+                    print(f"💬 Added assistant response to history: '{content_for_history[:100]}...' (heuristic)")
                 
                 self.state.conversation_history.append({
                     "role": "assistant",
                     "content": content_for_history
                 })
-                
-                # Log conversation turn
                 self._log_conversation_turn("assistant", content_for_history)
+                
             elif was_interrupted and not content_for_history:
-                print("🛑 Response was interrupted - no spoken content to add")
+                print("🛑 Response was interrupted - no content added to history (preserves conversation state)")
             
         except Exception as e:
             error_msg = str(e)
@@ -876,20 +893,24 @@ class UnifiedVoiceConversation:
             self.logger.error(f"Error in _stream_llm_to_tts: {e}")
             await self._speak_text("Sorry, I encountered an error processing your request.")
         finally:
-            # Log the response (or error) after completion
-            response_timestamp = time.time()
-            if request_filename:  # Only log if we made a request
-                self._log_llm_response(
-                    assistant_response, 
-                    request_filename, 
-                    response_timestamp, 
-                    was_interrupted, 
-                    error_msg,
-                    self.config.conversation.llm_provider
-                )
-            
-            self.state.is_speaking = False
-            print("✅ Response completed successfully")
+            # Only do cleanup if TTS processing was attempted
+            if tts_processing_complete:
+                # Log the response (or error) after completion
+                response_timestamp = time.time()
+                if request_filename:  # Only log if we made a request
+                    self._log_llm_response(
+                        assistant_response, 
+                        request_filename, 
+                        response_timestamp, 
+                        was_interrupted, 
+                        error_msg,
+                        self.config.conversation.llm_provider
+                    )
+                
+                self.state.is_speaking = False
+                print("✅ Response completed successfully")
+            else:
+                print("⚠️ TTS processing was not completed, skipping cleanup")
 
     async def _stream_openai_response(self, messages: List[Dict[str, str]], request_timestamp: float):
         """Stream response from OpenAI API."""
@@ -1036,17 +1057,19 @@ class UnifiedVoiceConversation:
         if not self.state.utterance_buffer or not self.state.last_utterance_time:
             return
             
-        # Get combined transcript
-        combined_transcript = " ".join(self.state.utterance_buffer).strip()
+        # Take a snapshot of current buffer to process
+        buffer_snapshot = self.state.utterance_buffer.copy()
+        combined_transcript = " ".join(buffer_snapshot).strip()
         
         if combined_transcript:
             print(f"🚀 Force processing buffer: '{combined_transcript}'")
-            await self._process_with_llm(combined_transcript)
             
-            # Clear buffer and reset timing
+            # Clear buffer immediately to allow new utterances during processing
             self.state.utterance_buffer.clear()
             self.state.last_utterance_time = None
-            print(f"🧹 Buffer cleared after forced processing")
+            print(f"🧹 Buffer cleared before forced processing (processing {len(buffer_snapshot)} utterances)")
+            
+            await self._process_with_llm(combined_transcript)
     
     async def cleanup(self):
         """Clean up all resources."""
