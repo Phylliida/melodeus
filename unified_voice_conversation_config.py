@@ -222,6 +222,9 @@ class UnifiedVoiceConversation:
     def _convert_to_prefill_format(self, messages: List[Dict[str, str]]) -> tuple[str, str]:
         """Convert chat messages to prefill format.
         Returns (user_message, assistant_message_prefix).
+        
+        For multi-speaker conversations, preserves speaker names in content
+        but ensures the conversation ends with the configured AI participant.
         """
         user_message = self.config.conversation.prefill_user_message
         
@@ -234,9 +237,16 @@ class UnifiedVoiceConversation:
             if msg["role"] == "system":
                 continue  # Skip system messages in prefill mode
             elif msg["role"] == "user":
-                conversation_turns.append(f"{human_name}: {msg['content']}")
+                # For multi-speaker support, content already includes speaker name
+                # Check if content already has speaker format, if not add human name
+                content = msg['content']
+                if not re.match(r'^[^:]+:\s', content):
+                    content = f"{human_name}: {content}"
+                conversation_turns.append(content)
             elif msg["role"] == "assistant":
-                conversation_turns.append(f"{ai_name}: {msg['content']}")
+                # For multi-speaker support, content already includes speaker name
+                # Just add it as-is since it preserves the original speaker context
+                conversation_turns.append(msg['content'])
         
         # Join turns with double newlines
         assistant_content = "\n\n".join(conversation_turns)
@@ -262,65 +272,139 @@ class UnifiedVoiceConversation:
     def _parse_history_file(self, file_path: str) -> List[Dict[str, str]]:
         """Parse history file and convert to message format.
         
-        Expects format:
-        H: human message
+        Supports multi-speaker conversations. All speakers are preserved in the conversation
+        history for LLM context, but for voice interaction only the configured participants
+        are used for the actual conversation flow.
         
-        Claude: assistant response
+        Expected format:
+        SpeakerName: message content
         
-        H: next human message
+        AnotherSpeaker: response content
         """
         try:
             with open(file_path, 'r', encoding='utf-8') as f:
                 content = f.read().strip()
             
+            # Get configured participant names for the current voice conversation
+            human_name = self.config.conversation.prefill_participants[0]  # e.g., 'H'
+            ai_name = self.config.conversation.prefill_participants[1]     # e.g., 'Claude 3 Opus'
+            
+            # Store all detected speakers for stop sequences
+            self.detected_speakers = set()
+            
+            import re
             messages = []
-            current_role = None
+            current_speaker = None
             current_content = []
             
             for line in content.split('\n'):
                 line = line.strip()
                 
-                if line.startswith('H: '):
-                    # Save previous message if exists
-                    if current_role and current_content:
-                        messages.append({
-                            "role": "user" if current_role == "H" else "assistant",
-                            "content": '\n'.join(current_content).strip()
-                        })
+                # Match speaker pattern: "SpeakerName: content" but be much more restrictive
+                # Only match lines that look like actual speaker names, not formatting or bullet points
+                speaker_match = re.match(r'^([A-Za-z0-9_\s\.]+):\s*(.*)', line)
+                
+                if speaker_match:
+                    speaker_name = speaker_match.group(1).strip()
+                    message_content = speaker_match.group(2).strip()
                     
-                    # Start new human message
-                    current_role = "H"
-                    current_content = [line[3:]]  # Remove "H: " prefix
+                    # Filter out obvious non-speaker patterns
+                    if self._is_valid_speaker_name(speaker_name):
+                        # Track all detected speakers
+                        self.detected_speakers.add(speaker_name)
+                        
+                        # Save previous message if exists
+                        if current_speaker and current_content:
+                            # Determine role based on configured participants
+                            # For multi-speaker: classify as 'user' if it's the human participant,
+                            # otherwise as 'assistant' to preserve the conversation context
+                            role = "user" if current_speaker == human_name else "assistant"
+                            
+                            # Include speaker name in content for multi-speaker context
+                            content_with_speaker = f"{current_speaker}: " + '\n'.join(current_content).strip()
+                            
+                            messages.append({
+                                "role": role,
+                                "content": content_with_speaker
+                            })
+                        
+                        # Start new message
+                        current_speaker = speaker_name
+                        current_content = [message_content] if message_content else []
+                    else:
+                        # Invalid speaker - treat as continuation of current message or skip
+                        if current_speaker:
+                            # Add the full line including the colon as continuation
+                            current_content.append(line)
+                        # If no current speaker, just skip the line
                     
-                elif line.startswith('Claude: '):
-                    # Save previous message if exists
-                    if current_role and current_content:
-                        messages.append({
-                            "role": "user" if current_role == "H" else "assistant",
-                            "content": '\n'.join(current_content).strip()
-                        })
-                    
-                    # Start new assistant message
-                    current_role = "Claude"
-                    current_content = [line[8:]]  # Remove "Claude: " prefix
-                    
-                elif line and current_role:
-                    # Continue current message
+                elif line and current_speaker:
+                    # Continue current message (current_speaker is already validated)
                     current_content.append(line)
-                # Skip empty lines or lines without a role
+                # Skip empty lines or lines without a speaker
             
-            # Add final message if exists
-            if current_role and current_content:
+            # Add final message if exists (current_speaker is already validated)
+            if current_speaker and current_content:
+                role = "user" if current_speaker == human_name else "assistant"
+                content_with_speaker = f"{current_speaker}: " + '\n'.join(current_content).strip()
+                
                 messages.append({
-                    "role": "user" if current_role == "H" else "assistant",
-                    "content": '\n'.join(current_content).strip()
+                    "role": role,
+                    "content": content_with_speaker
                 })
             
+            print(f"📊 Detected speakers in history: {sorted(self.detected_speakers)}")
             return messages
             
         except Exception as e:
             print(f"❌ Failed to parse history file {file_path}: {e}")
             return []
+
+    def _is_valid_speaker_name(self, speaker_name: str) -> bool:
+        """Validate if a string looks like a legitimate speaker name."""
+        # Exclude obvious non-speaker patterns
+        invalid_patterns = [
+            r'^\d+\.',  # Numbers like "1.", "2."
+            r'^-\s',    # Bullet points like "- Panel"
+            r'^\*\*',   # Bold markdown like "**Notable"
+            r'^Step\s', # Step instructions
+            r'^Panel\s', # Panel descriptions
+            r'^\[',     # Bracket descriptions
+            r'translation$', # Translation notes
+            r'^The\s.*(part|truth|question|boundary)',  # Descriptive phrases
+            r'^A\s(verse|poem)',  # Poetry descriptions
+            r'Dynamics$',  # Ends with "Dynamics"
+            r'Interactions$',  # Ends with "Interactions"
+            r'Elements$',   # Ends with "Elements"
+            r'Themes$',     # Ends with "Themes"
+            r'^haha\s',     # Casual expressions
+            r'https$',      # URLs
+            r'Metaphors$',  # Ends with "Metaphors"
+            r'Rigidity$',   # Ends with "Rigidity"
+            r'Rejection$',  # Ends with "Rejection"
+            r'Performance$', # Ends with "Performance"
+            r'Engagement$',  # Ends with "Engagement"
+        ]
+        
+        # Check against invalid patterns
+        for pattern in invalid_patterns:
+            if re.search(pattern, speaker_name, re.IGNORECASE):
+                return False
+        
+        # Additional filters
+        # Too long (probably a sentence)
+        if len(speaker_name) > 50:
+            return False
+            
+        # Contains too many words (probably descriptive text)
+        if len(speaker_name.split()) > 4:
+            return False
+            
+        # Contains certain punctuation that indicates it's not a name
+        if any(char in speaker_name for char in ['*', '[', ']', '(', ')', '"', "'"]):
+            return False
+            
+        return True
 
     def _load_history_file(self):
         """Load conversation history from file if specified."""
@@ -655,6 +739,7 @@ class UnifiedVoiceConversation:
             print(f"⚠️ Already processing LLM, skipping: {user_input}")
             return
         
+        
         try:
             self.state.is_processing_llm = True
             print(f"🔄 Starting LLM processing for: '{user_input}'")
@@ -743,8 +828,14 @@ class UnifiedVoiceConversation:
                 
 
             
-            # Use TTS to speak the streaming response
-            result = await self.tts.speak_stream(llm_generator())
+            # Use multi-voice TTS streaming
+            print("🎭 Using multi-voice streaming")
+            result = await self.tts.speak_stream_multi_voice(llm_generator())
+            print(f"🎭 Multi-voice result: {result}")
+            
+            if not result:
+                print("⚠️ Multi-voice TTS failed or was interrupted")
+                return
             
             # Use heuristic approach for conversation history (preserves exact LLM text)
             spoken_heuristic = self.tts.get_spoken_text_heuristic().strip()
@@ -845,6 +936,22 @@ class UnifiedVoiceConversation:
                     request_filename = self._log_llm_request(prefill_messages, model, request_timestamp, "anthropic")
                     
                     # Use Anthropic's completion API with prefill and CLI system prompt
+                    # Generate stop sequences from configured participant names and detected speakers
+                    human_name = self.config.conversation.prefill_participants[0]
+                    ai_name = self.config.conversation.prefill_participants[1]
+                    
+                    # Start with configured participants
+                    stop_sequences = [f"\n\n{human_name}:", f"\n\n{ai_name}:"]
+                    
+                    # Add all detected speakers from history to prevent bleeding into other speakers
+                    if hasattr(self, 'detected_speakers') and self.detected_speakers:
+                        for speaker in self.detected_speakers:
+                            speaker_stop = f"\n\n{speaker}:"
+                            if speaker_stop not in stop_sequences:
+                                stop_sequences.append(speaker_stop)
+                    
+                    print(f"🛑 Using stop sequences: {stop_sequences}")
+                    
                     response = self.anthropic_client.messages.create(
                         model=model,
                         max_tokens=self.config.conversation.max_tokens,
@@ -853,7 +960,7 @@ class UnifiedVoiceConversation:
                             {"role": "user", "content": user_message},
                             {"role": "assistant", "content": assistant_prefix}
                         ],
-                        stop_sequences=["\n\nH:", "\n\nClaude:"],
+                        stop_sequences=stop_sequences,
                         stream=True
                     )
                 else:

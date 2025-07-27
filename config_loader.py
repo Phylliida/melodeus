@@ -9,6 +9,7 @@ import os
 from dataclasses import dataclass
 from typing import Optional, Dict, Any, List
 from pathlib import Path
+from copy import deepcopy
 
 # Import our configuration dataclasses
 from async_stt_module import STTConfig
@@ -95,6 +96,27 @@ class VoiceAIConfig:
     logging: LoggingConfig
     development: DevelopmentConfig
 
+def deep_merge(base: Dict[str, Any], override: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    Deep merge two dictionaries, with override values taking precedence.
+    
+    Args:
+        base: Base dictionary
+        override: Override dictionary with values to merge in
+        
+    Returns:
+        Merged dictionary
+    """
+    result = deepcopy(base)
+    
+    for key, value in override.items():
+        if key in result and isinstance(result[key], dict) and isinstance(value, dict):
+            result[key] = deep_merge(result[key], value)
+        else:
+            result[key] = deepcopy(value)
+    
+    return result
+
 class ConfigLoader:
     """Loads and validates configuration from YAML files."""
     
@@ -105,13 +127,22 @@ class ConfigLoader:
         "/etc/voiceai/config.yaml"
     ]
     
+    PRESET_DIRS = [
+        "presets",
+        "config/presets",
+        os.path.expanduser("~/.voiceai/presets"),
+        "/etc/voiceai/presets"
+    ]
+    
     @classmethod
-    def load(cls, config_path: Optional[str] = None) -> VoiceAIConfig:
+    def load(cls, config_path: Optional[str] = None, preset: Optional[str] = None) -> VoiceAIConfig:
         """
-        Load configuration from YAML file.
+        Load configuration from YAML file with optional preset overrides.
         
         Args:
             config_path: Path to config file. If None, searches default locations.
+            preset: Name of preset to apply (without .yaml extension). 
+                   Can also be set via VOICE_AI_PRESET environment variable.
             
         Returns:
             VoiceAIConfig: Complete configuration object
@@ -120,6 +151,10 @@ class ConfigLoader:
             FileNotFoundError: If no config file is found
             ValueError: If configuration is invalid
         """
+        # Determine preset to use
+        if preset is None:
+            preset = os.environ.get('VOICE_AI_PRESET')
+        
         # Find config file
         if config_path:
             config_file = Path(config_path)
@@ -132,12 +167,17 @@ class ConfigLoader:
                     f"No config file found in default locations: {cls.DEFAULT_CONFIG_PATHS}"
                 )
         
-        # Load YAML
+        # Load base YAML
         try:
             with open(config_file, 'r') as f:
                 config_data = yaml.safe_load(f)
         except yaml.YAMLError as e:
             raise ValueError(f"Invalid YAML in config file: {e}")
+        
+        # Apply preset overrides if specified
+        if preset:
+            preset_data = cls._load_preset(preset)
+            config_data = deep_merge(config_data, preset_data)
         
         # Validate and create configurations
         return cls._create_config(config_data)
@@ -150,6 +190,32 @@ class ConfigLoader:
             if config_file.exists():
                 return config_file
         return None
+    
+    @classmethod
+    def _find_preset_file(cls, preset_name: str) -> Path:
+        """Find preset file in default preset directories."""
+        preset_filename = f"{preset_name}.yaml"
+        
+        for preset_dir in cls.PRESET_DIRS:
+            preset_path = Path(preset_dir) / preset_filename
+            if preset_path.exists():
+                return preset_path
+        
+        raise FileNotFoundError(
+            f"Preset '{preset_name}' not found in any preset directory: {cls.PRESET_DIRS}"
+        )
+    
+    @classmethod
+    def _load_preset(cls, preset_name: str) -> Dict[str, Any]:
+        """Load preset configuration from YAML file."""
+        preset_file = cls._find_preset_file(preset_name)
+        
+        try:
+            with open(preset_file, 'r') as f:
+                preset_data = yaml.safe_load(f) or {}
+            return preset_data
+        except yaml.YAMLError as e:
+            raise ValueError(f"Invalid YAML in preset file '{preset_file}': {e}")
     
     @classmethod
     def _create_config(cls, config_data: Dict[str, Any]) -> VoiceAIConfig:
@@ -205,7 +271,12 @@ class ConfigLoader:
             stability=tts_config_data.get('stability', 0.5),
             similarity_boost=tts_config_data.get('similarity_boost', 0.8),
             chunk_size=tts_config_data.get('chunk_size', 1024),
-            buffer_size=tts_config_data.get('buffer_size', 2048)
+            buffer_size=tts_config_data.get('buffer_size', 2048),
+            # Multi-voice support
+            emotive_voice_id=voice_config.get('emotive_id'),
+            emotive_speed=tts_config_data.get('emotive_speed', 1.0),
+            emotive_stability=tts_config_data.get('emotive_stability', 0.5),
+            emotive_similarity_boost=tts_config_data.get('emotive_similarity_boost', 0.8)
         )
         
         # Create conversation configuration
@@ -302,9 +373,9 @@ class ConfigLoader:
         print(f"✅ Example config created: {output_path}")
 
 # Convenience functions
-def load_config(config_path: Optional[str] = None) -> VoiceAIConfig:
-    """Load configuration from YAML file."""
-    return ConfigLoader.load(config_path)
+def load_config(config_path: Optional[str] = None, preset: Optional[str] = None) -> VoiceAIConfig:
+    """Load configuration from YAML file with optional preset overrides."""
+    return ConfigLoader.load(config_path, preset)
 
 def create_example_config(output_path: str = "config.yaml"):
     """Create an example configuration file."""
