@@ -984,6 +984,19 @@ class UnifiedVoiceConversation:
                 self._log_conversation_turn("assistant", f"{next_speaker}: {assistant_response}")
                 print(f"✅ Added assistant response to conversation history")
                 
+                # If the response was interrupted, add a system message
+                if status == "interrupted":
+                    system_message = f"[{next_speaker} was interrupted by user speaking]"
+                    system_turn = ConversationTurn(
+                        role="system",
+                        content=system_message,
+                        timestamp=datetime.now(),
+                        status="completed"
+                    )
+                    self.state.conversation_history.append(system_turn)
+                    self._log_conversation_turn("system", system_message)
+                    print(f"📝 Added interruption notice to conversation history")
+                
                 # Add to character manager context
                 self.character_manager.add_turn_to_context(next_speaker, assistant_response)
             else:
@@ -1503,6 +1516,18 @@ class UnifiedVoiceConversation:
                         print(f"💬 Added interrupted assistant response (full):")
                         print(f"   Generated: {len(full_generated)} chars - '{full_generated[:80]}...'")
                         response_added_to_history = True
+                        
+                        # Add system message about interruption
+                        system_message = "[Assistant was interrupted by user speaking]"
+                        system_turn = ConversationTurn(
+                            role="system",
+                            content=system_message,
+                            timestamp=datetime.now(),
+                            status="completed"
+                        )
+                        self.state.conversation_history.append(system_turn)
+                        self._log_conversation_turn("system", system_message)
+                        print(f"📝 Added interruption notice to conversation history")
                 else:
                     # Fallback to heuristic if we can't get full text
                     spoken_heuristic = self.tts.get_spoken_text_heuristic().strip()
@@ -1517,6 +1542,18 @@ class UnifiedVoiceConversation:
                         self._log_conversation_turn("assistant", spoken_heuristic)
                         print(f"💬 Added interrupted assistant response (heuristic): '{spoken_heuristic[:100]}...'")
                         response_added_to_history = True
+                        
+                        # Add system message about interruption
+                        system_message = "[Assistant was interrupted by user speaking]"
+                        system_turn = ConversationTurn(
+                            role="system",
+                            content=system_message,
+                            timestamp=datetime.now(),
+                            status="completed"
+                        )
+                        self.state.conversation_history.append(system_turn)
+                        self._log_conversation_turn("system", system_message)
+                        print(f"📝 Added interruption notice to conversation history")
                 return
             
             # Use heuristic approach for conversation history (preserves exact LLM text)
@@ -1561,6 +1598,18 @@ class UnifiedVoiceConversation:
                 else:
                     print(f"💬 Added partial assistant response (Whisper heuristic):")
                     print(f"   Generated: {len(assistant_response)} chars")
+                    
+                    # Add system message about interruption
+                    system_message = "[Assistant was interrupted by user speaking]"
+                    system_turn = ConversationTurn(
+                        role="system",
+                        content=system_message,
+                        timestamp=datetime.now(),
+                        status="completed"
+                    )
+                    self.state.conversation_history.append(system_turn)
+                    self._log_conversation_turn("system", system_message)
+                    print(f"📝 Added interruption notice to conversation history")
                     print(f"   Spoken: {len(content_for_history)} chars - '{content_for_history[:80]}...'")
                 
             else:

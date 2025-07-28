@@ -15,6 +15,7 @@ import queue
 import time
 import numpy as np
 import re
+import difflib
 from typing import Optional, AsyncGenerator, Dict, Any, List, Tuple
 from dataclasses import dataclass, field
 from scipy import signal
@@ -115,6 +116,87 @@ class AsyncTTSStreamer:
         self.on_tool_execution = None  # Callback: async def(tool_call: ToolCall) -> ToolResult
         
         # Whisper will be initialized per session
+    
+    def _fuzzy_find_position(self, whisper_text: str, tts_text: str) -> int:
+        """
+        Find the approximate position in TTS text that corresponds to the end of Whisper text.
+        Uses very fuzzy matching to handle Whisper transcription errors.
+        
+        Returns:
+            Character position in tts_text that best matches the end of whisper_text
+        """
+        if not whisper_text or not tts_text:
+            return 0
+            
+        # Normalize texts for comparison
+        def normalize(text):
+            # Convert to lowercase
+            text = text.lower()
+            # Keep ONLY letters and spaces - remove ALL punctuation, numbers, asterisks, etc.
+            text = re.sub(r'[^a-z\s]', ' ', text)
+            # Collapse multiple spaces
+            text = re.sub(r'\s+', ' ', text).strip()
+            return text
+        
+        # Normalize and split into words for more robust matching
+        norm_whisper = normalize(whisper_text)
+        norm_tts = normalize(tts_text)
+        
+        whisper_words = norm_whisper.split()
+        tts_words = norm_tts.split()
+        
+        if not whisper_words:
+            return 0
+            
+        # Try to find the best match using a sliding window approach
+        best_match_score = 0
+        best_match_end = 0
+        
+        # Look for the last few words of Whisper in TTS (more reliable than full text)
+        window_size = min(5, len(whisper_words))  # Use last 5 words or less
+        search_words = whisper_words[-window_size:]
+        
+        # Slide through TTS text looking for best match
+        for i in range(len(tts_words) - window_size + 1):
+            window = tts_words[i:i + window_size]
+            
+            # Calculate similarity score
+            matcher = difflib.SequenceMatcher(None, window, search_words)
+            score = matcher.ratio()
+            
+            # If this is a better match, update
+            if score > best_match_score:
+                best_match_score = score
+                best_match_end = i + window_size
+        
+        # If we found a good match (>60% similar), use it
+        if best_match_score > 0.6:
+            # Convert word position to character position
+            word_count = 0
+            for i, char in enumerate(tts_text):
+                if char.isspace() and i > 0 and not tts_text[i-1].isspace():
+                    word_count += 1
+                    if word_count >= best_match_end:
+                        return i
+            
+            # If we counted all words, return end of text
+            return len(tts_text)
+        
+        # Fallback: Try character-level fuzzy matching on normalized text
+        if norm_whisper in norm_tts:
+            # Find the position in normalized text
+            norm_pos = norm_tts.find(norm_whisper) + len(norm_whisper)
+            # Estimate position in original text
+            ratio = norm_pos / len(norm_tts)
+            result = int(len(tts_text) * ratio)
+            return result
+        
+        # Final fallback: percentage-based estimation with safety margin
+        # Whisper often captures less than TTS sends, so add 10% margin
+        whisper_ratio = len(whisper_text) / max(len(tts_text), 1)
+        estimated_pos = int(len(tts_text) * min(whisper_ratio * 1.1, 1.0))
+        
+        return estimated_pos
     
     def _create_session(self) -> TTSSession:
         """Create a new TTS session with unique ID and optional Whisper tracker."""
@@ -251,10 +333,8 @@ class AsyncTTSStreamer:
             if self.track_spoken_content and self.current_session.whisper_tracker:
                 self.current_session.whisper_tracker.start_tracking()
             
-            # Start speech progress monitoring for tool execution
+            # Don't start monitoring here - wait until we know if we have tool calls
             progress_monitor_task = None
-            if self.track_spoken_content:
-                progress_monitor_task = asyncio.create_task(self._monitor_speech_progress())
             
             # Ensure audio playback is ready
             # But first, ensure any previous audio is completely stopped
@@ -356,6 +436,15 @@ class AsyncTTSStreamer:
             if text_buffer.strip() and not self._stop_requested:
                 await self._speak_sentence_with_voice_switching(text_buffer)
             
+            # Check for incomplete XML tag at end of message
+            if xml_buffer and in_xml_tag and not self._stop_requested:
+                print(f"⚠️ Incomplete tool call at end of message: {xml_buffer}")
+                # Check if it's a complete self-closing tag or has matching closing tag
+                if self._is_closing_tag(xml_buffer):
+                    tag_end = len(self.current_session.generated_text)
+                    self._process_xml_tag(xml_buffer, len(self.current_session.spoken_text_for_tts), tag_end)
+                    print(f"✅ Processed tool call at end of message")
+            
             # Mark that all text has been sent
             self._all_text_sent = True
             print(f"📝 All text sent to TTS ({self._total_websockets} websockets created)")
@@ -369,10 +458,13 @@ class AsyncTTSStreamer:
             if not self._stop_requested:
                 await self._wait_for_audio_completion()
             
-            
             # Stop Whisper tracking
             if self.track_spoken_content and self.current_session and self.current_session.whisper_tracker:
                 self.current_session.current_spoken_content = self.current_session.whisper_tracker.stop_tracking()
+            
+            # Check for any unexecuted tools after audio completes
+            if self.current_session.tool_calls and not self._stop_requested:
+                await self._execute_remaining_tools()
             
             return not self._interrupted
             
@@ -457,7 +549,9 @@ class AsyncTTSStreamer:
             )
             
             self.current_session.tool_calls.append(tool_call)
-            print(f"🔧 Found tool call: {tag_name} at position {start_pos}")
+            print(f"🔧 Found tool call: {tag_name} at TTS position {start_pos}")
+            print(f"   Current spoken_text_for_tts length: {len(self.current_session.spoken_text_for_tts)}")
+            print(f"   Current generated_text length: {len(self.current_session.generated_text)}")
     
     async def _monitor_speech_progress(self):
         """Monitor speech progress using Whisper and execute tools when appropriate."""
@@ -467,16 +561,22 @@ class AsyncTTSStreamer:
         while self.is_streaming and not self._stop_requested:
             await asyncio.sleep(0.5)  # Check every 500ms
             
-            # Get current spoken character count
+            # Get current spoken text and TTS text
             spoken_text = self.current_session.whisper_tracker.get_spoken_text()
-            spoken_chars = len(spoken_text)
+            tts_text = self.current_session.spoken_text_for_tts
             
-            # Check which tools should be executed
+            # Use fuzzy matching to find actual position
+            fuzzy_position = self._fuzzy_find_position(spoken_text, tts_text)
+            
+            # Check which tools should be executed based on fuzzy position
             for tool_call in self.current_session.tool_calls:
-                if not tool_call.executed and spoken_chars >= tool_call.start_position:
-                    # Execute the tool
-                    await self._execute_tool(tool_call)
-                    tool_call.executed = True
+                if not tool_call.executed:
+                    if fuzzy_position >= tool_call.start_position:
+                        # Execute the tool
+                        progress = (fuzzy_position / tool_call.start_position) * 100
+                        print(f"📊 Tool '{tool_call.tag_name}' reached! Progress: {progress:.1f}%")
+                        await self._execute_tool(tool_call)
+                        tool_call.executed = True
     
     async def _execute_tool(self, tool_call: ToolCall):
         """Execute a tool call and handle the result."""
@@ -501,6 +601,53 @@ class AsyncTTSStreamer:
                         
             except Exception as e:
                 print(f"❌ Tool execution error: {e}")
+    
+    async def _execute_remaining_tools(self):
+        """Execute any remaining unexecuted tools after audio completes."""
+        unexecuted_tools = [tc for tc in self.current_session.tool_calls if not tc.executed]
+        
+        if unexecuted_tools:
+            print(f"🔧 Checking {len(unexecuted_tools)} remaining tool(s) after audio completion")
+            
+            # Check if the message was interrupted
+            was_interrupted = self._interrupted or self.current_session.was_interrupted
+            
+            if not was_interrupted:
+                # Message completed naturally - execute ALL remaining tools
+                print(f"✅ Message completed naturally - executing all remaining tools")
+                for tool_call in unexecuted_tools:
+                    print(f"🚀 Executing tool '{tool_call.tag_name}' at position {tool_call.start_position}")
+                    await self._execute_tool(tool_call)
+                    tool_call.executed = True
+            else:
+                # Message was interrupted - use fuzzy matching to determine which tools to execute
+                print(f"⚠️ Message was interrupted - checking tool progress")
+                
+                # Get final spoken text
+                final_spoken_text = ""
+                if self.current_session.current_spoken_content:
+                    final_spoken_text = " ".join(content.text for content in self.current_session.current_spoken_content)
+                elif self.current_session.whisper_tracker:
+                    final_spoken_text = self.current_session.whisper_tracker.get_spoken_text()
+                
+                tts_text = self.current_session.spoken_text_for_tts
+                final_fuzzy_position = self._fuzzy_find_position(final_spoken_text, tts_text)
+                
+                # Execute remaining tools based on progress
+                for tool_call in unexecuted_tools:
+                    if not tool_call.executed:
+                        progress = (final_fuzzy_position / tool_call.start_position) * 100 if tool_call.start_position > 0 else 0
+                        
+                        # Execute tools that were close to being reached
+                        # Use a more forgiving threshold (80%) for tools near the end
+                        threshold = 80 if tool_call.start_position > len(tts_text) * 0.8 else 85
+                        
+                        if progress >= threshold:
+                            print(f"   ✅ Executing interrupted tool at {progress:.1f}% progress")
+                            await self._execute_tool(tool_call)
+                            tool_call.executed = True
+                        else:
+                            print(f"   ❌ Skipping tool at {progress:.1f}% progress (threshold: {threshold}%)")
 
     async def _speak_sentence_with_voice_switching(self, sentence: str):
         """Speak a sentence with appropriate voice switching for emotive parts."""

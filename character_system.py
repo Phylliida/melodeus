@@ -186,6 +186,9 @@ class CharacterManager:
                 else:
                     # Fallback if no character info
                     recent_turns.append(f"Assistant: {content}")
+            elif role == "system":
+                # Include system messages (like interruption notices)
+                recent_turns.append(f"System: {content}")
         
         # Join with double newlines for prefill format
         conversation_text = "\n\n".join(recent_turns)
@@ -195,7 +198,7 @@ class CharacterManager:
         
         # For director, present the conversation as context, then ask the question
         if conversation_text:
-            user_prompt = conversation_text + "\n\nWho should speak next? Respond with just the name of the participant."
+            user_prompt = conversation_text + "\n\nSystem: Who should speak next? Respond with just the name of the participant. Director: "
         else:
             user_prompt = "This is the start of a conversation. Who should speak first? Respond with just the name of the participant."
         
@@ -379,6 +382,9 @@ class CharacterManager:
             elif role == "tool":
                 # Tool results are system messages
                 messages.append({"role": "system", "content": f"Tool result: {content}"})
+            elif role == "system":
+                # System messages (like interruption notices)
+                messages.append({"role": "system", "content": content})
         
         return messages
 
