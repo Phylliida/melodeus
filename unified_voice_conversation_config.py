@@ -15,6 +15,7 @@ from typing import Optional, List, Dict, Any, AsyncGenerator
 from datetime import datetime, timedelta
 from openai import OpenAI
 import anthropic
+from anthropic import AsyncAnthropic
 
 # Import our modular systems and config loader
 from async_stt_module import AsyncSTTStreamer, STTEventType, STTResult
@@ -50,13 +51,15 @@ class UnifiedVoiceConversation:
         # Initialize LLM clients
         self.openai_client = None
         self.anthropic_client = None
+        self.async_anthropic_client = None
         
         if config.conversation.llm_provider == "openai":
             self.openai_client = OpenAI(api_key=config.conversation.openai_api_key)
         elif config.conversation.llm_provider == "anthropic":
             if not config.conversation.anthropic_api_key:
                 raise ValueError("Anthropic API key is required when using Anthropic provider")
-            self.anthropic_client = anthropic.Anthropic(api_key=config.conversation.anthropic_api_key)
+            # Use async client for better responsiveness
+            self.async_anthropic_client = AsyncAnthropic(api_key=config.conversation.anthropic_api_key)
         
         # Initialize STT system
         self.stt = AsyncSTTStreamer(config.stt)
@@ -138,8 +141,8 @@ class UnifiedVoiceConversation:
                 f.write("## Loaded History\n\n")
                 
             # Log each message from loaded history
-            for msg in self.state.conversation_history:
-                self._log_conversation_turn(msg["role"], msg["content"])
+            for turn in self.state.conversation_history:
+                self._log_conversation_turn(turn.role, turn.content)
                 
             with open(self.conversation_log_file, 'a', encoding='utf-8') as f:
                 f.write("## New Conversation\n\n")
@@ -551,18 +554,8 @@ class UnifiedVoiceConversation:
             # Get spoken content synchronously (available after stop() completes)
             spoken_content = self.tts.get_spoken_text_heuristic().strip()
             
-            # Add partial assistant response to history FIRST if there was spoken content
-            if spoken_content and self.state.current_processing_turn:
-                partial_response = ConversationTurn(
-                    role="assistant",
-                    content=spoken_content,
-                    timestamp=datetime.now(),
-                    status="interrupted"
-                )
-                self.state.conversation_history.append(partial_response)
-                self._log_conversation_turn("assistant", spoken_content)
-                print(f"💬 Added partial assistant response: '{spoken_content[:100]}...'")
-            
+            # Don't add assistant response here - let _stream_llm_to_tts handle it
+            # This avoids duplicates
             interrupted = True
             
         elif self.state.is_processing_llm:
@@ -571,6 +564,9 @@ class UnifiedVoiceConversation:
             if self.state.current_processing_turn:
                 self.state.current_processing_turn.status = "interrupted"
             interrupted = True
+            # Stop any ongoing TTS that might be starting
+            if self.tts.is_streaming:
+                await self.tts.stop()
             
         elif self.state.is_speaking:
             print(f"🛑 Interrupting TTS setup with: {result.text}")
@@ -665,6 +661,7 @@ class UnifiedVoiceConversation:
     
     async def _process_pending_utterances(self):
         """Process pending utterances from conversation history."""
+        # Use a lock to prevent concurrent processing
         if self.state.is_processing_llm or self.state.is_speaking:
             print("⏸️ Already processing, skipping pending utterances")
             return
@@ -742,22 +739,45 @@ class UnifiedVoiceConversation:
             self.state.current_processing_turn = reference_turn
             print(f"🔄 Starting LLM processing for: '{user_input}'")
             
+            # Mark all processing user turns as completed NOW since we're committing to process them
+            for turn in self.state.conversation_history:
+                if turn.role == "user" and turn.status == "processing":
+                    turn.status = "completed"
+                    print(f"   ✅ Marked user turn as completed: '{turn.content[:50]}...'")
+            
             # Build messages from conversation history (completed turns only)
             messages = [{"role": "system", "content": self.config.conversation.system_prompt}]
             
-            # Add completed turns from conversation history  
-            for turn in self.state.conversation_history[-200:]:  # Keep last 200 exchanges
-                if turn.status in ["completed", "interrupted"]:  # Include completed and interrupted turns
+            # Debug: Show conversation history state
+            print(f"📊 Building LLM context from {len(self.state.conversation_history)} total turns")
+            status_counts = {}
+            for turn in self.state.conversation_history:
+                status_counts[turn.status] = status_counts.get(turn.status, 0) + 1
+            print(f"   Status breakdown: {status_counts}")
+            
+            # Add ALL turns from conversation history (simpler is better)
+            # The only turns we exclude are assistant turns that never started
+            included_count = 0
+            all_turns = self.state.conversation_history[-200:]  # Keep last 200 exchanges
+            
+            # Only print last 20 for brevity
+            print_threshold = max(0, len(all_turns) - 20)
+            
+            for i, turn in enumerate(all_turns):
+                # Include everything except assistant turns that were never spoken
+                if turn.role == "user" or turn.status in ["completed", "interrupted"]:
                     messages.append({
                         "role": turn.role,
                         "content": turn.content
                     })
+                    included_count += 1
+                    if i >= print_threshold:  # Only print last 20
+                        print(f"   ✅ Including {turn.role} ({turn.status}): '{turn.content[:50]}...'")
+                else:
+                    if i >= print_threshold:  # Only print last 20
+                        print(f"   ⚠️ Excluding {turn.role} turn with status '{turn.status}': '{turn.content[:50]}...'")
             
-            # Add the current processing input
-            messages.append({
-                "role": "user", 
-                "content": user_input
-            })
+            print(f"   ✅ Total included: {included_count} turns in LLM context")
             
             print("🤖 Getting LLM response...")
             
@@ -775,12 +795,16 @@ class UnifiedVoiceConversation:
     
     async def _stream_llm_to_tts(self, messages: List[Dict[str, str]], user_input: str):
         """Stream LLM completion to TTS."""
+        call_id = f"{time.time():.3f}"  # Unique ID for this call
+        print(f"🔍 _stream_llm_to_tts called with ID: {call_id} for input: '{user_input[:50]}...'")
+        
         assistant_response = ""  # Initialize at method level to fix scoping
         request_timestamp = time.time()
         request_filename = ""
         was_interrupted = False
         error_msg = None
         tts_processing_complete = False  # Flag to prevent duplicate processing
+        response_added_to_history = False  # Prevent duplicate history additions
         
         try:
             self.state.is_speaking = True
@@ -839,6 +863,20 @@ class UnifiedVoiceConversation:
             
             if not result:
                 print("⚠️ Multi-voice TTS failed or was interrupted")
+                # Still need to get what was spoken before interruption
+                spoken_heuristic = self.tts.get_spoken_text_heuristic().strip()
+                if spoken_heuristic and not response_added_to_history:
+                    # Add the interrupted assistant response
+                    assistant_turn = ConversationTurn(
+                        role="assistant",
+                        content=spoken_heuristic,
+                        timestamp=datetime.now(),
+                        status="interrupted"
+                    )
+                    self.state.conversation_history.append(assistant_turn)
+                    self._log_conversation_turn("assistant", spoken_heuristic)
+                    print(f"💬 Added interrupted assistant response: '{spoken_heuristic[:100]}...'")
+                    response_added_to_history = True
                 return
             
             # Use heuristic approach for conversation history (preserves exact LLM text)
@@ -858,21 +896,19 @@ class UnifiedVoiceConversation:
             content_for_history = spoken_heuristic if spoken_heuristic else assistant_response
             
             # Update conversation history based on completion status
-            if content_for_history.strip():
-                # Mark processing turns as completed
-                for turn in self.state.conversation_history:
-                    if turn.role == "user" and turn.status == "processing":
-                        turn.status = "completed"
+            if content_for_history.strip() and not response_added_to_history:
+                # User turns are already marked as completed at the start of LLM processing
                         
                 # Add the assistant response
                 assistant_turn = ConversationTurn(
                     role="assistant",
-                    content=content_for_history,
+                    content=content_for_history,  # What was actually spoken
                     timestamp=datetime.now(),
                     status="completed" if was_fully_spoken else "interrupted"
                 )
                 self.state.conversation_history.append(assistant_turn)
                 self._log_conversation_turn("assistant", content_for_history)
+                response_added_to_history = True
                 
                 if was_fully_spoken:
                     print(f"💬 Added complete assistant response: '{content_for_history[:100]}...'")
@@ -880,12 +916,8 @@ class UnifiedVoiceConversation:
                     print(f"💬 Added partial assistant response: '{content_for_history[:100]}...' (heuristic)")
                 
             else:
-                # Mark processing turns as interrupted if no meaningful response
-                for turn in self.state.conversation_history:
-                    if turn.role == "user" and turn.status == "processing":
-                        turn.status = "interrupted"
-                        
-                print("🛑 Response was interrupted - no assistant content added")
+                # User turns remain completed even if assistant response was interrupted
+                print(f"🛑 Response was interrupted - no assistant content added (call_id: {call_id})")
             
         except Exception as e:
             error_msg = str(e)
@@ -908,7 +940,7 @@ class UnifiedVoiceConversation:
                     )
                 
                 self.state.is_speaking = False
-                print("✅ Response completed successfully")
+                print(f"✅ Response completed successfully (call_id: {call_id})")
             else:
                 print("⚠️ TTS processing was not completed, skipping cleanup")
 
@@ -973,7 +1005,7 @@ class UnifiedVoiceConversation:
                     
                     print(f"🛑 Using stop sequences: {stop_sequences}")
                     
-                    response = self.anthropic_client.messages.create(
+                    response = await self.async_anthropic_client.messages.create(
                         model=model,
                         max_tokens=self.config.conversation.max_tokens,
                         system=self.config.conversation.prefill_system_prompt,
@@ -1009,11 +1041,11 @@ class UnifiedVoiceConversation:
                     if system_message:
                         kwargs["system"] = system_message
                     
-                    response = self.anthropic_client.messages.create(**kwargs)
+                    response = await self.async_anthropic_client.messages.create(**kwargs)
                 
                 # Stream the response
                 accumulated_response = ""
-                for chunk in response:
+                async for chunk in response:
                     if chunk.type == "content_block_delta":
                         if hasattr(chunk.delta, 'text'):
                             content = chunk.delta.text

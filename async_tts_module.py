@@ -890,6 +890,17 @@ class AsyncTTSStreamer:
                    self.generated_text[word_end_position] not in [' ', '.', ',', '!', '?', ';', ':', '\n']):
                 word_end_position += 1
             
+            # Check if we're in the middle of an emotive marker (between asterisks)
+            result_text = self.generated_text[:word_end_position]
+            asterisk_count = result_text.count('*')
+            
+            # If odd number of asterisks, we're in the middle of an emotive marker
+            if asterisk_count % 2 == 1:
+                # Find the closing asterisk
+                close_pos = self.generated_text.find('*', word_end_position)
+                if close_pos != -1:
+                    word_end_position = close_pos + 1
+            
             return self.generated_text[:word_end_position].strip()
         
         else:
