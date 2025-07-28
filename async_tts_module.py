@@ -393,6 +393,8 @@ class AsyncTTSStreamer:
                         in_xml_tag = True
                         current_xml_start = len(self.current_session.generated_text) - len(chunk) + i
                         xml_buffer = char
+                        # Debug: Log when we start detecting XML
+                        print(f"🔍 DEBUG: Started XML tag detection at position {current_xml_start}, text_buffer so far: {repr(text_buffer[-20:])}")
                     elif in_xml_tag:
                         xml_buffer += char
                         if char == '>':
@@ -402,9 +404,14 @@ class AsyncTTSStreamer:
                                 tag_end = len(self.current_session.generated_text) - len(chunk) + i + 1
                                 # The position where the tool should execute is where the tag started
                                 self._process_xml_tag(xml_buffer, len(self.current_session.spoken_text_for_tts), tag_end)
+                                print(f"🔍 DEBUG: Complete XML tag: {repr(xml_buffer)}, text_buffer after: {repr(text_buffer[-20:])}")
                                 in_xml_tag = False
                                 xml_buffer = ""
                                 current_xml_start = -1
+                            else:
+                                # Found '>' but tag not complete - might be inside tag content
+                                # For example: <tag attr="value>something">
+                                print(f"🔍 DEBUG: Found '>' but tag not complete: {repr(xml_buffer)}")
                     else:
                         # Regular text - add to buffer only if not in XML
                         text_buffer += char
@@ -426,11 +433,18 @@ class AsyncTTSStreamer:
                     # Process each complete sentence with appropriate voice
                     for sentence in complete_sentences:
                         if sentence.strip():
+                            # Debug: Check if sentence has both asterisks and angle brackets
+                            if '*' in sentence and ('<' in sentence or '>' in sentence):
+                                print(f"⚠️ DEBUG: Sentence with asterisks and XML: {repr(sentence)}")
+                            
                             await self._speak_sentence_with_voice_switching(sentence)
                             
                             if self._stop_requested:
                                 self._interrupted = True
                                 break
+                else:
+                    # We're still in an XML tag at the end of this chunk
+                    print(f"🔍 DEBUG: Chunk ended while in XML tag. xml_buffer: {repr(xml_buffer)}, text_buffer: {repr(text_buffer[-30:])}")
             
             # Process any remaining text in buffer
             if text_buffer.strip() and not self._stop_requested:
@@ -439,6 +453,8 @@ class AsyncTTSStreamer:
             # Check for incomplete XML tag at end of message
             if xml_buffer and in_xml_tag and not self._stop_requested:
                 print(f"⚠️ Incomplete tool call at end of message: {xml_buffer}")
+                print(f"⚠️ DEBUG: Final text_buffer: {repr(text_buffer)}")
+                print(f"⚠️ DEBUG: Was in_xml_tag: {in_xml_tag}")
                 # Check if it's a complete self-closing tag or has matching closing tag
                 if self._is_closing_tag(xml_buffer):
                     tag_end = len(self.current_session.generated_text)
@@ -506,17 +522,7 @@ class AsyncTTSStreamer:
         return [s.strip() for s in sentences if s.strip()]
     
     def _is_closing_tag(self, xml_buffer: str) -> bool:
-        """Check if the XML buffer contains a complete tag with closing."""
-        # Simple check - can be enhanced for nested tags
-        tag_match = re.match(r'<(\w+)[^>]*>', xml_buffer)
-        if tag_match:
-            tag_name = tag_match.group(1)
-            # Check if we have the closing tag
-            return f'</{tag_name}>' in xml_buffer
-        return False
-    
-    def _is_closing_tag(self, xml_buffer: str) -> bool:
-        """Check if the buffer contains a closing tag."""
+        """Check if the buffer contains a complete tag (either self-closing or with closing tag)."""
         # Check for self-closing tag
         if xml_buffer.endswith('/>'):
             return True

@@ -13,6 +13,7 @@ import json
 
 from openai import OpenAI, AsyncOpenAI
 from anthropic import AsyncAnthropic
+from groq import AsyncGroq
 
 
 @dataclass
@@ -116,6 +117,8 @@ class CharacterManager:
                     client = AsyncOpenAI(api_key=char_config.api_key)
                 elif char_config.llm_provider == "anthropic":
                     client = AsyncAnthropic(api_key=char_config.api_key)
+                elif char_config.llm_provider == "groq":
+                    client = AsyncGroq(api_key=char_config.api_key)
                 else:
                     raise ValueError(f"Unknown LLM provider: {char_config.llm_provider}")
                 
@@ -135,6 +138,8 @@ class CharacterManager:
                 api_key = os.environ.get("OPENAI_API_KEY")
             elif self.director_config.llm_provider == "anthropic":
                 api_key = os.environ.get("ANTHROPIC_API_KEY")
+            elif self.director_config.llm_provider == "groq":
+                api_key = os.environ.get("GROQ_API_KEY")
         
         if not api_key:
             raise ValueError(f"No API key found for director provider: {self.director_config.llm_provider}")
@@ -143,6 +148,8 @@ class CharacterManager:
             self._director_client = AsyncOpenAI(api_key=api_key)
         elif self.director_config.llm_provider == "anthropic":
             self._director_client = AsyncAnthropic(api_key=api_key)
+        elif self.director_config.llm_provider == "groq":
+            self._director_client = AsyncGroq(api_key=api_key)
         else:
             raise ValueError(f"Unknown director LLM provider: {self.director_config.llm_provider}")
     
@@ -250,6 +257,19 @@ class CharacterManager:
                     max_tokens=10
                 )
                 next_speaker = response.content[0].text.strip()
+                
+            elif self.director_config.llm_provider == "groq":
+                # Groq uses OpenAI-compatible API
+                response = await self._director_client.chat.completions.create(
+                    model=self.director_config.llm_model,
+                    messages=[
+                        {"role": "system", "content": system_prompt},
+                        {"role": "user", "content": user_prompt}
+                    ],
+                    temperature=0.3,
+                    max_tokens=10
+                )
+                next_speaker = response.choices[0].message.content.strip()
             
             # Build list of valid options including prefill names
             valid_options = ["H", "USER"] + list(self.characters.keys())  # Accept both H and USER for compatibility
@@ -428,6 +448,8 @@ def create_character_manager(config: Dict[str, Any]) -> CharacterManager:
             director_data["api_key"] = api_keys.get("openai")
         elif provider == "anthropic":
             director_data["api_key"] = api_keys.get("anthropic")
+        elif provider == "groq":
+            director_data["api_key"] = api_keys.get("groq")
     
     director_config = DirectorConfig(**director_data)
     
