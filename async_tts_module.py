@@ -16,7 +16,7 @@ import time
 import numpy as np
 import re
 from typing import Optional, AsyncGenerator, Dict, Any, List, Tuple
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from scipy import signal
 
 # Import Whisper TTS Tracker
@@ -47,6 +47,17 @@ class TTSConfig:
     emotive_stability: float = 0.5
     emotive_similarity_boost: float = 0.8
 
+@dataclass
+class TTSSession:
+    """Represents a single TTS speaking session with its own isolated state."""
+    session_id: str
+    generated_text: str = ""  # Text that was sent to TTS for this session
+    current_spoken_content: List[SpokenContent] = field(default_factory=list)  # What Whisper captured for this session
+    was_interrupted: bool = False  # Whether this session was interrupted
+    start_time: float = field(default_factory=time.time)
+    end_time: Optional[float] = None
+    whisper_tracker: Optional['WhisperTTSTracker'] = None  # Session-specific tracker
+
 class AsyncTTSStreamer:
     """Async TTS Streamer with interruption capabilities and spoken content tracking."""
     
@@ -76,21 +87,31 @@ class AsyncTTSStreamer:
         self._all_text_sent = False  # Track when all text has been sent to websockets
         self._actively_playing_chunk = False  # Track if audio thread is playing a chunk
         
-        # Whisper tracking
-        self.whisper_tracker: Optional[WhisperTTSTracker] = None
+        # Whisper tracking configuration
         self.track_spoken_content = WHISPER_AVAILABLE
-        self.current_spoken_content: List[SpokenContent] = []
-        self.generated_text = ""  # Text that was sent to TTS
         
-        # Initialize Whisper tracker if available
-        if WHISPER_AVAILABLE:
+        # Current session tracking
+        self.current_session: Optional[TTSSession] = None
+        self._session_counter = 0  # For generating unique session IDs
+        
+        # Whisper will be initialized per session
+    
+    def _create_session(self) -> TTSSession:
+        """Create a new TTS session with unique ID and optional Whisper tracker."""
+        self._session_counter += 1
+        session_id = f"tts_session_{int(time.time())}_{self._session_counter}"
+        session = TTSSession(session_id=session_id)
+        
+        # Initialize Whisper tracker for this session if available
+        if WHISPER_AVAILABLE and self.track_spoken_content:
             try:
-                self.whisper_tracker = WhisperTTSTracker(sample_rate=16000)
-                print("✅ Whisper TTS tracking enabled")
+                session.whisper_tracker = WhisperTTSTracker(sample_rate=16000)
+                print(f"✅ Whisper TTS tracking enabled for session {session_id}")
             except Exception as e:
-                print(f"⚠️ Failed to initialize Whisper tracker: {e}")
-                self.whisper_tracker = None
-                self.track_spoken_content = False
+                print(f"⚠️ Failed to initialize Whisper tracker for session: {e}")
+                session.whisper_tracker = None
+        
+        return session
         
     async def speak_text(self, text: str) -> bool:
         """
@@ -109,12 +130,12 @@ class AsyncTTSStreamer:
             self._stop_requested = False
             self._interrupted = False
             
-            # Store generated text and start Whisper tracking
-            self.generated_text = text
-            self.current_spoken_content.clear()
+            # Create a new session for this speaking operation
+            self.current_session = self._create_session()
+            self.current_session.generated_text = text
             
-            if self.whisper_tracker and self.track_spoken_content:
-                self.whisper_tracker.start_tracking(f"tts_session_{int(time.time())}")
+            if self.current_session.whisper_tracker and self.track_spoken_content:
+                self.current_session.whisper_tracker.start_tracking()
             
             await self._start_streaming(text)
             
@@ -191,9 +212,14 @@ class AsyncTTSStreamer:
             self._stop_requested = False
             self._interrupted = False
             
-            # Store generated text and start Whisper tracking
-            self.generated_text = ""
-            self.current_spoken_content.clear()
+            # Cancel any existing session and create a new one
+            if self.current_session and not self.current_session.was_interrupted:
+                print(f"⚠️ Cancelling previous session: {self.current_session.session_id}")
+                self.current_session.was_interrupted = True
+                
+            # Create a new session for this speaking operation
+            self.current_session = self._create_session()
+            print(f"🆕 Created TTS session: {self.current_session.session_id}")
             self._websockets_completed = 0
             self._total_websockets = 0
             self._audio_completion_event.clear()
@@ -201,10 +227,41 @@ class AsyncTTSStreamer:
             self._queue_monitoring_task = None
             self._all_text_sent = False
             
-            if self.track_spoken_content and self.whisper_tracker:
-                self.whisper_tracker.start_tracking()
+            if self.track_spoken_content and self.current_session.whisper_tracker:
+                self.current_session.whisper_tracker.start_tracking()
             
             # Ensure audio playback is ready
+            # But first, ensure any previous audio is completely stopped
+            if self.playback_thread and self.playback_thread.is_alive():
+                print("⏳ Stopping previous audio playback...")
+                # Force stop the previous playback
+                self.is_playing = False
+                self._clear_audio_queue()  # Clear any remaining audio
+                
+                # Close the stream to force the thread to exit
+                if self.stream:
+                    try:
+                        self.stream.stop_stream()
+                        self.stream.close()
+                        self.stream = None
+                    except Exception as e:
+                        print(f"Error closing previous stream: {e}")
+                
+                # Wait for thread to actually exit
+                max_wait = 1.0
+                start_time = time.time()
+                while (self.playback_thread.is_alive() and 
+                       (time.time() - start_time) < max_wait):
+                    await asyncio.sleep(0.05)
+                
+                if self.playback_thread.is_alive():
+                    print("⚠️ Previous audio thread didn't stop, but proceeding anyway")
+                else:
+                    print("✅ Previous audio thread stopped")
+                    
+                self.playback_thread = None
+                    
+            # Now start fresh audio playback
             if not self.is_playing:
                 self._start_audio_playback()
             self.is_streaming = True
@@ -217,7 +274,8 @@ class AsyncTTSStreamer:
                     break
                     
                 text_buffer += chunk
-                self.generated_text += chunk
+                if self.current_session:
+                    self.current_session.generated_text += chunk
                 
                 # Process complete sentences/phrases for voice switching
                 sentences = self._split_into_sentences(text_buffer)
@@ -253,8 +311,8 @@ class AsyncTTSStreamer:
             
             
             # Stop Whisper tracking
-            if self.track_spoken_content and self.whisper_tracker:
-                self.current_spoken_content = self.whisper_tracker.stop_tracking()
+            if self.track_spoken_content and self.current_session and self.current_session.whisper_tracker:
+                self.current_session.current_spoken_content = self.current_session.whisper_tracker.stop_tracking()
             
             return not self._interrupted
             
@@ -262,9 +320,9 @@ class AsyncTTSStreamer:
             print(f"Multi-voice TTS error: {e}")
             self._interrupted = True
             # Stop Whisper tracking on error
-            if self.track_spoken_content and self.whisper_tracker:
+            if self.track_spoken_content and self.current_session and self.current_session.whisper_tracker:
                 try:
-                    self.whisper_tracker.stop_tracking()
+                    self.current_session.whisper_tracker.stop_tracking()
                 except Exception:
                     pass
             return False
@@ -364,10 +422,11 @@ class AsyncTTSStreamer:
                     
                 data = json.loads(message)
                 
-                if data.get("audio"):
-                    # Decode and queue audio
+                if data.get("audio") and not self._stop_requested:
+                    # Decode and queue audio only if not stopped
                     audio_data = base64.b64decode(data["audio"])
-                    self.audio_queue.put(audio_data)
+                    if not self._stop_requested:  # Double-check before queuing
+                        self.audio_queue.put(audio_data)
                     
                     # Update last audio time for completion tracking
                     self._last_audio_time = time.time()
@@ -451,12 +510,11 @@ class AsyncTTSStreamer:
             self._stop_requested = False
             self._interrupted = False
             
-            # Initialize for Whisper tracking
-            self.generated_text = ""
-            self.current_spoken_content.clear()
+            # Create a new session for this speaking operation
+            self.current_session = self._create_session()
             
-            if self.whisper_tracker and self.track_spoken_content:
-                self.whisper_tracker.start_tracking(f"tts_stream_session_{int(time.time())}")
+            if self.current_session.whisper_tracker and self.track_spoken_content:
+                self.current_session.whisper_tracker.start_tracking()
             
             await self._start_streaming_generator(text_generator)
             
@@ -478,8 +536,15 @@ class AsyncTTSStreamer:
         self._stop_requested = True
         self._interrupted = True
         
-        # Clear audio queue immediately
-        self._clear_audio_queue()
+        # Mark current session as interrupted
+        if self.current_session:
+            self.current_session.was_interrupted = True
+            self.current_session.end_time = time.time()
+        
+        # Clear audio queue immediately and repeatedly
+        for _ in range(3):  # Clear multiple times to ensure empty
+            self._clear_audio_queue()
+            await asyncio.sleep(0.01)  # Small delay between clears
         
         # Close WebSocket
         if self.websocket:
@@ -496,6 +561,9 @@ class AsyncTTSStreamer:
                 await self.audio_task
             except asyncio.CancelledError:
                 pass
+        
+        # Don't force close the stream here - let the worker do it gracefully
+        # This avoids the PortAudio errors
         
         # Stop audio playback and wait for thread to exit
         await self._stop_audio_playback_async()
@@ -543,7 +611,8 @@ class AsyncTTSStreamer:
                 
             text_buffer += text_chunk
             # Accumulate for Whisper tracking
-            self.generated_text += text_chunk
+            if self.current_session:
+                self.current_session.generated_text += text_chunk
             
             # Send chunks at natural breaks
             if any(punct in text_buffer for punct in ['.', '!', '?', ',', ';']) or len(text_buffer) > 40:
@@ -620,7 +689,7 @@ class AsyncTTSStreamer:
                 if "audio" in data and data["audio"] and not self._stop_requested:
                     try:
                         audio_data = base64.b64decode(data["audio"])
-                        if len(audio_data) > 0:
+                        if len(audio_data) > 0 and not self._stop_requested:  # Double-check before queuing
                             self.audio_queue.put(audio_data)
                     except Exception as e:
                         print(f"Failed to decode TTS audio: {e}")
@@ -711,7 +780,7 @@ class AsyncTTSStreamer:
         # Wait for playback thread to exit in a non-blocking way
         if self.playback_thread and self.playback_thread.is_alive():
             # Use asyncio to wait for thread without blocking
-            max_wait_time = 1.0  # Maximum 1 second wait
+            max_wait_time = 0.5  # Reduced to 500ms for faster stopping
             start_time = asyncio.get_event_loop().time()
             
             while (self.playback_thread.is_alive() and 
@@ -722,14 +791,18 @@ class AsyncTTSStreamer:
                 print("⚠️ Audio thread didn't exit cleanly, forcing...")
                 # Thread should exit on its own when is_playing = False
         
-        # Clean up audio stream
+        # Clean up audio stream if it still exists
         if self.stream:
             try:
-                self.stream.stop_stream()
-                self.stream.close()
-                print("🔇 Audio stream closed")
+                # Check if stream is still active before trying to stop
+                if hasattr(self.stream, '_stream') and self.stream._stream:
+                    self.stream.stop_stream()
+                    self.stream.close()
+                    print("🔇 Audio stream closed")
             except Exception as e:
-                print(f"Error stopping audio stream: {e}")
+                # This is expected if stream was already closed in stop()
+                if "Stream not open" not in str(e):
+                    print(f"Error stopping audio stream: {e}")
             self.stream = None
         
         self.playback_thread = None
@@ -739,25 +812,59 @@ class AsyncTTSStreamer:
         """Worker thread for audio playback with responsive stop handling and audio capture."""
         print("🎵 Audio playback worker started")
         
+        # Capture the session this worker is associated with
+        worker_session = self.current_session
+        
         while self.is_playing and not self._stop_requested:
             try:
-                # Use shorter timeout for more responsive stopping
-                audio_chunk = self.audio_queue.get(timeout=0.1)
+                # Use very short timeout for more responsive stopping
+                audio_chunk = self.audio_queue.get(timeout=0.05)  # 50ms timeout
                 
-                # Double-check stop status before writing
+                # Double-check stop status and session before writing
                 if audio_chunk and self.stream and not self._stop_requested and self.is_playing:
+                    # Also check if this worker's session is still the current one
+                    if worker_session != self.current_session:
+                        print(f"🛑 Audio worker detected session change, stopping playback")
+                        self.audio_queue.task_done()
+                        break
+                        
                     try:
                         # Mark that we're actively playing
                         self._actively_playing_chunk = True
                         
-                        # Play the audio (this blocks until chunk is played)
-                        self.stream.write(audio_chunk)
+                        # Split chunk into smaller pieces for more responsive stopping
+                        # Each chunk is about 1024 samples, we'll split into ~100ms pieces
+                        chunk_samples = len(audio_chunk) // 2  # 16-bit audio = 2 bytes per sample
+                        samples_per_100ms = self.config.sample_rate // 10  # 100ms worth of samples
+                        
+                        # Play in smaller segments
+                        offset = 0
+                        while offset < len(audio_chunk):
+                            # Check for interruption before each segment
+                            if self._stop_requested or not self.is_playing or worker_session != self.current_session:
+                                print("🛑 Stopping mid-chunk playback")
+                                break
+                                
+                            # Calculate segment size (100ms or remaining chunk)
+                            segment_size = min(samples_per_100ms * 2, len(audio_chunk) - offset)
+                            audio_segment = audio_chunk[offset:offset + segment_size]
+                            
+                            # Play the segment with error handling
+                            try:
+                                if self.stream and self.stream._stream:
+                                    self.stream.write(audio_segment)
+                            except Exception as e:
+                                # Stream was closed or error occurred
+                                if "Stream not open" not in str(e) and "-9986" not in str(e):
+                                    print(f"Audio segment write error: {e}")
+                                break
+                            offset += segment_size
                         
                         # Mark that we're done playing
                         self._actively_playing_chunk = False
                         
-                        # Capture audio for Whisper tracking
-                        if self.whisper_tracker and self.track_spoken_content:
+                        # Only do Whisper tracking if we played the full chunk
+                        if offset >= len(audio_chunk) and worker_session and worker_session.whisper_tracker and self.track_spoken_content:
                             try:
                                 # Convert bytes to numpy array for Whisper
                                 # ElevenLabs returns PCM 22050Hz, Whisper needs 16kHz
@@ -774,7 +881,9 @@ class AsyncTTSStreamer:
                                     if num_samples > 0:
                                         # Use scipy.signal.resample for high-quality resampling
                                         audio_16k = signal.resample(audio_np, num_samples)
-                                        self.whisper_tracker.add_audio_chunk(audio_16k.astype(np.float32))
+                                        # Only add to tracker if it's still the current session's tracker
+                                        if worker_session == self.current_session:
+                                            worker_session.whisper_tracker.add_audio_chunk(audio_16k.astype(np.float32))
                             except Exception as e:
                                 print(f"Whisper audio capture error: {e}")
                         
@@ -799,13 +908,37 @@ class AsyncTTSStreamer:
         print("🔇 Audio playback worker exited")
     
     def _clear_audio_queue(self):
-        """Clear the audio queue."""
+        """Clear the audio queue thoroughly."""
+        cleared_count = 0
+        # Try multiple approaches to ensure queue is empty
+        
+        # First, use qsize to determine how many items to clear
+        initial_size = self.audio_queue.qsize()
+        
+        # Clear using get_nowait
         while not self.audio_queue.empty():
             try:
                 self.audio_queue.get_nowait()
-                self.audio_queue.task_done()
+                cleared_count += 1
             except queue.Empty:
                 break
+        
+        # Double-check with qsize and clear any remaining
+        remaining = self.audio_queue.qsize()
+        for _ in range(remaining):
+            try:
+                self.audio_queue.get_nowait()
+                cleared_count += 1
+            except queue.Empty:
+                break
+        
+        # Create a new queue to ensure it's truly empty
+        if self.audio_queue.qsize() > 0:
+            self.audio_queue = queue.Queue()
+            cleared_count = initial_size  # Assume we cleared everything
+        
+        if cleared_count > 0:
+            print(f"🗑️ Cleared {cleared_count} audio chunks from queue")
     
     async def _cleanup_stream(self):
         """Clean up streaming resources."""
@@ -829,10 +962,10 @@ class AsyncTTSStreamer:
         self._stop_audio_playback()
         
         # Stop Whisper tracking and collect spoken content
-        if self.whisper_tracker and self.track_spoken_content:
+        if self.current_session and self.current_session.whisper_tracker and self.track_spoken_content:
             try:
-                self.current_spoken_content = self.whisper_tracker.stop_tracking()
-                print(f"🎙️ Captured {len(self.current_spoken_content)} spoken segments")
+                self.current_session.current_spoken_content = self.current_session.whisper_tracker.stop_tracking()
+                print(f"🎙️ Captured {len(self.current_session.current_spoken_content)} spoken segments")
             except Exception as e:
                 print(f"Error stopping Whisper tracking: {e}")
     
@@ -843,7 +976,9 @@ class AsyncTTSStreamer:
         Returns:
             List of SpokenContent objects representing what was actually spoken
         """
-        return self.current_spoken_content.copy()
+        if not self.current_session:
+            return []
+        return self.current_session.current_spoken_content.copy()
     
     def get_spoken_text(self) -> str:
         """
@@ -852,7 +987,9 @@ class AsyncTTSStreamer:
         Returns:
             Combined text of what was actually spoken
         """
-        return " ".join(content.text for content in self.current_spoken_content)
+        if not self.current_session:
+            return ""
+        return " ".join(content.text for content in self.current_session.current_spoken_content)
     
     def get_spoken_text_heuristic(self) -> str:
         """
@@ -863,49 +1000,49 @@ class AsyncTTSStreamer:
         Returns:
             Portion of original generated text that was likely spoken
         """
-        if not self.generated_text:
+        if not self.current_session or not self.current_session.generated_text:
             return ""
         
         # If TTS was interrupted, use Whisper character count heuristic
-        if self._interrupted and self.current_spoken_content:
+        if self._interrupted and self.current_session.current_spoken_content:
             # Get total character count from Whisper
-            whisper_char_count = sum(len(content.text) for content in self.current_spoken_content)
+            whisper_char_count = sum(len(content.text) for content in self.current_session.current_spoken_content)
             
             if whisper_char_count == 0:
                 return ""
             
             # Find this position in original text
-            target_position = min(whisper_char_count, len(self.generated_text))
+            target_position = min(whisper_char_count, len(self.current_session.generated_text))
             
             # Round up to nearest complete word boundary
-            if target_position >= len(self.generated_text):
+            if target_position >= len(self.current_session.generated_text):
                 # If Whisper captured more than generated (shouldn't happen), return full text
-                return self.generated_text
+                return self.current_session.generated_text
             
             # Find the end of the word at target position
             word_end_position = target_position
             
             # If we're in the middle of a word, find the end
-            while (word_end_position < len(self.generated_text) and 
-                   self.generated_text[word_end_position] not in [' ', '.', ',', '!', '?', ';', ':', '\n']):
+            while (word_end_position < len(self.current_session.generated_text) and 
+                   self.current_session.generated_text[word_end_position] not in [' ', '.', ',', '!', '?', ';', ':', '\n']):
                 word_end_position += 1
             
             # Check if we're in the middle of an emotive marker (between asterisks)
-            result_text = self.generated_text[:word_end_position]
+            result_text = self.current_session.generated_text[:word_end_position]
             asterisk_count = result_text.count('*')
             
             # If odd number of asterisks, we're in the middle of an emotive marker
             if asterisk_count % 2 == 1:
                 # Find the closing asterisk
-                close_pos = self.generated_text.find('*', word_end_position)
+                close_pos = self.current_session.generated_text.find('*', word_end_position)
                 if close_pos != -1:
                     word_end_position = close_pos + 1
             
-            return self.generated_text[:word_end_position].strip()
+            return self.current_session.generated_text[:word_end_position].strip()
         
         else:
             # TTS completed successfully - return full generated text
-            return self.generated_text
+            return self.current_session.generated_text
     
     def get_generated_vs_spoken(self) -> Dict[str, str]:
         """
@@ -914,8 +1051,11 @@ class AsyncTTSStreamer:
         Returns:
             Dictionary with 'generated', 'spoken_whisper', and 'spoken_heuristic' keys
         """
+        if not self.current_session:
+            return {"generated": "", "spoken_whisper": "", "spoken_heuristic": ""}
+            
         return {
-            "generated": self.generated_text,
+            "generated": self.current_session.generated_text,
             "spoken_whisper": self.get_spoken_text(),
             "spoken_heuristic": self.get_spoken_text_heuristic()
         }
@@ -928,12 +1068,15 @@ class AsyncTTSStreamer:
         Returns:
             True if likely fully spoken, False if interrupted
         """
+        if not self.current_session:
+            return False
+            
         spoken_heuristic = self.get_spoken_text_heuristic()
-        if not self.generated_text or not spoken_heuristic:
+        if not self.current_session.generated_text or not spoken_heuristic:
             return False
         
         # If heuristic captured at least 90% of generated text, consider it fully spoken
-        return len(spoken_heuristic) >= (len(self.generated_text) * 0.9)
+        return len(spoken_heuristic) >= (len(self.current_session.generated_text) * 0.9)
 
     async def cleanup(self):
         """Clean up all resources."""

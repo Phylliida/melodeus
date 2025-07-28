@@ -40,6 +40,8 @@ class ConversationState:
     conversation_history: List[ConversationTurn] = field(default_factory=list)
     # Track what utterance is currently being processed
     current_processing_turn: Optional[ConversationTurn] = None
+    # Track the current LLM streaming task so we can cancel it
+    current_llm_task: Optional[asyncio.Task] = None
 
 class UnifiedVoiceConversation:
     """Unified voice conversation system with YAML configuration."""
@@ -573,7 +575,25 @@ class UnifiedVoiceConversation:
             await self.tts.stop()
             interrupted = True
         
-        # Add the new user utterance to conversation history
+        if interrupted:
+            # Cancel any ongoing LLM streaming task BEFORE adding the user utterance
+            if self.state.current_llm_task and not self.state.current_llm_task.done():
+                print("🚫 Cancelling LLM streaming task")
+                self.state.current_llm_task.cancel()
+                # Wait a moment for cancellation to take effect and history to be updated
+                try:
+                    await asyncio.wait_for(self.state.current_llm_task, timeout=0.5)
+                except (asyncio.CancelledError, asyncio.TimeoutError):
+                    pass
+                self.state.current_llm_task = None
+            
+            # Clear processing state
+            self.state.is_speaking = False
+            self.state.is_processing_llm = False
+            self.state.current_processing_turn = None
+            print("🔄 All AI processing interrupted and state cleared")
+        
+        # Add the new user utterance to conversation history AFTER handling interruption
         user_turn = ConversationTurn(
             role="user",
             content=result.text,
@@ -584,13 +604,6 @@ class UnifiedVoiceConversation:
         self.state.conversation_history.append(user_turn)
         self._log_conversation_turn("user", result.text)
         print(f"💬 Added user utterance: '{result.text}'")
-        
-        if interrupted:
-            # Clear processing state
-            self.state.is_speaking = False
-            self.state.is_processing_llm = False
-            self.state.current_processing_turn = None
-            print("🔄 All AI processing interrupted and state cleared")
         
         # Process the new utterance immediately
         print("🚀 Processing utterance")
@@ -766,13 +779,27 @@ class UnifiedVoiceConversation:
             for i, turn in enumerate(all_turns):
                 # Include everything except assistant turns that were never spoken
                 if turn.role == "user" or turn.status in ["completed", "interrupted"]:
+                    # For prefill mode, add speaker prefix
+                    content = turn.content
+                    if self.config.conversation.conversation_mode == "prefill":
+                        if turn.role == "user":
+                            # User messages should have the user participant name
+                            user_name = self.config.conversation.prefill_participants[0] if self.config.conversation.prefill_participants else "H"
+                            if not content.startswith(f"{user_name}:"):
+                                content = f"{user_name}: {content}"
+                        else:  # assistant
+                            # Assistant messages should have the assistant participant name
+                            assistant_name = self.config.conversation.prefill_participants[1] if len(self.config.conversation.prefill_participants) > 1 else "Claude"
+                            if not content.startswith(f"{assistant_name}:"):
+                                content = f"{assistant_name}: {content}"
+                    
                     messages.append({
                         "role": turn.role,
-                        "content": turn.content
+                        "content": content
                     })
                     included_count += 1
                     if i >= print_threshold:  # Only print last 20
-                        print(f"   ✅ Including {turn.role} ({turn.status}): '{turn.content[:50]}...'")
+                        print(f"   ✅ Including {turn.role} ({turn.status}): '{content[:50]}...'")
                 else:
                     if i >= print_threshold:  # Only print last 20
                         print(f"   ⚠️ Excluding {turn.role} turn with status '{turn.status}': '{turn.content[:50]}...'")
@@ -781,8 +808,18 @@ class UnifiedVoiceConversation:
             
             print("🤖 Getting LLM response...")
             
-            # Stream LLM response to TTS
-            await self._stream_llm_to_tts(messages, user_input)
+            # Create task for streaming LLM response to TTS
+            self.state.current_llm_task = asyncio.create_task(
+                self._stream_llm_to_tts(messages, user_input)
+            )
+            
+            # Wait for the task to complete
+            try:
+                await self.state.current_llm_task
+            except asyncio.CancelledError:
+                print("🛑 LLM streaming task was cancelled")
+            finally:
+                self.state.current_llm_task = None
             
         except Exception as e:
             print(f"LLM processing error: {e}")
@@ -807,6 +844,11 @@ class UnifiedVoiceConversation:
         response_added_to_history = False  # Prevent duplicate history additions
         
         try:
+            # Check if task was cancelled before we even start
+            if asyncio.current_task() and asyncio.current_task().cancelled():
+                print(f"🚫 Task {call_id} cancelled before starting")
+                return
+                
             self.state.is_speaking = True
             
             # Create async generator for LLM response
@@ -858,25 +900,48 @@ class UnifiedVoiceConversation:
             # Use multi-voice TTS streaming
             print("🎭 Using multi-voice streaming")
             result = await self.tts.speak_stream_multi_voice(llm_generator())
+            
+            # Check if we were cancelled during TTS
+            if asyncio.current_task() and asyncio.current_task().cancelled():
+                print(f"🚫 Task {call_id} cancelled during/after TTS")
+                raise asyncio.CancelledError()
+                
             print(f"🎭 Multi-voice result: {result}")
             tts_processing_complete = True
             
             if not result:
                 print("⚠️ Multi-voice TTS failed or was interrupted")
-                # Still need to get what was spoken before interruption
-                spoken_heuristic = self.tts.get_spoken_text_heuristic().strip()
-                if spoken_heuristic and not response_added_to_history:
-                    # Add the interrupted assistant response
-                    assistant_turn = ConversationTurn(
-                        role="assistant",
-                        content=spoken_heuristic,
-                        timestamp=datetime.now(),
-                        status="interrupted"
-                    )
-                    self.state.conversation_history.append(assistant_turn)
-                    self._log_conversation_turn("assistant", spoken_heuristic)
-                    print(f"💬 Added interrupted assistant response: '{spoken_heuristic[:100]}...'")
-                    response_added_to_history = True
+                # For interrupted responses, we should capture ALL the text that was generated
+                # not just what was spoken (for proper context in future turns)
+                if hasattr(self.tts, 'current_session') and self.tts.current_session:
+                    full_generated = self.tts.current_session.generated_text.strip()
+                    if full_generated and not response_added_to_history:
+                        # Add the full generated text with interrupted status
+                        assistant_turn = ConversationTurn(
+                            role="assistant",
+                            content=full_generated,
+                            timestamp=datetime.now(),
+                            status="interrupted"
+                        )
+                        self.state.conversation_history.append(assistant_turn)
+                        self._log_conversation_turn("assistant", full_generated)
+                        print(f"💬 Added interrupted assistant response (full):")
+                        print(f"   Generated: {len(full_generated)} chars - '{full_generated[:80]}...'")
+                        response_added_to_history = True
+                else:
+                    # Fallback to heuristic if we can't get full text
+                    spoken_heuristic = self.tts.get_spoken_text_heuristic().strip()
+                    if spoken_heuristic and not response_added_to_history:
+                        assistant_turn = ConversationTurn(
+                            role="assistant",
+                            content=spoken_heuristic,
+                            timestamp=datetime.now(),
+                            status="interrupted"
+                        )
+                        self.state.conversation_history.append(assistant_turn)
+                        self._log_conversation_turn("assistant", spoken_heuristic)
+                        print(f"💬 Added interrupted assistant response (heuristic): '{spoken_heuristic[:100]}...'")
+                        response_added_to_history = True
                 return
             
             # Use heuristic approach for conversation history (preserves exact LLM text)
@@ -892,8 +957,13 @@ class UnifiedVoiceConversation:
                 print(f"   Fully spoken: {was_fully_spoken}")
                 print(f"   Heuristic text: '{spoken_heuristic[:200]}...'")
             
-            # Determine content for history using heuristic approach
-            content_for_history = spoken_heuristic if spoken_heuristic else assistant_response
+            # Determine content for history
+            # If fully spoken, use the complete generated text (no need for Whisper)
+            # If interrupted, use Whisper heuristic to get only what was spoken
+            if was_fully_spoken:
+                content_for_history = assistant_response  # Use full generated text
+            else:
+                content_for_history = spoken_heuristic if spoken_heuristic else assistant_response
             
             # Update conversation history based on completion status
             if content_for_history.strip() and not response_added_to_history:
@@ -911,14 +981,72 @@ class UnifiedVoiceConversation:
                 response_added_to_history = True
                 
                 if was_fully_spoken:
-                    print(f"💬 Added complete assistant response: '{content_for_history[:100]}...'")
+                    print(f"💬 Added complete assistant response: {len(content_for_history)} chars")
+                    print(f"   Content: '{content_for_history[:100]}...'")
                 else:
-                    print(f"💬 Added partial assistant response: '{content_for_history[:100]}...' (heuristic)")
+                    print(f"💬 Added partial assistant response (Whisper heuristic):")
+                    print(f"   Generated: {len(assistant_response)} chars")
+                    print(f"   Spoken: {len(content_for_history)} chars - '{content_for_history[:80]}...'")
                 
             else:
                 # User turns remain completed even if assistant response was interrupted
                 print(f"🛑 Response was interrupted - no assistant content added (call_id: {call_id})")
             
+        except asyncio.CancelledError:
+            print(f"🚫 LLM streaming task {call_id} was cancelled")
+            # Make sure to stop TTS if it's still running
+            if self.tts.is_streaming:
+                await self.tts.stop()
+            
+            # Add the interrupted response to history before exiting
+            if not response_added_to_history:
+                # Try to get what was actually spoken using Whisper heuristic
+                spoken_text = self.tts.get_spoken_text_heuristic().strip()
+                generated_text = ""
+                if hasattr(self.tts, 'current_session') and self.tts.current_session:
+                    generated_text = self.tts.current_session.generated_text.strip()
+                
+                if spoken_text:
+                    assistant_turn = ConversationTurn(
+                        role="assistant",
+                        content=spoken_text,
+                        timestamp=datetime.now(),
+                        status="interrupted"
+                    )
+                    self.state.conversation_history.append(assistant_turn)
+                    self._log_conversation_turn("assistant", spoken_text)
+                    print(f"💬 Added cancelled assistant response (Whisper):")
+                    print(f"   Generated: {len(generated_text)} chars - '{generated_text[:80]}...'")
+                    print(f"   Spoken:    {len(spoken_text)} chars - '{spoken_text[:80]}...'")
+                    response_added_to_history = True
+                # Fallback to full generated text if Whisper not available
+                elif hasattr(self.tts, 'current_session') and self.tts.current_session:
+                    full_generated = self.tts.current_session.generated_text.strip()
+                    if full_generated:
+                        assistant_turn = ConversationTurn(
+                            role="assistant",
+                            content=full_generated,
+                            timestamp=datetime.now(),
+                            status="interrupted"
+                        )
+                        self.state.conversation_history.append(assistant_turn)
+                        self._log_conversation_turn("assistant", full_generated)
+                        print(f"💬 Added cancelled assistant response (full): '{full_generated[:100]}...'")
+                        response_added_to_history = True
+                # Final fallback to assistant_response if no TTS session
+                elif assistant_response.strip():
+                    assistant_turn = ConversationTurn(
+                        role="assistant",
+                        content=assistant_response,
+                        timestamp=datetime.now(),
+                        status="interrupted"
+                    )
+                    self.state.conversation_history.append(assistant_turn)
+                    self._log_conversation_turn("assistant", assistant_response)
+                    print(f"💬 Added cancelled assistant response (fallback): '{assistant_response[:100]}...'")
+                    response_added_to_history = True
+            
+            raise  # Re-raise to let the caller know we were cancelled
         except Exception as e:
             error_msg = str(e)
             print(f"Error in _stream_llm_to_tts: {e}")
