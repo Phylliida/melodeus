@@ -41,7 +41,7 @@ class ConversationConfig:
     interim_results: bool = True
     
     # TTS settings
-    tts_model: str = "eleven_multilingual_v2"
+    tts_model: str = "eleven_multilingual_v1"
     tts_speed: float = 1.0
     tts_stability: float = 0.5
     tts_similarity_boost: float = 0.8
@@ -60,6 +60,9 @@ class ConversationConfig:
     
     # History file settings
     history_file: Optional[str] = None
+    
+    # Tools configuration
+    tools_config: Optional[Dict[str, Any]] = None
     
     def __post_init__(self):
         if self.prefill_participants is None:
@@ -241,6 +244,7 @@ class ConfigLoader:
         audio_config_data = config_data.get('audio', {})
         logging_config_data = config_data.get('logging', {})
         dev_config_data = config_data.get('development', {})
+        tools_config = config_data.get('tools', {})
         
         # Create STT configuration
         stt_config = STTConfig(
@@ -307,7 +311,8 @@ class ConfigLoader:
             prefill_participants=conversation_config_data.get('prefill_participants', ['H', 'Claude']),
             prefill_system_prompt=conversation_config_data.get('prefill_system_prompt', 
                 'The assistant is in CLI simulation mode, and responds to the user\'s CLI commands only with outputs of the commands.'),
-            history_file=conversation_config_data.get('history_file')
+            history_file=conversation_config_data.get('history_file'),
+            tools_config=tools_config
         )
         
         # Create other configurations

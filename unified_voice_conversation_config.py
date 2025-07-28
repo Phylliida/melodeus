@@ -21,6 +21,7 @@ from anthropic import AsyncAnthropic
 from async_stt_module import AsyncSTTStreamer, STTEventType, STTResult
 from async_tts_module import AsyncTTSStreamer
 from config_loader import load_config, VoiceAIConfig
+from tools import create_tool_registry
 
 @dataclass
 class ConversationTurn:
@@ -42,6 +43,8 @@ class ConversationState:
     current_processing_turn: Optional[ConversationTurn] = None
     # Track the current LLM streaming task so we can cancel it
     current_llm_task: Optional[asyncio.Task] = None
+    # Track pending tool response to speak after interruption
+    pending_tool_response: Optional[str] = None
 
 class UnifiedVoiceConversation:
     """Unified voice conversation system with YAML configuration."""
@@ -68,6 +71,12 @@ class UnifiedVoiceConversation:
         
         # Initialize TTS system
         self.tts = AsyncTTSStreamer(config.tts)
+        
+        # Initialize tool registry
+        self.tool_registry = create_tool_registry(config.conversation.tools_config)
+        
+        # Set up tool execution callback
+        self.tts.on_tool_execution = self._handle_tool_execution
         
         # Set up STT callbacks
         self._setup_stt_callbacks()
@@ -671,6 +680,48 @@ class UnifiedVoiceConversation:
             except Exception as e:
                 print(f"❌ Error restarting STT: {e}")
                 self.logger.error(f"STT restart error: {e}")
+    
+    async def _handle_tool_execution(self, tool_call):
+        """Handle tool execution callback from TTS module."""
+        from async_tts_module import ToolCall, ToolResult
+        
+        print(f"🔧 Executing tool: {tool_call.tag_name}")
+        print(f"   Content: {tool_call.content}")
+        print(f"   Position: {tool_call.start_position}-{tool_call.end_position}")
+        
+        try:
+            # Create context for tool execution
+            context = {
+                'conversation_history': self.state.conversation_history,
+                'current_session': self.tts.current_session,
+                'config': self.config
+            }
+            
+            # Execute tool using registry
+            result = await self.tool_registry.execute_tool(tool_call, context)
+            
+            # Log tool execution result to conversation history
+            if result.content:
+                tool_turn = ConversationTurn(
+                    role="tool",
+                    content=f"[{tool_call.tag_name}] {result.content}",
+                    timestamp=datetime.now(),
+                    status="completed"
+                )
+                self.state.conversation_history.append(tool_turn)
+                self._log_conversation_turn("tool", tool_turn.content)
+            
+            # If tool wants to interrupt and has content, we may need to speak it
+            if result.should_interrupt and result.content:
+                # Store for later processing after current TTS is interrupted
+                self.state.pending_tool_response = result.content
+            
+            return result
+                    
+        except Exception as e:
+            print(f"❌ Error executing tool: {e}")
+            self.logger.error(f"Tool execution error: {e}")
+            return ToolResult(should_interrupt=False, content=None)
     
     async def _process_pending_utterances(self):
         """Process pending utterances from conversation history."""

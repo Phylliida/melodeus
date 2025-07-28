@@ -48,6 +48,21 @@ class TTSConfig:
     emotive_similarity_boost: float = 0.8
 
 @dataclass
+class ToolCall:
+    """Represents a tool call embedded in the text."""
+    tag_name: str  # e.g., "function", "search", etc.
+    content: str  # The full XML content including tags
+    start_position: int  # Character position in generated_text where tool should execute
+    end_position: int  # Character position where tool content ends
+    executed: bool = False
+
+@dataclass
+class ToolResult:
+    """Result from tool execution."""
+    should_interrupt: bool  # Whether to interrupt current speech
+    content: Optional[str] = None  # Optional content to insert into conversation/speak
+    
+@dataclass
 class TTSSession:
     """Represents a single TTS speaking session with its own isolated state."""
     session_id: str
@@ -57,6 +72,8 @@ class TTSSession:
     start_time: float = field(default_factory=time.time)
     end_time: Optional[float] = None
     whisper_tracker: Optional['WhisperTTSTracker'] = None  # Session-specific tracker
+    tool_calls: List[ToolCall] = field(default_factory=list)  # Tools to execute during speech
+    spoken_text_for_tts: str = ""  # Text actually sent to TTS (excludes tool content)
 
 class AsyncTTSStreamer:
     """Async TTS Streamer with interruption capabilities and spoken content tracking."""
@@ -93,6 +110,9 @@ class AsyncTTSStreamer:
         # Current session tracking
         self.current_session: Optional[TTSSession] = None
         self._session_counter = 0  # For generating unique session IDs
+        
+        # Tool execution callback
+        self.on_tool_execution = None  # Callback: async def(tool_call: ToolCall) -> ToolResult
         
         # Whisper will be initialized per session
     
@@ -226,9 +246,15 @@ class AsyncTTSStreamer:
             self._final_audio_received = False
             self._queue_monitoring_task = None
             self._all_text_sent = False
+            self._speech_monitor_task = None
             
             if self.track_spoken_content and self.current_session.whisper_tracker:
                 self.current_session.whisper_tracker.start_tracking()
+            
+            # Start speech progress monitoring for tool execution
+            progress_monitor_task = None
+            if self.track_spoken_content:
+                progress_monitor_task = asyncio.create_task(self._monitor_speech_progress())
             
             # Ensure audio playback is ready
             # But first, ensure any previous audio is completely stopped
@@ -267,35 +293,64 @@ class AsyncTTSStreamer:
             self.is_streaming = True
             
             text_buffer = ""
+            xml_buffer = ""  # Buffer for incomplete XML tags
+            in_xml_tag = False
+            current_xml_start = -1
             
             async for chunk in text_generator:
                 if self._stop_requested:
                     self._interrupted = True
                     break
                     
-                text_buffer += chunk
+                # Add to generated text regardless
                 if self.current_session:
                     self.current_session.generated_text += chunk
                 
+                # Process each character to detect XML tags
+                for i, char in enumerate(chunk):
+                    if char == '<' and not in_xml_tag:
+                        # Potential start of XML tag
+                        in_xml_tag = True
+                        current_xml_start = len(self.current_session.generated_text) - len(chunk) + i
+                        xml_buffer = char
+                    elif in_xml_tag:
+                        xml_buffer += char
+                        if char == '>':
+                            # Check if this is a closing tag or complete tag
+                            if xml_buffer.endswith('/>') or self._is_closing_tag(xml_buffer):
+                                # Complete XML tag found
+                                tag_end = len(self.current_session.generated_text) - len(chunk) + i + 1
+                                # The position where the tool should execute is where the tag started
+                                self._process_xml_tag(xml_buffer, len(self.current_session.spoken_text_for_tts), tag_end)
+                                in_xml_tag = False
+                                xml_buffer = ""
+                                current_xml_start = -1
+                    else:
+                        # Regular text - add to buffer only if not in XML
+                        text_buffer += char
+                        if self.current_session:
+                            self.current_session.spoken_text_for_tts += char
+                
                 # Process complete sentences/phrases for voice switching
-                sentences = self._split_into_sentences(text_buffer)
-                
-                # Keep the last incomplete sentence in buffer
-                if sentences and not text_buffer.rstrip().endswith(('.', '!', '?')):
-                    complete_sentences = sentences[:-1]
-                    text_buffer = sentences[-1]
-                else:
-                    complete_sentences = sentences
-                    text_buffer = ""
-                
-                # Process each complete sentence with appropriate voice
-                for sentence in complete_sentences:
-                    if sentence.strip():
-                        await self._speak_sentence_with_voice_switching(sentence)
-                        
-                        if self._stop_requested:
-                            self._interrupted = True
-                            break
+                if not in_xml_tag:  # Only process when not inside XML
+                    sentences = self._split_into_sentences(text_buffer)
+                    
+                    # Keep the last incomplete sentence in buffer
+                    if sentences and not text_buffer.rstrip().endswith(('.', '!', '?')):
+                        complete_sentences = sentences[:-1]
+                        text_buffer = sentences[-1]
+                    else:
+                        complete_sentences = sentences
+                        text_buffer = ""
+                    
+                    # Process each complete sentence with appropriate voice
+                    for sentence in complete_sentences:
+                        if sentence.strip():
+                            await self._speak_sentence_with_voice_switching(sentence)
+                            
+                            if self._stop_requested:
+                                self._interrupted = True
+                                break
             
             # Process any remaining text in buffer
             if text_buffer.strip() and not self._stop_requested:
@@ -304,6 +359,11 @@ class AsyncTTSStreamer:
             # Mark that all text has been sent
             self._all_text_sent = True
             print(f"📝 All text sent to TTS ({self._total_websockets} websockets created)")
+            
+            # Start monitoring speech progress for tool execution if we have tool calls
+            if self.current_session.tool_calls and self.track_spoken_content:
+                print(f"🔍 Starting speech progress monitoring for {len(self.current_session.tool_calls)} tool calls")
+                self._speech_monitor_task = asyncio.create_task(self._monitor_speech_progress())
             
             # Wait for all audio to finish playing (simple polling approach)
             if not self._stop_requested:
@@ -327,6 +387,20 @@ class AsyncTTSStreamer:
                     pass
             return False
         finally:
+            # Cancel progress monitor if running
+            if hasattr(self, '_speech_monitor_task') and self._speech_monitor_task and not self._speech_monitor_task.done():
+                self._speech_monitor_task.cancel()
+                try:
+                    await self._speech_monitor_task
+                except asyncio.CancelledError:
+                    pass
+            if progress_monitor_task and not progress_monitor_task.done():
+                progress_monitor_task.cancel()
+                try:
+                    await progress_monitor_task
+                except asyncio.CancelledError:
+                    pass
+            
             self.is_streaming = False
             await self._cleanup_multi_voice()
 
@@ -335,6 +409,95 @@ class AsyncTTSStreamer:
         # Simple sentence splitting - can be enhanced
         sentences = re.split(r'(?<=[.!?])\s+', text)
         return [s.strip() for s in sentences if s.strip()]
+    
+    def _is_closing_tag(self, xml_buffer: str) -> bool:
+        """Check if the XML buffer contains a complete tag with closing."""
+        # Simple check - can be enhanced for nested tags
+        tag_match = re.match(r'<(\w+)[^>]*>', xml_buffer)
+        if tag_match:
+            tag_name = tag_match.group(1)
+            # Check if we have the closing tag
+            return f'</{tag_name}>' in xml_buffer
+        return False
+    
+    def _is_closing_tag(self, xml_buffer: str) -> bool:
+        """Check if the buffer contains a closing tag."""
+        # Check for self-closing tag
+        if xml_buffer.endswith('/>'):
+            return True
+        # Check if we have a closing tag pattern
+        if re.match(r'</\w+>', xml_buffer):
+            return True
+        # Check if we have opening and closing tags
+        tag_match = re.match(r'<(\w+)[^>]*>', xml_buffer)
+        if tag_match:
+            tag_name = tag_match.group(1)
+            return f'</{tag_name}>' in xml_buffer
+        return False
+    
+    def _process_xml_tag(self, xml_content: str, start_pos: int, end_pos: int):
+        """Process a complete XML tag and add it to tool calls."""
+        if not self.current_session:
+            return
+            
+        # Extract tag name
+        tag_match = re.match(r'<(\w+)[^>]*>', xml_content)
+        if tag_match:
+            tag_name = tag_match.group(1)
+            
+            # Create tool call
+            tool_call = ToolCall(
+                tag_name=tag_name,
+                content=xml_content,
+                start_position=start_pos,
+                end_position=end_pos
+            )
+            
+            self.current_session.tool_calls.append(tool_call)
+            print(f"🔧 Found tool call: {tag_name} at position {start_pos}")
+    
+    async def _monitor_speech_progress(self):
+        """Monitor speech progress using Whisper and execute tools when appropriate."""
+        if not self.current_session or not self.current_session.whisper_tracker:
+            return
+            
+        while self.is_streaming and not self._stop_requested:
+            await asyncio.sleep(0.5)  # Check every 500ms
+            
+            # Get current spoken character count
+            spoken_text = self.current_session.whisper_tracker.get_spoken_text()
+            spoken_chars = len(spoken_text)
+            
+            # Check which tools should be executed
+            for tool_call in self.current_session.tool_calls:
+                if not tool_call.executed and spoken_chars >= tool_call.start_position:
+                    # Execute the tool
+                    await self._execute_tool(tool_call)
+                    tool_call.executed = True
+    
+    async def _execute_tool(self, tool_call: ToolCall):
+        """Execute a tool call and handle the result."""
+        print(f"🚀 Executing tool: {tool_call.tag_name} at spoken position {tool_call.start_position}")
+        
+        # Call the registered callback if available
+        if self.on_tool_execution:
+            try:
+                result = await self.on_tool_execution(tool_call)
+                
+                if result.should_interrupt:
+                    print(f"🛑 Tool requested interruption")
+                    # Stop current TTS playback
+                    self._stop_requested = True
+                    self.current_session.was_interrupted = True
+                    
+                    # If there's content to speak, queue it up
+                    if result.content:
+                        print(f"📢 Tool returned content to speak: {result.content[:50]}...")
+                        # Store the content for the conversation handler to process
+                        # This will be handled by the conversation manager
+                        
+            except Exception as e:
+                print(f"❌ Tool execution error: {e}")
 
     async def _speak_sentence_with_voice_switching(self, sentence: str):
         """Speak a sentence with appropriate voice switching for emotive parts."""
@@ -1011,8 +1174,11 @@ class AsyncTTSStreamer:
             if whisper_char_count == 0:
                 return ""
             
-            # Find this position in original text
-            target_position = min(whisper_char_count, len(self.current_session.generated_text))
+            # Use spoken_text_for_tts as the reference since that's what was actually sent to TTS
+            reference_text = self.current_session.spoken_text_for_tts or self.current_session.generated_text
+            
+            # Find this position in the reference text
+            target_position = min(whisper_char_count, len(reference_text))
             
             # Round up to nearest complete word boundary
             if target_position >= len(self.current_session.generated_text):
