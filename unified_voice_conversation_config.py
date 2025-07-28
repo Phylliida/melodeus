@@ -22,15 +22,17 @@ from async_stt_module import AsyncSTTStreamer, STTEventType, STTResult
 from async_tts_module import AsyncTTSStreamer
 from config_loader import load_config, VoiceAIConfig
 from tools import create_tool_registry
+from character_system import create_character_manager, CharacterManager
 
 @dataclass
 class ConversationTurn:
     """Represents a single turn in the conversation."""
-    role: str  # "user" or "assistant"  
+    role: str  # "user", "assistant", "system", or "tool"
     content: str
     timestamp: datetime
     status: str = "completed"  # "pending", "processing", "completed", "interrupted"
     speaker_id: Optional[int] = None
+    character: Optional[str] = None  # Character name for multi-character conversations
 
 @dataclass 
 class ConversationState:
@@ -66,7 +68,8 @@ class UnifiedVoiceConversation:
             # Use async client for better responsiveness
             self.async_anthropic_client = AsyncAnthropic(api_key=config.conversation.anthropic_api_key)
         
-        # Initialize STT system
+        # Initialize STT system with participant names as keywords
+        self._setup_stt_keywords(config)
         self.stt = AsyncSTTStreamer(config.stt)
         
         # Initialize TTS system
@@ -74,6 +77,22 @@ class UnifiedVoiceConversation:
         
         # Initialize tool registry
         self.tool_registry = create_tool_registry(config.conversation.tools_config)
+        
+        # Initialize character manager if multi-character mode is enabled
+        self.character_manager: Optional[CharacterManager] = None
+        if config.conversation.enable_multi_character:
+            characters_config = {
+                "characters": config.conversation.characters_config or {},
+                "director": config.conversation.director_config or {},
+                "api_keys": {
+                    "openai": config.conversation.openai_api_key,
+                    "anthropic": config.conversation.anthropic_api_key,
+                    "deepgram": config.conversation.deepgram_api_key,
+                    "elevenlabs": config.conversation.elevenlabs_api_key
+                }
+            }
+            self.character_manager = create_character_manager(characters_config)
+            print("🎭 Multi-character mode enabled")
         
         # Set up tool execution callback
         self.tts.on_tool_execution = self._handle_tool_execution
@@ -120,23 +139,29 @@ class UnifiedVoiceConversation:
         
         Args:
             role: 'user' or 'assistant'
-            content: The message content
+            content: The message content (may already include speaker prefix)
         """
         try:
-            # Determine participant name based on role
-            if role == "user":
-                participant = "H"
-            else:  # assistant
-                # Use the AI participant name from prefill config if available
-                participant = "Claude"
-                if (hasattr(self.config.conversation, 'prefill_participants') and 
-                    self.config.conversation.prefill_participants and 
-                    len(self.config.conversation.prefill_participants) > 1):
-                    participant = self.config.conversation.prefill_participants[1]
-            
-            # Append to conversation log
-            with open(self.conversation_log_file, 'a', encoding='utf-8') as f:
-                f.write(f"{participant}: {content}\n\n")
+            # Check if content already has a speaker prefix (for multi-character mode)
+            if role == "assistant" and ": " in content and content.index(": ") < 50:
+                # Content already includes character name, use as-is
+                with open(self.conversation_log_file, 'a', encoding='utf-8') as f:
+                    f.write(f"{content}\n\n")
+            else:
+                # Determine participant name based on role
+                if role == "user":
+                    participant = "H"
+                else:  # assistant
+                    # Use the AI participant name from prefill config if available
+                    participant = "Claude"
+                    if (hasattr(self.config.conversation, 'prefill_participants') and 
+                        self.config.conversation.prefill_participants and 
+                        len(self.config.conversation.prefill_participants) > 1):
+                        participant = self.config.conversation.prefill_participants[1]
+                
+                # Append to conversation log
+                with open(self.conversation_log_file, 'a', encoding='utf-8') as f:
+                    f.write(f"{participant}: {content}\n\n")
                 
         except Exception as e:
             print(f"⚠️ Failed to log conversation turn: {e}")
@@ -163,6 +188,57 @@ class UnifiedVoiceConversation:
         except Exception as e:
             print(f"⚠️ Failed to log loaded history: {e}")
             self.logger.error(f"Failed to log loaded history: {e}")
+    
+    def _setup_stt_keywords(self, config: VoiceAIConfig):
+        """Setup STT keywords including character names."""
+        keywords = []
+        
+        # Add character names from multi-character mode
+        if config.conversation.enable_multi_character and config.conversation.characters_config:
+            for char_name, char_config in config.conversation.characters_config.items():
+                # Add character key name with high weight
+                keywords.append((char_name, 10.0))
+                
+                # Add prefill name if different
+                if isinstance(char_config, dict) and 'prefill_name' in char_config:
+                    prefill_name = char_config['prefill_name']
+                    if prefill_name != char_name:
+                        # For Nova-3, we can use multi-word keyterms
+                        if config.stt.model == "nova-3":
+                            keywords.append((prefill_name, 10.0))
+                        else:
+                            # For other models, only add individual words
+                            for word in prefill_name.split():
+                                if len(word) > 2:  # Skip short words
+                                    keywords.append((word, 10.0))
+        
+        # Add prefill participant names from regular mode
+        elif config.conversation.prefill_participants:
+            for participant in config.conversation.prefill_participants:
+                if config.stt.model == "nova-3":
+                    # Nova-3 can handle full phrases
+                    keywords.append((participant, 10.0))
+                else:
+                    # Other models: add individual words
+                    for word in participant.split():
+                        if len(word) > 2:  # Skip short words
+                            keywords.append((word, 10.0))
+        
+        # Add any existing keywords from config
+        if hasattr(config.stt, 'keywords') and config.stt.keywords:
+            keywords.extend(config.stt.keywords)
+        
+        # Remove duplicates while keeping highest weight
+        keyword_dict = {}
+        for word, weight in keywords:
+            if word not in keyword_dict or weight > keyword_dict[word]:
+                keyword_dict[word] = weight
+        
+        # Convert back to list of tuples
+        config.stt.keywords = [(word, weight) for word, weight in keyword_dict.items()]
+        
+        if config.stt.keywords:
+            print(f"🔤 Added {len(config.stt.keywords)} keywords to STT including: {list(keyword_dict.keys())[:5]}")
     
     def _setup_logging(self):
         """Configure logging based on configuration."""
@@ -262,7 +338,8 @@ class UnifiedVoiceConversation:
                 # For multi-speaker support, content already includes speaker name
                 # Check if content already has speaker format, if not add human name
                 content = msg['content']
-                if not re.match(r'^[^:]+:\s', content):
+                # More flexible check - allow with or without space after colon
+                if not re.match(r'^[^:]+:', content):
                     content = f"{human_name}: {content}"
                 conversation_turns.append(content)
             elif msg["role"] == "assistant":
@@ -747,6 +824,434 @@ class UnifiedVoiceConversation:
             
         await self._process_with_llm(combined_content, pending_turns[0])  # Pass first turn for reference
     
+    async def _process_with_character_llm(self, user_input: str, reference_turn: ConversationTurn):
+        """Process user input with multi-character system."""
+        try:
+            self.state.is_processing_llm = True
+            
+            # Let director decide who speaks next
+            next_speaker = await self.character_manager.select_next_speaker(
+                self._get_conversation_history_for_director()
+            )
+            
+            if next_speaker == "USER" or next_speaker is None:
+                print("🎭 Director: User should speak next")
+                self.state.is_processing_llm = False
+                return
+            
+            # Set active character
+            self.character_manager.set_active_character(next_speaker)
+            character_config = self.character_manager.get_character_config(next_speaker)
+            
+            if not character_config:
+                print(f"❌ Unknown character: {next_speaker}")
+                self.state.is_processing_llm = False
+                return
+            
+            print(f"🎭 {next_speaker} is responding...")
+            
+            # Get formatted messages for this character
+            messages = self.character_manager.format_messages_for_character(
+                next_speaker,
+                self._get_conversation_history_for_character()
+            )
+            
+            # Request timestamp for logging
+            request_timestamp = time.time()
+            request_filename = ""
+            
+            # If using prefill mode, convert messages
+            if self.config.conversation.conversation_mode == "prefill" and character_config.llm_provider == "anthropic":
+                # Get prefill name for this character
+                prefill_name = character_config.prefill_name or character_config.name
+                
+                # Convert messages to prefill format with character-specific name
+                messages = self._convert_character_messages_to_prefill(messages, prefill_name)
+                
+                # Log the converted prefill request
+                request_filename = self._log_llm_request(
+                    messages, 
+                    character_config.llm_model, 
+                    request_timestamp,
+                    character_config.llm_provider
+                )
+            else:
+                # Log the regular request
+                request_filename = self._log_llm_request(
+                    messages, 
+                    character_config.llm_model, 
+                    request_timestamp,
+                    character_config.llm_provider
+                )
+            
+            # Stream response based on provider
+            assistant_response = ""
+            
+            if character_config.llm_provider == "openai":
+                # Temporarily set character voice
+                original_config = self._set_character_voice(character_config)
+                try:
+                    # Create TTS task for this character
+                    self.state.current_llm_task = asyncio.create_task(
+                        self.tts.speak_stream_multi_voice(
+                            self._stream_character_openai_response(messages, character_config, request_timestamp)
+                        )
+                    )
+                    
+                    # Wait for completion
+                    try:
+                        completed = await self.state.current_llm_task
+                    except asyncio.CancelledError:
+                        print("⚠️ Character response was interrupted")
+                        completed = False
+                    
+                    # Get the appropriate text based on whether it was interrupted
+                    if hasattr(self.tts, 'current_session') and self.tts.current_session:
+                        if completed:
+                            # Use full generated text for completed responses
+                            assistant_response = self.tts.current_session.generated_text.strip()
+                        else:
+                            # Use spoken heuristic for interrupted responses
+                            assistant_response = self.tts.get_spoken_text_heuristic().strip()
+                        print(f"📝 Captured assistant response: {len(assistant_response)} chars")
+                    else:
+                        print("⚠️ No TTS session or generated text available")
+                finally:
+                    # Restore original voice config
+                    self._restore_voice_config(original_config)
+            elif character_config.llm_provider == "anthropic":
+                # Temporarily set character voice
+                original_config = self._set_character_voice(character_config)
+                try:
+                    # Create TTS task for this character
+                    self.state.current_llm_task = asyncio.create_task(
+                        self.tts.speak_stream_multi_voice(
+                            self._stream_character_anthropic_response(messages, character_config, request_timestamp)
+                        )
+                    )
+                    
+                    # Wait for completion
+                    try:
+                        completed = await self.state.current_llm_task
+                    except asyncio.CancelledError:
+                        print("⚠️ Character response was interrupted")
+                        completed = False
+                    
+                    # Get the appropriate text based on whether it was interrupted
+                    if hasattr(self.tts, 'current_session') and self.tts.current_session:
+                        if completed:
+                            # Use full generated text for completed responses
+                            assistant_response = self.tts.current_session.generated_text.strip()
+                        else:
+                            # Use spoken heuristic for interrupted responses
+                            assistant_response = self.tts.get_spoken_text_heuristic().strip()
+                        print(f"📝 Captured assistant response: {len(assistant_response)} chars")
+                    else:
+                        print("⚠️ No TTS session or generated text available")
+                finally:
+                    # Restore original voice config
+                    self._restore_voice_config(original_config)
+            
+            # Log the response
+            if assistant_response.strip():
+                response_timestamp = time.time()
+                self._log_llm_response(
+                    assistant_response,
+                    request_filename,
+                    response_timestamp,
+                    was_interrupted=False,
+                    error=None,
+                    provider=character_config.llm_provider
+                )
+                print(f"✅ Logged assistant response: {len(assistant_response)} chars")
+            else:
+                print(f"⚠️ No assistant response to log (empty or whitespace)")
+            
+            # Add character's response to conversation history
+            if assistant_response.strip():
+                print(f"💬 Adding assistant response to history: {len(assistant_response)} chars from {next_speaker}")
+                # Determine status based on completion
+                status = "completed" if completed else "interrupted"
+                assistant_turn = ConversationTurn(
+                    role="assistant",
+                    content=assistant_response,
+                    timestamp=datetime.now(),
+                    status=status,
+                    character=next_speaker
+                )
+                self.state.conversation_history.append(assistant_turn)
+                # For multi-character mode, log with character name prefix (no brackets)
+                self._log_conversation_turn("assistant", f"{next_speaker}: {assistant_response}")
+                print(f"✅ Added assistant response to conversation history")
+                
+                # Add to character manager context
+                self.character_manager.add_turn_to_context(next_speaker, assistant_response)
+            else:
+                print(f"⚠️ Skipping empty assistant response")
+            
+            # After character speaks, check if another character should speak
+            await asyncio.sleep(0.5)  # Brief pause
+            
+            # Recursively check for next speaker (with depth limit)
+            if not hasattr(self, '_character_depth'):
+                self._character_depth = 0
+            
+            self._character_depth += 1
+            if self._character_depth < 3:  # Max 3 characters in a row
+                await self._process_with_character_llm("", reference_turn)
+            else:
+                self._character_depth = 0
+                
+        except Exception as e:
+            print(f"❌ Character LLM error: {e}")
+            self.logger.error(f"Character LLM error: {e}")
+        finally:
+            self.state.is_processing_llm = False
+    
+    async def _stream_character_openai_response(self, messages, character_config, request_timestamp):
+        """Stream response from OpenAI for a specific character."""
+        client = self.character_manager.get_character_client(character_config.name)
+        
+        try:
+            response = await client.chat.completions.create(
+                model=character_config.llm_model,
+                messages=messages,
+                stream=True,
+                max_tokens=character_config.max_tokens,
+                temperature=character_config.temperature
+            )
+            
+            async for chunk in response:
+                if chunk.choices[0].delta.content:
+                    yield chunk.choices[0].delta.content
+                    
+        except Exception as e:
+            print(f"❌ OpenAI streaming error for {character_config.name}: {e}")
+            raise
+    
+    async def _stream_character_anthropic_response(self, messages, character_config, request_timestamp):
+        """Stream response from Anthropic for a specific character."""
+        client = self.character_manager.get_character_client(character_config.name)
+        
+        try:
+            # Check for prefill format using metadata or structure
+            is_prefill_format = False
+            prefill_name = None
+            
+            if len(messages) > 0:
+                last_msg = messages[-1]
+                # Check for our metadata marker
+                if last_msg.get("_is_prefill"):
+                    is_prefill_format = True
+                    prefill_name = last_msg.get("_prefill_name", character_config.name)
+                # Fallback: check if last message is assistant (typical prefill pattern)
+                elif (last_msg.get("role") == "assistant" and 
+                      self.config.conversation.conversation_mode == "prefill"):
+                    is_prefill_format = True
+                    prefill_name = character_config.prefill_name or character_config.name
+            
+            # Extract system content and prepare messages
+            system_content = ""
+            anthropic_messages = []
+            
+            for msg in messages:
+                if msg["role"] == "system":
+                    system_content = msg["content"]
+                else:
+                    # Create a clean copy without metadata
+                    clean_msg = {"role": msg["role"], "content": msg["content"]}
+                    anthropic_messages.append(clean_msg)
+            
+            # Generate stop sequences for multi-character conversations
+            stop_sequences = []
+            if is_prefill_format:
+                # Add all character names as stop sequences
+                for char_name in self.character_manager.characters.keys():
+                    stop_sequences.append(f"\n\n{char_name}:")
+                    # Also add prefill names if different
+                    char_config = self.character_manager.get_character_config(char_name)
+                    if char_config and char_config.prefill_name and char_config.prefill_name != char_name:
+                        stop_sequences.append(f"\n\n{char_config.prefill_name}:")
+                
+                # Add human names
+                if hasattr(self.config.conversation, 'prefill_participants'):
+                    human_name = self.config.conversation.prefill_participants[0]
+                    stop_sequences.append(f"\n\n{human_name}:")
+                
+                # Add any detected speakers
+                if hasattr(self, 'detected_speakers') and self.detected_speakers:
+                    for speaker in self.detected_speakers:
+                        speaker_stop = f"\n\n{speaker}:"
+                        if speaker_stop not in stop_sequences:
+                            stop_sequences.append(speaker_stop)
+                
+                # Remove duplicates while preserving order
+                stop_sequences = list(dict.fromkeys(stop_sequences))
+                print(f"🛑 Character using stop sequences: {stop_sequences}")
+            
+            response = await client.messages.create(
+                model=character_config.llm_model,
+                messages=anthropic_messages,
+                system=system_content,
+                stream=True,
+                max_tokens=character_config.max_tokens,
+                temperature=character_config.temperature,
+                stop_sequences=stop_sequences if stop_sequences else None
+            )
+            
+            # Track if we need to skip the prefill prefix
+            skip_prefix = is_prefill_format
+            prefix_buffer = "" if skip_prefix else None
+            
+            async for chunk in response:
+                if chunk.type == "content_block_delta" and chunk.delta.text:
+                    text = chunk.delta.text
+                    
+                    # Skip the character name prefix in prefill mode
+                    if skip_prefix and prefix_buffer is not None:
+                        prefix_buffer += text
+                        # Check if we've seen the full prefix
+                        expected_prefix = f"{prefill_name}: "
+                        if len(prefix_buffer) >= len(expected_prefix):
+                            # We've seen enough, check if it matches
+                            if prefix_buffer.startswith(expected_prefix):
+                                # Skip the prefix, yield the rest
+                                yield prefix_buffer[len(expected_prefix):]
+                            else:
+                                # Doesn't match expected prefix, yield everything
+                                yield prefix_buffer
+                            prefix_buffer = None  # Stop checking
+                        # else continue buffering
+                    else:
+                        yield text
+                    
+        except Exception as e:
+            print(f"❌ Anthropic streaming error for {character_config.name}: {e}")
+            raise
+    
+    def _get_conversation_history_for_director(self):
+        """Get conversation history formatted for director."""
+        history = []
+        for turn in self.state.conversation_history[-20:]:  # Last 20 turns
+            # Include both completed and interrupted turns
+            if turn.status in ["completed", "interrupted"]:
+                entry = {
+                    "role": turn.role,
+                    "content": turn.content
+                }
+                if turn.character:
+                    entry["character"] = turn.character
+                history.append(entry)
+        return history
+    
+    def _set_character_voice(self, character_config):
+        """Set TTS voice for a specific character."""
+        if not character_config or not self.character_manager:
+            return None
+            
+        voice_settings = self.character_manager.get_character_voice_settings(
+            character_config.name
+        )
+        
+        # Save original config
+        original_config = {
+            "voice_id": self.tts.config.voice_id,
+            "speed": self.tts.config.speed,
+            "stability": self.tts.config.stability,
+            "similarity_boost": self.tts.config.similarity_boost
+        }
+        
+        # Apply character voice settings
+        if voice_settings.get("voice_id"):
+            self.tts.config.voice_id = voice_settings["voice_id"]
+            self.tts.config.speed = voice_settings.get("speed", 1.0)
+            self.tts.config.stability = voice_settings.get("stability", 0.5)
+            self.tts.config.similarity_boost = voice_settings.get("similarity_boost", 0.8)
+            
+            print(f"🎤 Set voice for {character_config.name}: {voice_settings['voice_id']}")
+        
+        return original_config
+    
+    def _restore_voice_config(self, original_config):
+        """Restore original TTS voice configuration."""
+        if original_config:
+            self.tts.config.voice_id = original_config["voice_id"]
+            self.tts.config.speed = original_config["speed"]
+            self.tts.config.stability = original_config["stability"]
+            self.tts.config.similarity_boost = original_config["similarity_boost"]
+    
+    def _convert_character_messages_to_prefill(self, messages: List[Dict[str, str]], character_prefill_name: str) -> List[Dict[str, str]]:
+        """Convert character messages to prefill format with character-specific name."""
+        # Extract system prompt
+        system_prompt = ""
+        chat_messages = []
+        
+        for msg in messages:
+            if msg["role"] == "system":
+                system_prompt = msg["content"]
+            else:
+                chat_messages.append(msg)
+        
+        # Convert to prefill format with character name
+        conversation_parts = []
+        human_name = "H"  # Default human name
+        
+        for msg in chat_messages:
+            if msg["role"] == "user":
+                # Check if it's a character message or human message
+                if msg["content"].startswith("[") and "]: " in msg["content"]:
+                    # It's another character's message
+                    conversation_parts.append(msg["content"])
+                else:
+                    # It's a human message - check if it already has a speaker prefix
+                    content = msg['content']
+                    if not re.match(r'^[^:]+:', content):
+                        content = f"{human_name}: {content}"
+                    conversation_parts.append(content)
+            else:  # assistant
+                # This character's previous messages
+                conversation_parts.append(f"{character_prefill_name}: {msg['content']}")
+        
+        # Create prefill format
+        # For character prefill, we need to put the conversation in the assistant prefix
+        # not in the user message, similar to regular prefill format
+        if conversation_parts:
+            assistant_prefix = "\n\n".join(conversation_parts) + f"\n\n{character_prefill_name}:"
+        else:
+            assistant_prefix = f"{character_prefill_name}:"
+        
+        # Use the standard prefill user message
+        user_message = self.config.conversation.prefill_user_message
+        
+        # Return in Anthropic prefill format with metadata
+        prefill_messages = [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": user_message},
+            {"role": "assistant", "content": assistant_prefix}
+        ]
+        
+        # Add metadata to indicate this is prefill format
+        prefill_messages[-1]["_is_prefill"] = True
+        prefill_messages[-1]["_prefill_name"] = character_prefill_name
+        
+        return prefill_messages
+    
+    def _get_conversation_history_for_character(self):
+        """Get conversation history formatted for character LLM."""
+        history = []
+        for turn in self.state.conversation_history:
+            # Include both completed and interrupted turns
+            if turn.status in ["completed", "interrupted"]:
+                entry = {
+                    "role": turn.role,
+                    "content": turn.content
+                }
+                if turn.character:
+                    entry["character"] = turn.character
+                history.append(entry)
+        return history
+    
+    
     async def _conversation_manager(self):
         """Simplified conversation manager - processing is now handled by _process_pending_utterances."""
         print("🔄 Conversation manager started (simplified)")
@@ -796,6 +1301,17 @@ class UnifiedVoiceConversation:
         """Process user input with LLM and speak response."""
         if self.state.is_processing_llm:
             print(f"⚠️ Already processing LLM, skipping: {user_input}")
+            return
+        
+        # Mark all processing user turns as completed NOW since we're committing to process them
+        for turn in self.state.conversation_history:
+            if turn.role == "user" and turn.status == "processing":
+                turn.status = "completed"
+                print(f"   ✅ Marked user turn as completed: '{turn.content[:50]}...'")
+        
+        # If multi-character mode, delegate to character processing
+        if self.character_manager:
+            await self._process_with_character_llm(user_input, reference_turn)
             return
         
         try:
@@ -894,6 +1410,8 @@ class UnifiedVoiceConversation:
         tts_processing_complete = False  # Flag to prevent duplicate processing
         response_added_to_history = False  # Prevent duplicate history additions
         
+        # Request will be logged when we make the actual API call
+        
         try:
             # Check if task was cancelled before we even start
             if asyncio.current_task() and asyncio.current_task().cancelled():
@@ -908,6 +1426,9 @@ class UnifiedVoiceConversation:
                 
                 if self.config.conversation.llm_provider == "openai":
                     async for chunk in self._stream_openai_response(messages, request_timestamp):
+                        if isinstance(chunk, dict) and 'request_filename' in chunk:
+                            request_filename = chunk['request_filename']
+                            continue
                         # Check for interruption during LLM generation
                         if not self.state.is_speaking or not self.state.is_processing_llm:
                             print("🛑 LLM streaming interrupted by user")
@@ -926,6 +1447,9 @@ class UnifiedVoiceConversation:
                         
                 elif self.config.conversation.llm_provider == "anthropic":
                     async for chunk in self._stream_anthropic_response(messages, request_timestamp):
+                        if isinstance(chunk, dict) and 'request_filename' in chunk:
+                            request_filename = chunk['request_filename']
+                            continue
                         # Check for interruption during LLM generation
                         if not self.state.is_speaking or not self.state.is_processing_llm:
                             print("🛑 LLM streaming interrupted by user")
@@ -1129,8 +1653,9 @@ class UnifiedVoiceConversation:
         
         for model in models_to_try:
             try:
-                # Log the request before making the API call
+                # Log the request right before making the API call
                 request_filename = self._log_llm_request(messages, model, request_timestamp, "openai")
+                yield {'request_filename': request_filename}
                 
                 response = self.openai_client.chat.completions.create(
                     model=model,
@@ -1160,13 +1685,6 @@ class UnifiedVoiceConversation:
                 if self.config.conversation.conversation_mode == "prefill":
                     user_message, assistant_prefix = self._convert_to_prefill_format(messages)
                     
-                    # Log the request before making the API call
-                    prefill_messages = [
-                        {"role": "user", "content": user_message},
-                        {"role": "assistant", "content": assistant_prefix}
-                    ]
-                    request_filename = self._log_llm_request(prefill_messages, model, request_timestamp, "anthropic")
-                    
                     # Use Anthropic's completion API with prefill and CLI system prompt
                     # Generate stop sequences from configured participant names and detected speakers
                     human_name = self.config.conversation.prefill_participants[0]
@@ -1184,14 +1702,19 @@ class UnifiedVoiceConversation:
                     
                     print(f"🛑 Using stop sequences: {stop_sequences}")
                     
+                    # Log the prefilled messages right before the API call
+                    prefill_messages = [
+                        {"role": "user", "content": user_message},
+                        {"role": "assistant", "content": assistant_prefix}
+                    ]
+                    request_filename = self._log_llm_request(prefill_messages, model, request_timestamp, "anthropic")
+                    yield {'request_filename': request_filename}
+                    
                     response = await self.async_anthropic_client.messages.create(
                         model=model,
                         max_tokens=self.config.conversation.max_tokens,
                         system=self.config.conversation.prefill_system_prompt,
-                        messages=[
-                            {"role": "user", "content": user_message},
-                            {"role": "assistant", "content": assistant_prefix}
-                        ],
+                        messages=prefill_messages,
                         stop_sequences=stop_sequences,
                         stream=True
                     )
@@ -1206,8 +1729,9 @@ class UnifiedVoiceConversation:
                         else:
                             anthropic_messages.append(msg)
                     
-                    # Log the request before making the API call
+                    # Log the request right before making the API call
                     request_filename = self._log_llm_request(anthropic_messages, model, request_timestamp, "anthropic")
+                    yield {'request_filename': request_filename}
                     
                     # Use Anthropic's chat API
                     kwargs = {

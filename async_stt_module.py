@@ -8,7 +8,7 @@ import asyncio
 import pyaudio
 import time
 from dataclasses import dataclass, field
-from typing import Optional, Callable, Dict, Any, List
+from typing import Optional, Callable, Dict, Any, List, Tuple
 from datetime import datetime
 from enum import Enum
 
@@ -54,6 +54,8 @@ class STTConfig:
     # Speaker identification settings
     enable_speaker_id: bool = False
     speaker_profiles_path: Optional[str] = None
+    # Custom vocabulary/keywords for better recognition
+    keywords: Optional[List[Tuple[str, float]]] = None  # List of (word, weight) tuples
 
 class AsyncSTTStreamer:
     """Async STT Streamer with callback support."""
@@ -125,19 +127,52 @@ class AsyncSTTStreamer:
             self.connection = self.deepgram.listen.websocket.v("1")
             
             # Configure options with explicit audio format
-            options = LiveOptions(
-                model=self.config.model,
-                language=self.config.language,
-                encoding="linear16",  # Critical: Explicit audio encoding
-                sample_rate=self.config.sample_rate,  # Explicit sample rate
-                channels=self.config.channels,  # Explicit channel count
-                smart_format=self.config.smart_format,
-                interim_results=self.config.interim_results,
-                punctuate=self.config.punctuate,
-                diarize=self.config.diarize,
-                utterance_end_ms=self.config.utterance_end_ms,
-                vad_events=self.config.vad_events
-            )
+            options_dict = {
+                "model": self.config.model,
+                "language": self.config.language,
+                "encoding": "linear16",  # Critical: Explicit audio encoding
+                "sample_rate": self.config.sample_rate,  # Explicit sample rate
+                "channels": self.config.channels,  # Explicit channel count
+                "smart_format": self.config.smart_format,
+                "interim_results": self.config.interim_results,
+                "punctuate": self.config.punctuate,
+                "diarize": self.config.diarize,
+                "utterance_end_ms": self.config.utterance_end_ms,
+                "vad_events": self.config.vad_events
+            }
+            
+            # Add keywords/keyterms based on model
+            if self.config.keywords:
+                if self.config.model == "nova-3":
+                    # Nova-3 uses keyterm parameter with space-separated terms
+                    # Extract just the words (ignore weights for nova-3)
+                    keyterms = []
+                    for word, weight in self.config.keywords:
+                        # Keep the original formatting for proper nouns
+                        keyterms.append(word)
+                    
+                    if keyterms:
+                        # Join with spaces for nova-3
+                        keyterm_string = " ".join(keyterms)
+                        options_dict["keyterm"] = keyterm_string
+                        print(f"🔤 Using keyterms (Nova-3): {keyterms[:5]}...")
+                        print(f"   Full keyterm string: {keyterm_string[:100]}...")
+                else:
+                    # Other models use keywords with weights
+                    sanitized_keywords = []
+                    for word, weight in self.config.keywords:
+                        # Replace spaces with underscores for older models
+                        sanitized_word = word.replace(" ", "_").replace(",", "")
+                        if sanitized_word:
+                            sanitized_keywords.append(f"{sanitized_word}:{weight}")
+                    
+                    if sanitized_keywords:
+                        keyword_string = ",".join(sanitized_keywords)
+                        options_dict["keywords"] = keyword_string
+                        print(f"🔤 Using keywords: {sanitized_keywords[:5]}...")
+                        print(f"   Full keyword string: {keyword_string[:100]}...")
+            
+            options = LiveOptions(**options_dict)
             
             # Set up event handlers
             self.connection.on(LiveTranscriptionEvents.Open, self._on_open)

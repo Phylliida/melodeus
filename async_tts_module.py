@@ -403,6 +403,9 @@ class AsyncTTSStreamer:
             
             self.is_streaming = False
             await self._cleanup_multi_voice()
+            
+        # Return success/failure based on interruption
+        return not self._interrupted
 
     def _split_into_sentences(self, text: str) -> List[str]:
         """Split text into sentences for voice processing."""

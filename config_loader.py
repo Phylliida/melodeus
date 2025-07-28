@@ -64,6 +64,11 @@ class ConversationConfig:
     # Tools configuration
     tools_config: Optional[Dict[str, Any]] = None
     
+    # Multi-character configuration
+    characters_config: Optional[Dict[str, Any]] = None
+    director_config: Optional[Dict[str, Any]] = None
+    enable_multi_character: bool = False
+    
     def __post_init__(self):
         if self.prefill_participants is None:
             self.prefill_participants = ['H', 'Claude']
@@ -245,6 +250,20 @@ class ConfigLoader:
         logging_config_data = config_data.get('logging', {})
         dev_config_data = config_data.get('development', {})
         tools_config = config_data.get('tools', {})
+        characters_config = config_data.get('characters', {})
+        director_config = config_data.get('director', {})
+        
+        # Parse keywords if provided
+        keywords = None
+        if 'keywords' in stt_config_data:
+            keywords = []
+            for kw in stt_config_data['keywords']:
+                if isinstance(kw, dict):
+                    keywords.append((kw['word'], kw.get('weight', 5.0)))
+                elif isinstance(kw, str):
+                    keywords.append((kw, 5.0))  # Default weight
+                elif isinstance(kw, (list, tuple)) and len(kw) >= 2:
+                    keywords.append((kw[0], float(kw[1])))
         
         # Create STT configuration
         stt_config = STTConfig(
@@ -261,7 +280,8 @@ class ConfigLoader:
             utterance_end_ms=stt_config_data.get('utterance_end_ms', 1000),
             vad_events=stt_config_data.get('vad_events', True),
             enable_speaker_id=stt_config_data.get('enable_speaker_id', False),
-            speaker_profiles_path=stt_config_data.get('speaker_profiles_path')
+            speaker_profiles_path=stt_config_data.get('speaker_profiles_path'),
+            keywords=keywords
         )
         
         # Create TTS configuration
@@ -312,7 +332,10 @@ class ConfigLoader:
             prefill_system_prompt=conversation_config_data.get('prefill_system_prompt', 
                 'The assistant is in CLI simulation mode, and responds to the user\'s CLI commands only with outputs of the commands.'),
             history_file=conversation_config_data.get('history_file'),
-            tools_config=tools_config
+            tools_config=tools_config,
+            characters_config=characters_config,
+            director_config=director_config,
+            enable_multi_character=bool(characters_config)
         )
         
         # Create other configurations
