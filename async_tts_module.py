@@ -72,6 +72,7 @@ class AsyncTTSStreamer:
         self._total_websockets = 0
         self._audio_completion_event = asyncio.Event()
         self._final_audio_received = False
+        self._queue_monitoring_task = None
         
         # Whisper tracking
         self.whisper_tracker: Optional[WhisperTTSTracker] = None
@@ -194,6 +195,7 @@ class AsyncTTSStreamer:
             self._total_websockets = 0
             self._audio_completion_event.clear()
             self._final_audio_received = False
+            self._queue_monitoring_task = None
             
             if self.track_spoken_content and self.whisper_tracker:
                 self.whisper_tracker.start_tracking()
@@ -372,11 +374,13 @@ class AsyncTTSStreamer:
                     print(f"🔊 Websocket completed ({self._websockets_completed}/{self._total_websockets})")
                     
                     # Check if all websockets are complete
-                    if self._websockets_completed >= self._total_websockets:
+                    if (self._websockets_completed >= self._total_websockets and 
+                        self._queue_monitoring_task is None and 
+                        not self._final_audio_received):
                         self._final_audio_received = True
                         print("🔊 All websockets completed, starting final audio detection")
-                        # Start monitoring for audio queue to finish
-                        asyncio.create_task(self._monitor_audio_queue_completion())
+                        # Start single monitoring task for audio queue completion
+                        self._queue_monitoring_task = asyncio.create_task(self._monitor_audio_queue_completion())
                     
                     break
                     
@@ -388,31 +392,28 @@ class AsyncTTSStreamer:
     async def _monitor_audio_queue_completion(self):
         """Monitor for audio queue completion after all websockets finish."""
         try:
-            max_wait = 30.0  # Maximum wait time
-            start_time = time.time()
-            
             print("🔊 Monitoring audio queue for completion...")
             
-            while not self._stop_requested and (time.time() - start_time) < max_wait:
-                await asyncio.sleep(0.2)  # Check more frequently
+            while not self._stop_requested:
+                await asyncio.sleep(0.5)  # Check every 500ms
                 
-                # If queue is empty or very small, assume playback is done
+                # Wait for queue to be completely empty
                 queue_size = self.audio_queue.qsize()
-                if queue_size <= 5:  # Allow small buffer
-                    print(f"🔊 Audio queue nearly empty ({queue_size} chunks), signaling completion")
-                    # Wait a tiny bit more for final chunks
-                    await asyncio.sleep(1.0)
-                    self._audio_completion_event.set()
-                    break
-                
-                # Show progress occasionally
-                if int(time.time() - start_time) % 3 == 0:
-                    print(f"🔊 Queue monitoring: {queue_size} chunks remaining")
-            
-            # Timeout case
-            if not self._stop_requested and not self._audio_completion_event.is_set():
-                print("⏰ Audio queue monitor timeout")
-                self._audio_completion_event.set()
+                if queue_size == 0:
+                    print(f"🔊 Audio queue is empty, waiting a bit more to ensure completion")
+                    # Wait to make sure no more chunks are coming
+                    await asyncio.sleep(1.0)  # Longer wait to be sure
+                    # Double-check it's still empty
+                    if self.audio_queue.qsize() == 0:
+                        print(f"🔊 Audio queue confirmed empty, signaling completion")
+                        self._audio_completion_event.set()
+                        break
+                    else:
+                        print(f"🔊 New chunks arrived, continuing to wait")
+                else:
+                    # Only show progress occasionally to reduce spam
+                    if queue_size % 10 == 0 or queue_size < 10:
+                        print(f"🔊 Queue: {queue_size} chunks remaining")
                 
         except Exception as e:
             print(f"Audio queue monitor error: {e}")
@@ -437,6 +438,16 @@ class AsyncTTSStreamer:
     async def _cleanup_multi_voice(self):
         """Clean up multi-voice streaming resources."""
         try:
+            # Cancel monitoring task if running
+            if self._queue_monitoring_task and not self._queue_monitoring_task.done():
+                self._queue_monitoring_task.cancel()
+                try:
+                    await self._queue_monitoring_task
+                except asyncio.CancelledError:
+                    pass
+                self._queue_monitoring_task = None
+                print("🛑 Cancelled queue monitoring task")
+            
             # Use the existing cleanup method for consistency
             await self._cleanup_stream()
                 
