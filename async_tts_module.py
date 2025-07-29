@@ -96,6 +96,10 @@ class AsyncTTSStreamer:
         self._stop_requested = False
         self._interrupted = False
         
+        # Callback for first audio chunk
+        self.first_audio_callback = None
+        self._first_audio_received = False
+        
         # Multi-voice completion tracking
         self._websockets_completed = 0
         self._total_websockets = 0
@@ -231,6 +235,7 @@ class AsyncTTSStreamer:
         try:
             self._stop_requested = False
             self._interrupted = False
+            self._first_audio_received = False
             
             # Create a new session for this speaking operation
             self.current_session = self._create_session()
@@ -313,6 +318,7 @@ class AsyncTTSStreamer:
         try:
             self._stop_requested = False
             self._interrupted = False
+            self._first_audio_received = False
             
             # Cancel any existing session and create a new one
             if self.current_session and not self.current_session.was_interrupted:
@@ -746,6 +752,11 @@ class AsyncTTSStreamer:
                     audio_data = base64.b64decode(data["audio"])
                     if not self._stop_requested:  # Double-check before queuing
                         self.audio_queue.put(audio_data)
+                        
+                        # Call first audio callback if not already called
+                        if not self._first_audio_received and self.first_audio_callback:
+                            self._first_audio_received = True
+                            asyncio.create_task(self.first_audio_callback())
                     
                     # Update last audio time for completion tracking
                     self._last_audio_time = time.time()
@@ -828,6 +839,7 @@ class AsyncTTSStreamer:
         try:
             self._stop_requested = False
             self._interrupted = False
+            self._first_audio_received = False
             
             # Create a new session for this speaking operation
             self.current_session = self._create_session()
@@ -1010,6 +1022,11 @@ class AsyncTTSStreamer:
                         audio_data = base64.b64decode(data["audio"])
                         if len(audio_data) > 0 and not self._stop_requested:  # Double-check before queuing
                             self.audio_queue.put(audio_data)
+                            
+                            # Call first audio callback if not already called
+                            if not self._first_audio_received and self.first_audio_callback:
+                                self._first_audio_received = True
+                                asyncio.create_task(self.first_audio_callback())
                     except Exception as e:
                         print(f"Failed to decode TTS audio: {e}")
                         continue
