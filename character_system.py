@@ -174,6 +174,8 @@ class CharacterManager:
             f"- {name}"
             for name, config in self.characters.items()
         ])
+        participants = participants + "\n- USER\n- H\n- None"
+        
         
         # Format conversation for director in prefill format
         recent_turns = []
@@ -216,9 +218,9 @@ class CharacterManager:
         
         # For director, present the conversation as context, then ask the question
         if conversation_text:
-            user_prompt = conversation_text + "\n\nSystem: Who should speak next? Respond with just the name of the participant. Director: "
+            user_prompt = conversation_text + "\n\nSystem: Who should speak next? Respond with just the name of the participant (if no one should speak, respond with 'None'). Director: "
         else:
-            user_prompt = "This is the start of a conversation. Who should speak first? Respond with just the name of the participant."
+            user_prompt = "This is the start of a conversation. Who should speak first? Respond with just the name of the participant (if no one should speak, respond with 'None')."
         
         # Log director request
         request_timestamp = time.time()
@@ -246,7 +248,7 @@ class CharacterManager:
             # Keep only last 5 turns for director
             shorter_turns = recent_turns[-5:] if len(recent_turns) > 5 else recent_turns
             shorter_text = "\n\n".join(shorter_turns)
-            user_prompt = shorter_text + "\n\nSystem: Who should speak next? Respond with just the name of the participant. Director: "
+            user_prompt = shorter_text + "\n\nSystem: Who should speak next? Respond with just the name of the participant (use 'USER' or 'H' for human). Director: "
             truncated_director_messages = [
                 {"role": "system", "content": system_prompt},
                 {"role": "user", "content": user_prompt}
@@ -338,8 +340,8 @@ class CharacterManager:
                 print(f"📝 Director returned multiple lines, using first: {next_speaker}")
             
             # Validate response
-            if next_speaker in ["USER", "H"]:
-                return "USER"  # Both H and USER mean human turn
+            if next_speaker in ["USER", "H", "None", "Human", "user", "h", "none", "human"]:
+                return "USER"  # All these mean human turn
             
             # Check if it's a direct character name
             if next_speaker in self.characters:
@@ -351,8 +353,9 @@ class CharacterManager:
                     print(f"🎭 Director used prefill name '{next_speaker}', mapping to character '{char_name}'")
                     return char_name
             
-            print(f"⚠️ Director returned unknown speaker: {next_speaker}")
-            return None
+            # If we don't recognize the speaker, default to USER
+            print(f"⚠️ Director returned unknown speaker: '{next_speaker}' - defaulting to USER")
+            return "USER"
                 
         except Exception as e:
             print(f"❌ Director error: {e}")
