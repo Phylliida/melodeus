@@ -48,6 +48,8 @@ class ConversationState:
     current_llm_task: Optional[asyncio.Task] = None
     # Track pending tool response to speak after interruption
     pending_tool_response: Optional[str] = None
+    # Track request generation to handle concurrent requests
+    request_generation: int = 0
 
 class UnifiedVoiceConversation:
     """Unified voice conversation system with YAML configuration."""
@@ -60,6 +62,12 @@ class UnifiedVoiceConversation:
         self.openai_client = None
         self.anthropic_client = None
         self.async_anthropic_client = None
+        
+        # Track processing tasks to prevent race conditions
+        self._processing_task = None
+        self._processing_generation = 0
+        # Track director requests separately
+        self._director_generation = 0
         
         if config.conversation.llm_provider == "openai":
             self.openai_client = OpenAI(api_key=config.conversation.openai_api_key)
@@ -1127,50 +1135,109 @@ class UnifiedVoiceConversation:
     
     async def _process_pending_utterances(self):
         """Process pending utterances from conversation history."""
-        # Use a lock to prevent concurrent processing
-        if self.state.is_processing_llm or self.state.is_speaking:
-            print("⏸️ Already processing, skipping pending utterances")
-            return
-            
-        # Find pending user utterances
-        pending_turns = [turn for turn in self.state.conversation_history 
-                        if turn.role == "user" and turn.status == "pending"]
+        # Increment generation to invalidate any previous processing
+        self._processing_generation += 1
+        current_generation = self._processing_generation
         
-        if not pending_turns:
-            return
+        # Cancel any existing processing task
+        if self._processing_task and not self._processing_task.done():
+            print("🚫 Cancelling previous processing task")
+            self._processing_task.cancel()
+            # Don't wait for it - let it cancel in background
             
-        # Process all pending turns
-        # Extract text content for display
-        text_contents = []
-        for turn in pending_turns:
-            if isinstance(turn.content, str):
-                text_contents.append(turn.content)
-            elif isinstance(turn.content, list):
-                # Extract text from content blocks
-                for item in turn.content:
-                    if item.get("type") == "text":
-                        text_contents.append(item.get("text", ""))
+        # Create new processing task
+        self._processing_task = asyncio.create_task(
+            self._do_process_pending_utterances(current_generation)
+        )
         
-        combined_text = " ".join(text_contents)
-        print(f"🧠 Processing {len(pending_turns)} pending utterances: '{combined_text}'")
-        
-        # Mark all pending turns as processing
-        for turn in pending_turns:
-            turn.status = "processing"
+    async def _do_process_pending_utterances(self, generation: int):
+        """Actually process pending utterances with generation tracking."""
+        try:
+            # Find pending user utterances
+            pending_turns = [turn for turn in self.state.conversation_history 
+                            if turn.role == "user" and turn.status == "pending"]
             
-        # For now, pass the combined text. The actual content (including images) 
-        # will be properly handled when building messages for the LLM
-        await self._process_with_llm(combined_text, pending_turns[0])  # Pass first turn for reference
+            if not pending_turns:
+                return
+                
+            # Check if we're still the current generation
+            if generation != self._processing_generation:
+                print(f"🚫 Processing cancelled - newer request exists (gen {generation} vs {self._processing_generation})")
+                return
+                
+            # Process all pending turns
+            # Extract text content for display
+            text_contents = []
+            for turn in pending_turns:
+                if isinstance(turn.content, str):
+                    text_contents.append(turn.content)
+                elif isinstance(turn.content, list):
+                    # Extract text from content blocks
+                    for item in turn.content:
+                        if item.get("type") == "text":
+                            text_contents.append(item.get("text", ""))
+            
+            combined_text = " ".join(text_contents)
+            print(f"🧠 Processing {len(pending_turns)} pending utterances: '{combined_text}'")
+            
+            # Mark all pending turns as processing
+            for turn in pending_turns:
+                turn.status = "processing"
+            
+            # Check generation again before processing
+            if generation != self._processing_generation:
+                print(f"🚫 Processing cancelled before LLM - newer request exists")
+                # Reset status for all turns
+                for turn in pending_turns:
+                    turn.status = "pending"
+                return
+                
+            # For now, pass the combined text. The actual content (including images) 
+            # will be properly handled when building messages for the LLM
+            await self._process_with_llm(combined_text, pending_turns[0], generation)  # Pass first turn for reference
+            
+        except asyncio.CancelledError:
+            print("🚫 Processing task cancelled")
+            # Reset status for pending turns
+            for turn in self.state.conversation_history:
+                if turn.role == "user" and turn.status == "processing":
+                    turn.status = "pending"
+            raise
+        except Exception as e:
+            print(f"❌ Error in processing: {e}")
+            import traceback
+            traceback.print_exc()
     
-    async def _process_with_character_llm(self, user_input: str, reference_turn: ConversationTurn):
+    async def _process_with_character_llm(self, user_input: str, reference_turn: ConversationTurn, generation: int = None):
         """Process user input with multi-character system."""
         try:
             self.state.is_processing_llm = True
+            
+            # Check generation early
+            if generation is not None and generation != self._processing_generation:
+                print(f"🚫 Character LLM processing cancelled - newer request exists")
+                self.state.is_processing_llm = False
+                return
+            
+            # Increment director generation and store it
+            self._director_generation += 1
+            director_gen = self._director_generation
             
             # Let director decide who speaks next
             next_speaker = await self.character_manager.select_next_speaker(
                 self._get_conversation_history_for_director()
             )
+            
+            # Check both processing generation and director generation
+            if generation is not None and generation != self._processing_generation:
+                print(f"🚫 Processing cancelled after director - newer utterance exists")
+                self.state.is_processing_llm = False
+                return
+                
+            if director_gen != self._director_generation:
+                print(f"🚫 Processing cancelled after director - newer director request exists")
+                self.state.is_processing_llm = False
+                return
             
             if next_speaker == "USER" or next_speaker is None:
                 print("🎭 Director: User should speak next")
@@ -1221,6 +1288,17 @@ class UnifiedVoiceConversation:
                 request_timestamp,
                 character_config.llm_provider
             )
+            
+            # Check both generations before starting LLM
+            if generation is not None and generation != self._processing_generation:
+                print(f"🚫 Processing cancelled before LLM call - newer utterance exists")
+                self.state.is_processing_llm = False
+                return
+                
+            if director_gen != self._director_generation:
+                print(f"🚫 Processing cancelled before LLM call - newer director request exists")
+                self.state.is_processing_llm = False
+                return
             
             # Stream response based on provider
             assistant_response = ""
@@ -1440,6 +1518,9 @@ class UnifiedVoiceConversation:
                         speaker_stop = f"\n\n{speaker}:"
                         if speaker_stop not in stop_sequences:
                             stop_sequences.append(speaker_stop)
+                
+                # Add System: to stop sequences
+                stop_sequences.append("\n\nSystem:")
                 
                 # Remove duplicates while preserving order
                 stop_sequences = list(dict.fromkeys(stop_sequences))
@@ -1893,12 +1974,17 @@ class UnifiedVoiceConversation:
         
         return False
     
-    async def _process_with_llm(self, user_input: str, reference_turn: ConversationTurn):
+    async def _process_with_llm(self, user_input: str, reference_turn: ConversationTurn, generation: int = None):
         """Process user input with LLM and speak response."""
         if self.state.is_processing_llm:
             print(f"⚠️ Already processing LLM, skipping: {user_input}")
             return
         
+        # Check generation if provided
+        if generation is not None and generation != self._processing_generation:
+            print(f"🚫 LLM processing cancelled - newer request exists")
+            return
+            
         # Mark all processing user turns as completed NOW since we're committing to process them
         for turn in self.state.conversation_history:
             if turn.role == "user" and turn.status == "processing":
@@ -1906,7 +1992,7 @@ class UnifiedVoiceConversation:
                 print(f"   ✅ Marked user turn as completed: '{turn.content[:50]}...'")
         
         # Always use character processing
-        await self._process_with_character_llm(user_input, reference_turn)
+        await self._process_with_character_llm(user_input, reference_turn, generation)
     async def _speak_text(self, text: str):
         """Speak a simple text message."""
         try:
