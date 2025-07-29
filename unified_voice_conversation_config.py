@@ -11,7 +11,7 @@ import time
 import json
 from pathlib import Path
 from dataclasses import dataclass, field
-from typing import Optional, List, Dict, Any, AsyncGenerator
+from typing import Optional, List, Dict, Any, AsyncGenerator, Union
 from datetime import datetime, timedelta
 from openai import OpenAI
 import anthropic
@@ -23,12 +23,13 @@ from async_tts_module import AsyncTTSStreamer
 from config_loader import load_config, VoiceAIConfig
 from tools import create_tool_registry
 from character_system import create_character_manager, CharacterManager
+from camera_capture import CameraCapture, CameraConfig as CameraCaptureConfig
 
 @dataclass
 class ConversationTurn:
     """Represents a single turn in the conversation."""
     role: str  # "user", "assistant", "system", or "tool"
-    content: str
+    content: Union[str, List[Dict[str, Any]]]  # String or list of content blocks (for images)
     timestamp: datetime
     status: str = "completed"  # "pending", "processing", "completed", "interrupted"
     speaker_id: Optional[int] = None
@@ -78,21 +79,69 @@ class UnifiedVoiceConversation:
         # Initialize tool registry
         self.tool_registry = create_tool_registry(config.conversation.tools_config)
         
-        # Initialize character manager if multi-character mode is enabled
-        self.character_manager: Optional[CharacterManager] = None
-        if config.conversation.enable_multi_character:
-            characters_config = {
-                "characters": config.conversation.characters_config or {},
-                "director": config.conversation.director_config or {},
-                "api_keys": {
-                    "openai": config.conversation.openai_api_key,
-                    "anthropic": config.conversation.anthropic_api_key,
-                    "deepgram": config.conversation.deepgram_api_key,
-                    "elevenlabs": config.conversation.elevenlabs_api_key
+        # Initialize camera if enabled
+        self.camera: Optional[CameraCapture] = None
+        if config.camera and config.camera.enabled:
+            camera_config = CameraCaptureConfig(
+                device_id=config.camera.device_id,
+                resolution=tuple(config.camera.resolution),
+                capture_on_speech=config.camera.capture_on_speech,
+                save_captures=config.camera.save_captures,
+                capture_dir=config.camera.capture_dir,
+                jpeg_quality=config.camera.jpeg_quality
+            )
+            self.camera = CameraCapture(camera_config)
+            if self.camera.start():
+                print("📷 Camera capture enabled")
+            else:
+                print("⚠️ Failed to start camera, continuing without camera capture")
+                self.camera = None
+        
+        # Initialize character manager (always use character mode)
+        characters_config = {
+            "characters": config.conversation.characters_config or {},
+            "director": config.conversation.director_config or {},
+            "api_keys": {
+                "openai": config.conversation.openai_api_key,
+                "anthropic": config.conversation.anthropic_api_key,
+                "deepgram": config.conversation.deepgram_api_key,
+                "elevenlabs": config.conversation.elevenlabs_api_key
+            }
+        }
+        
+        # If no characters defined, create a default Assistant character
+        if not characters_config["characters"]:
+            characters_config["characters"] = {
+                "Assistant": {
+                    "llm_provider": config.conversation.llm_provider,
+                    "llm_model": config.conversation.llm_model,
+                    "voice_id": config.conversation.voice_id,
+                    "voice_settings": {
+                        "speed": config.tts.speed,
+                        "stability": config.tts.stability,
+                        "similarity_boost": config.tts.similarity_boost
+                    },
+                    "system_prompt": config.conversation.system_prompt,
+                    "max_tokens": config.conversation.max_tokens,
+                    "temperature": 0.7,  # Default temperature
+                    "max_prompt_tokens": 8000  # Default token limit for prompts
                 }
             }
-            self.character_manager = create_character_manager(characters_config)
-            print("🎭 Multi-character mode enabled")
+            # Simple director for single character
+            if not characters_config["director"]:
+                characters_config["director"] = {
+                    "llm_provider": "groq",
+                    "llm_model": "llama-3.1-8b-instant",
+                    "system_prompt": "You are directing a conversation. Since there is only one AI assistant, always respond with 'Assistant' when asked who should speak next."
+                }
+        
+        self.character_manager: CharacterManager = create_character_manager(characters_config)
+        
+        # Show appropriate message
+        if len(characters_config["characters"]) > 1:
+            print(f"🎭 Multi-character mode: {', '.join(characters_config['characters'].keys())}")
+        else:
+            print("🎭 Character mode enabled")
         
         # Set up tool execution callback
         self.tts.on_tool_execution = self._handle_tool_execution
@@ -134,14 +183,25 @@ class UnifiedVoiceConversation:
         
         print(f"📝 Conversation logging to: {self.conversation_log_file}")
     
-    def _log_conversation_turn(self, role: str, content: str):
+    def _log_conversation_turn(self, role: str, content: Union[str, List[Dict[str, Any]]]):
         """Log a conversation turn in history file format.
         
         Args:
             role: 'user' or 'assistant'
-            content: The message content (may already include speaker prefix)
+            content: The message content (may already include speaker prefix) or image content
         """
         try:
+            # Handle image content
+            if isinstance(content, list):
+                with open(self.conversation_log_file, 'a', encoding='utf-8') as f:
+                    for item in content:
+                        if item.get("type") == "text":
+                            f.write(f"{item.get('text', '')}\n\n")
+                        elif item.get("type") == "image":
+                            f.write(f"[Image: {item.get('source', {}).get('media_type', 'unknown')}]\n\n")
+                return
+                
+            # Handle string content
             # Check if content already has a speaker prefix (for multi-character mode)
             if role == "assistant" and ": " in content and content.index(": ") < 50:
                 # Content already includes character name, use as-is
@@ -166,6 +226,79 @@ class UnifiedVoiceConversation:
         except Exception as e:
             print(f"⚠️ Failed to log conversation turn: {e}")
             self.logger.error(f"Failed to log conversation turn: {e}")
+    
+    def add_image_to_conversation(self, image_path: str, text: Optional[str] = None) -> bool:
+        """Add an image to the conversation history.
+        
+        Args:
+            image_path: Path to the image file
+            text: Optional text to accompany the image
+            
+        Returns:
+            bool: True if image was successfully added
+        """
+        try:
+            # Read the image file
+            image_path = Path(image_path).resolve()
+            if not image_path.exists():
+                print(f"❌ Image file not found: {image_path}")
+                return False
+                
+            # Determine media type
+            suffix = image_path.suffix.lower()
+            media_type_map = {
+                '.jpg': 'image/jpeg',
+                '.jpeg': 'image/jpeg',
+                '.png': 'image/png',
+                '.gif': 'image/gif',
+                '.webp': 'image/webp'
+            }
+            media_type = media_type_map.get(suffix, 'image/jpeg')
+            
+            # Read image data
+            with open(image_path, 'rb') as f:
+                image_data = f.read()
+            
+            # Encode to base64
+            import base64
+            image_base64 = base64.b64encode(image_data).decode('utf-8')
+            
+            # Create content blocks
+            content = []
+            if text:
+                content.append({"type": "text", "text": text})
+            content.append({
+                "type": "image",
+                "source": {
+                    "type": "base64",
+                    "media_type": media_type,
+                    "data": image_base64
+                }
+            })
+            
+            # Add to conversation history
+            image_turn = ConversationTurn(
+                role="user",
+                content=content,
+                timestamp=datetime.now(),
+                status="completed"
+            )
+            self.state.conversation_history.append(image_turn)
+            
+            # Log the image
+            self._log_conversation_turn("user", content)
+            
+            print(f"📸 Added image to conversation: {image_path.name}")
+            
+            # Process pending utterances (which will include this image)
+            asyncio.create_task(self._process_pending_utterances())
+            
+            return True
+            
+        except Exception as e:
+            print(f"❌ Failed to add image: {e}")
+            self.logger.error(f"Failed to add image: {e}")
+            return False
     
     def _log_loaded_history(self):
         """Log any existing conversation history to the conversation log."""
@@ -193,8 +326,8 @@ class UnifiedVoiceConversation:
         """Setup STT keywords including character names."""
         keywords = []
         
-        # Add character names from multi-character mode
-        if config.conversation.enable_multi_character and config.conversation.characters_config:
+        # Add character names from character configs
+        if config.conversation.characters_config:
             for char_name, char_config in config.conversation.characters_config.items():
                 # Add character key name with high weight
                 keywords.append((char_name, 10.0))
@@ -264,17 +397,69 @@ class UnifiedVoiceConversation:
         
         return f"{formatted_time}_{log_type}.json"
     
+    def _sanitize_messages_for_logging(self, messages: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        """Create a sanitized copy of messages suitable for logging.
+        Replaces image data with metadata to avoid logging raw base64 data.
+        """
+        sanitized = []
+        for msg in messages:
+            sanitized_msg = {"role": msg["role"]}
+            
+            # Handle content
+            content = msg.get("content", "")
+            if isinstance(content, list):
+                # Content is a list of blocks (text/image)
+                sanitized_content = []
+                for item in content:
+                    if isinstance(item, dict):
+                        if item.get("type") == "text":
+                            # Keep text as-is
+                            sanitized_content.append(item)
+                        elif item.get("type") == "image":
+                            # Replace image data with metadata
+                            source = item.get("source", {})
+                            sanitized_content.append({
+                                "type": "image",
+                                "source": {
+                                    "type": source.get("type", "unknown"),
+                                    "media_type": source.get("media_type", "unknown"),
+                                    "data": f"[BASE64_IMAGE_DATA - {len(source.get('data', ''))} chars]"
+                                }
+                            })
+                        else:
+                            # Keep other types as-is
+                            sanitized_content.append(item)
+                    else:
+                        # Non-dict items, keep as-is
+                        sanitized_content.append(item)
+                sanitized_msg["content"] = sanitized_content
+            else:
+                # Simple string content
+                sanitized_msg["content"] = content
+            
+            # Copy any metadata fields
+            for key in ["_is_prefill", "_prefill_name"]:
+                if key in msg:
+                    sanitized_msg[key] = msg[key]
+            
+            sanitized.append(sanitized_msg)
+        
+        return sanitized
+    
     def _log_llm_request(self, messages: List[Dict[str, str]], model: str, timestamp: float, provider: str = None) -> str:
         """Log LLM request to a file and return the filename."""
         filename = self._generate_log_filename("request", timestamp)
         filepath = self.llm_logs_dir / filename
+        
+        # Sanitize messages to avoid logging raw image data
+        sanitized_messages = self._sanitize_messages_for_logging(messages)
         
         request_data = {
             "timestamp": timestamp,
             "datetime": datetime.fromtimestamp(timestamp).isoformat(),
             "provider": provider or self.config.conversation.llm_provider,
             "model": model,
-            "messages": messages,
+            "messages": sanitized_messages,
             "max_tokens": self.config.conversation.max_tokens,
             "stream": True,
             "conversation_mode": self.config.conversation.conversation_mode,
@@ -317,44 +502,118 @@ class UnifiedVoiceConversation:
         
         return filename
 
-    def _convert_to_prefill_format(self, messages: List[Dict[str, str]]) -> tuple[str, str]:
-        """Convert chat messages to prefill format.
-        Returns (user_message, assistant_message_prefix).
+    def _convert_to_prefill_format(self, messages: List[Dict[str, Any]]) -> tuple[List[Dict[str, Any]], str]:
+        """Convert chat messages to prefill format with image support.
+        Returns (user_messages, assistant_message_prefix).
         
-        For multi-speaker conversations, preserves speaker names in content
-        but ensures the conversation ends with the configured AI participant.
+        Images are handled by splitting the conversation into blocks:
+        - Text spans between images become text user messages
+        - Images become image user messages  
+        - Everything after the last image goes in the assistant message
         """
-        user_message = self.config.conversation.prefill_user_message
-        
-        # Build conversation turns from history
-        conversation_turns = []
         human_name = self.config.conversation.prefill_participants[0]  # Default: 'H'
         ai_name = self.config.conversation.prefill_participants[1]     # Default: 'Claude'
         
-        for msg in messages:
+        # Process messages to find images and create blocks
+        user_messages = []
+        current_text_block = []
+        last_image_index = -1
+        
+        # Find the index of the last image
+        for i, msg in enumerate(messages):
+            if msg.get("role") == "user" and isinstance(msg.get("content"), list):
+                # Check if this message contains an image
+                for content_item in msg["content"]:
+                    if content_item.get("type") == "image":
+                        last_image_index = i
+                        break
+        
+        # Process messages up to and including the last image
+        for i, msg in enumerate(messages):
             if msg["role"] == "system":
                 continue  # Skip system messages in prefill mode
-            elif msg["role"] == "user":
-                # For multi-speaker support, content already includes speaker name
-                # Check if content already has speaker format, if not add human name
-                content = msg['content']
-                # More flexible check - allow with or without space after colon
-                if not re.match(r'^[^:]+:', content):
-                    content = f"{human_name}: {content}"
-                conversation_turns.append(content)
-            elif msg["role"] == "assistant":
-                # For multi-speaker support, content already includes speaker name
-                # Just add it as-is since it preserves the original speaker context
-                conversation_turns.append(msg['content'])
+                
+            # Check if this is an image message
+            is_image_message = False
+            if msg.get("role") == "user" and isinstance(msg.get("content"), list):
+                for content_item in msg["content"]:
+                    if content_item.get("type") == "image":
+                        is_image_message = True
+                        break
+            
+            if is_image_message and i <= last_image_index:
+                # First, add any accumulated text block
+                if current_text_block:
+                    text_content = "\n\n".join(current_text_block)
+                    user_messages.append({"role": "user", "content": text_content})
+                    current_text_block = []
+                
+                # Then add the image message as-is
+                user_messages.append(msg)
+            elif i <= last_image_index:
+                # Regular text message before the last image - accumulate it
+                if msg["role"] == "user":
+                    content = msg.get('content', '')
+                    if isinstance(content, str):
+                        if not re.match(r'^[^:]+:', content):
+                            content = f"{human_name}: {content}"
+                        current_text_block.append(content)
+                elif msg["role"] == "assistant":
+                    content = msg.get('content', '')
+                    if isinstance(content, str):
+                        current_text_block.append(content)
         
-        # Join turns with double newlines
-        assistant_content = "\n\n".join(conversation_turns)
+        # Add any remaining text block before the last image
+        if current_text_block and last_image_index >= 0:
+            text_content = "\n\n".join(current_text_block)
+            user_messages.append({"role": "user", "content": text_content})
+            current_text_block = []
+        
+        # Build assistant content from everything after the last image
+        assistant_turns = []
+        for i, msg in enumerate(messages):
+            if i > last_image_index:
+                if msg["role"] == "system":
+                    continue
+                elif msg["role"] == "user":
+                    content = msg.get('content', '')
+                    if isinstance(content, str):
+                        if not re.match(r'^[^:]+:', content):
+                            content = f"{human_name}: {content}"
+                        assistant_turns.append(content)
+                elif msg["role"] == "assistant":
+                    content = msg.get('content', '')
+                    if isinstance(content, str):
+                        assistant_turns.append(content)
+        
+        # If no images were found, put everything in assistant message
+        if last_image_index == -1:
+            for msg in messages:
+                if msg["role"] == "system":
+                    continue
+                elif msg["role"] == "user":
+                    content = msg.get('content', '')
+                    if isinstance(content, str):
+                        if not re.match(r'^[^:]+:', content):
+                            content = f"{human_name}: {content}"
+                        assistant_turns.append(content)
+                elif msg["role"] == "assistant":
+                    content = msg.get('content', '')
+                    if isinstance(content, str):
+                        assistant_turns.append(content)
+        
+        # Join assistant turns and add prefill
+        assistant_content = "\n\n".join(assistant_turns)
         if assistant_content:
             assistant_content += f"\n\n{ai_name}:"
         else:
             assistant_content = f"{ai_name}:"
+        
+        # If no user messages were created, use the default prefill message
+        if not user_messages:
+            user_messages = [{"role": "user", "content": self.config.conversation.prefill_user_message}]
             
-        return user_message, assistant_content
+        return user_messages, assistant_content
 
     def _convert_from_prefill_format(self, prefill_response: str) -> str:
         """Extract the actual response from prefill format.
@@ -379,6 +638,8 @@ class UnifiedVoiceConversation:
         SpeakerName: message content
         
         AnotherSpeaker: response content
+        
+        Returns messages with 'character' field for multi-character conversations.
         """
         try:
             with open(file_path, 'r', encoding='utf-8') as f:
@@ -412,24 +673,39 @@ class UnifiedVoiceConversation:
                         # Track all detected speakers
                         self.detected_speakers.add(speaker_name)
                         
-                        # Save previous message if exists
-                        if current_speaker and current_content:
-                            # Determine role based on configured participants
-                            # For multi-speaker: classify as 'user' if it's the human participant,
-                            # otherwise as 'assistant' to preserve the conversation context
-                            role = "user" if current_speaker == human_name else "assistant"
+                        # Check if this is the same speaker continuing
+                        if speaker_name == current_speaker:
+                            # Same speaker - just add the line as continuation
+                            if message_content:
+                                current_content.append(f"{speaker_name}: {message_content}")
+                            else:
+                                current_content.append(f"{speaker_name}:")
+                        else:
+                            # Different speaker - save previous and start new
+                            if current_speaker and current_content:
+                                # Determine role based on configured participants
+                                # For multi-speaker: classify as 'user' if it's the human participant,
+                                # otherwise as 'assistant' to preserve the conversation context
+                                role = "user" if current_speaker == human_name else "assistant"
+                                
+                                # In character mode, we need to preserve the character name separately
+                                full_content = '\n'.join(current_content).strip()
+                                
+                                message = {
+                                    "role": role,
+                                    "content": full_content
+                                }
+                                
+                                # Add character name if it's an assistant message and not the default AI
+                                if role == "assistant" and current_speaker != ai_name:
+                                    # Store the speaker name for later character matching
+                                    message["_speaker_name"] = current_speaker
+                                
+                                messages.append(message)
                             
-                            # Include speaker name in content for multi-speaker context
-                            content_with_speaker = f"{current_speaker}: " + '\n'.join(current_content).strip()
-                            
-                            messages.append({
-                                "role": role,
-                                "content": content_with_speaker
-                            })
-                        
-                        # Start new message
-                        current_speaker = speaker_name
-                        current_content = [message_content] if message_content else []
+                            # Start new message
+                            current_speaker = speaker_name
+                            current_content = [message_content] if message_content else []
                     else:
                         # Invalid speaker - treat as continuation of current message or skip
                         if current_speaker:
@@ -445,12 +721,19 @@ class UnifiedVoiceConversation:
             # Add final message if exists (current_speaker is already validated)
             if current_speaker and current_content:
                 role = "user" if current_speaker == human_name else "assistant"
-                content_with_speaker = f"{current_speaker}: " + '\n'.join(current_content).strip()
+                full_content = '\n'.join(current_content).strip()
                 
-                messages.append({
+                message = {
                     "role": role,
-                    "content": content_with_speaker
-                })
+                    "content": full_content
+                }
+                
+                # Add character name if it's an assistant message and not the default AI
+                if role == "assistant" and current_speaker != ai_name:
+                    # Store the speaker name for later character matching
+                    message["_speaker_name"] = current_speaker
+                
+                messages.append(message)
             
             print(f"📊 Detected speakers in history: {sorted(self.detected_speakers)}")
             return messages
@@ -518,13 +801,29 @@ class UnifiedVoiceConversation:
         if history_messages:
             # Convert old message format to ConversationTurn format
             for msg in history_messages:
+                # Try to resolve character name from speaker name
+                character_name = None
+                if msg.get("_speaker_name") and hasattr(self, 'character_manager') and self.character_manager:
+                    speaker = msg["_speaker_name"]
+                    # Try to match by character name or prefill name
+                    for char_name, char_config in self.character_manager.characters.items():
+                        if (speaker == char_name or 
+                            (char_config.prefill_name and speaker == char_config.prefill_name)):
+                            character_name = char_name
+                            break
+                
                 turn = ConversationTurn(
                     role=msg["role"],
                     content=msg["content"], 
                     timestamp=datetime.now(),  # We don't have original timestamps
-                    status="completed"  # Historical messages are completed
+                    status="completed",  # Historical messages are completed
+                    character=character_name
                 )
                 self.state.conversation_history.append(turn)
+                
+                # Debug logging for character resolution
+                if msg["role"] == "assistant" and msg.get("_speaker_name"):
+                    print(f"   📝 {msg['_speaker_name']} → character: {character_name or 'None'}")
                 
             print(f"✅ Loaded {len(history_messages)} messages from history file")
             print(f"📊 Conversation context: {sum(len(msg['content']) for msg in history_messages)} characters")
@@ -630,6 +929,15 @@ class UnifiedVoiceConversation:
         speaker_info = f" (Speaker {result.speaker_id})" if result.speaker_id is not None else ""
         print(f"🎯 Final{speaker_info}: {result.text}")
         
+        # Capture image if camera is enabled
+        captured_image = None
+        if self.camera and self.config.camera.capture_on_speech:
+            capture_result = self.camera.capture_image()
+            if capture_result:
+                _, jpeg_base64 = capture_result
+                captured_image = jpeg_base64
+                print("📸 Captured image with user speech")
+        
         # Check for interruption at ANY stage of AI response
         interrupted = False
         
@@ -642,7 +950,7 @@ class UnifiedVoiceConversation:
             # Get spoken content synchronously (available after stop() completes)
             spoken_content = self.tts.get_spoken_text_heuristic().strip()
             
-            # Don't add assistant response here - let _stream_llm_to_tts handle it
+            # Don't add assistant response here - character processing will handle it
             # This avoids duplicates
             interrupted = True
             
@@ -680,16 +988,33 @@ class UnifiedVoiceConversation:
             print("🔄 All AI processing interrupted and state cleared")
         
         # Add the new user utterance to conversation history AFTER handling interruption
+        # Include captured image if available
+        if captured_image:
+            # Create content with both text and image
+            content = [
+                {"type": "text", "text": result.text},
+                {
+                    "type": "image",
+                    "source": {
+                        "type": "base64",
+                        "media_type": "image/jpeg",
+                        "data": captured_image
+                    }
+                }
+            ]
+        else:
+            content = result.text
+            
         user_turn = ConversationTurn(
             role="user",
-            content=result.text,
+            content=content,
             timestamp=result.timestamp,
             status="pending",
             speaker_id=result.speaker_id
         )
         self.state.conversation_history.append(user_turn)
-        self._log_conversation_turn("user", result.text)
-        print(f"💬 Added user utterance: '{result.text}'")
+        self._log_conversation_turn("user", content)
+        print(f"💬 Added user utterance: '{result.text}'" + (" with image" if captured_image else ""))
         
         # Process the new utterance immediately
         print("🚀 Processing utterance")
@@ -814,15 +1139,28 @@ class UnifiedVoiceConversation:
         if not pending_turns:
             return
             
-        # Process all pending turns as a single input
-        combined_content = " ".join(turn.content for turn in pending_turns)
-        print(f"🧠 Processing {len(pending_turns)} pending utterances: '{combined_content}'")
+        # Process all pending turns
+        # Extract text content for display
+        text_contents = []
+        for turn in pending_turns:
+            if isinstance(turn.content, str):
+                text_contents.append(turn.content)
+            elif isinstance(turn.content, list):
+                # Extract text from content blocks
+                for item in turn.content:
+                    if item.get("type") == "text":
+                        text_contents.append(item.get("text", ""))
+        
+        combined_text = " ".join(text_contents)
+        print(f"🧠 Processing {len(pending_turns)} pending utterances: '{combined_text}'")
         
         # Mark all pending turns as processing
         for turn in pending_turns:
             turn.status = "processing"
             
-        await self._process_with_llm(combined_content, pending_turns[0])  # Pass first turn for reference
+        # For now, pass the combined text. The actual content (including images) 
+        # will be properly handled when building messages for the LLM
+        await self._process_with_llm(combined_text, pending_turns[0])  # Pass first turn for reference
     
     async def _process_with_character_llm(self, user_input: str, reference_turn: ConversationTurn):
         """Process user input with multi-character system."""
@@ -850,39 +1188,39 @@ class UnifiedVoiceConversation:
             
             print(f"🎭 {next_speaker} is responding...")
             
-            # Get formatted messages for this character
-            messages = self.character_manager.format_messages_for_character(
-                next_speaker,
-                self._get_conversation_history_for_character()
-            )
-            
             # Request timestamp for logging
             request_timestamp = time.time()
-            request_filename = ""
             
-            # If using prefill mode, convert messages
-            if self.config.conversation.conversation_mode == "prefill" and character_config.llm_provider == "anthropic":
-                # Get prefill name for this character
+            # Check if we should use prefill format
+            use_prefill = (self.config.conversation.conversation_mode == "prefill" and 
+                          character_config.llm_provider == "anthropic")
+            
+            if use_prefill:
+                # For prefill mode, convert directly from raw history
                 prefill_name = character_config.prefill_name or character_config.name
+                raw_history = self._get_conversation_history_for_character()
                 
-                # Convert messages to prefill format with character-specific name
-                messages = self._convert_character_messages_to_prefill(messages, prefill_name)
-                
-                # Log the converted prefill request
-                request_filename = self._log_llm_request(
-                    messages, 
-                    character_config.llm_model, 
-                    request_timestamp,
-                    character_config.llm_provider
+                # Create messages in prefill format directly
+                messages = self._create_character_prefill_messages(
+                    raw_history, 
+                    next_speaker, 
+                    prefill_name,
+                    character_config.system_prompt
                 )
             else:
-                # Log the regular request
-                request_filename = self._log_llm_request(
-                    messages, 
-                    character_config.llm_model, 
-                    request_timestamp,
-                    character_config.llm_provider
+                # Standard chat format
+                messages = self.character_manager.format_messages_for_character(
+                    next_speaker,
+                    self._get_conversation_history_for_character()
                 )
+            
+            # Log the request
+            request_filename = self._log_llm_request(
+                messages, 
+                character_config.llm_model, 
+                request_timestamp,
+                character_config.llm_provider
+            )
             
             # Stream response based on provider
             assistant_response = ""
@@ -1047,27 +1385,32 @@ class UnifiedVoiceConversation:
         client = self.character_manager.get_character_client(character_config.name)
         
         try:
-            # Check for prefill format using metadata or structure
+            # Check if messages are already in prefill format
             is_prefill_format = False
             prefill_name = None
             
+            # Check if last message is assistant (typical prefill pattern)
             if len(messages) > 0:
                 last_msg = messages[-1]
-                # Check for our metadata marker
-                if last_msg.get("_is_prefill"):
+                if last_msg.get("role") == "assistant":
                     is_prefill_format = True
-                    prefill_name = last_msg.get("_prefill_name", character_config.name)
-                # Fallback: check if last message is assistant (typical prefill pattern)
-                elif (last_msg.get("role") == "assistant" and 
-                      self.config.conversation.conversation_mode == "prefill"):
-                    is_prefill_format = True
-                    prefill_name = character_config.prefill_name or character_config.name
+                    # Extract prefill name from the assistant message content
+                    content = last_msg.get("content", "")
+                    if content.endswith(":"):
+                        # Extract the name before the final colon
+                        parts = content.rsplit("\n", 1)
+                        if len(parts) > 0:
+                            last_line = parts[-1].strip()
+                            if last_line.endswith(":"):
+                                prefill_name = last_line[:-1]
+            
+            messages_to_send = messages
             
             # Extract system content and prepare messages
             system_content = ""
             anthropic_messages = []
             
-            for msg in messages:
+            for msg in messages_to_send:
                 if msg["role"] == "system":
                     system_content = msg["content"]
                 else:
@@ -1143,14 +1486,29 @@ class UnifiedVoiceConversation:
             raise
     
     def _get_conversation_history_for_director(self):
-        """Get conversation history formatted for director."""
+        """Get conversation history formatted for director.
+        Excludes images since director only needs text to decide who speaks next.
+        """
         history = []
         for turn in self.state.conversation_history[-20:]:  # Last 20 turns
             # Include both completed and interrupted turns
             if turn.status in ["completed", "interrupted"]:
+                # Extract text content only
+                if isinstance(turn.content, str):
+                    content = turn.content
+                elif isinstance(turn.content, list):
+                    # Extract text from content blocks
+                    text_parts = []
+                    for item in turn.content:
+                        if item.get("type") == "text":
+                            text_parts.append(item.get("text", ""))
+                    content = " ".join(text_parts)
+                else:
+                    content = str(turn.content)
+                
                 entry = {
                     "role": turn.role,
-                    "content": turn.content
+                    "content": content
                 }
                 if turn.character:
                     entry["character"] = turn.character
@@ -1159,7 +1517,7 @@ class UnifiedVoiceConversation:
     
     def _set_character_voice(self, character_config):
         """Set TTS voice for a specific character."""
-        if not character_config or not self.character_manager:
+        if not character_config:
             return None
             
         voice_settings = self.character_manager.get_character_voice_settings(
@@ -1193,8 +1551,148 @@ class UnifiedVoiceConversation:
             self.tts.config.stability = original_config["stability"]
             self.tts.config.similarity_boost = original_config["similarity_boost"]
     
+    def _create_character_prefill_messages(self, raw_history: List[Dict[str, Any]], character_name: str, 
+                                          prefill_name: str, system_prompt: str) -> List[Dict[str, Any]]:
+        """Create prefill format messages directly from raw conversation history for a character.
+        
+        This creates the proper prefill structure with images:
+        1. System message
+        2. User messages with pre-image history 
+        3. User messages with images
+        4. Assistant message with post-image history and character's prefill
+        """
+        # Find last image in history
+        last_image_index = -1
+        for i, turn in enumerate(raw_history):
+            if turn.get("role") == "user" and isinstance(turn.get("content"), list):
+                for item in turn["content"]:
+                    if isinstance(item, dict) and item.get("type") == "image":
+                        last_image_index = i
+                        break
+        
+        # Build prefill messages
+        if last_image_index >= 0:
+            # Has images - use image-aware format
+            user_messages = []
+            text_blocks = []
+            
+            # Process messages up to and including last image
+            for i, turn in enumerate(raw_history[:last_image_index + 1]):
+                role = turn.get("role")
+                content = turn.get("content")
+                character = turn.get("character")
+                
+                # Check if this turn has an image
+                has_image = False
+                if isinstance(content, list):
+                    for item in content:
+                        if isinstance(item, dict) and item.get("type") == "image":
+                            has_image = True
+                            break
+                
+                if has_image:
+                    # First, add any accumulated text as a user message
+                    if text_blocks:
+                        user_messages.append({"role": "user", "content": "\n\n".join(text_blocks)})
+                        text_blocks = []
+                    
+                    # Then add the image message
+                    user_messages.append({"role": "user", "content": content})
+                else:
+                    # Regular text message - format and accumulate
+                    formatted_text = self._format_turn_for_prefill(role, content, character, character_name, prefill_name)
+                    if formatted_text:
+                        text_blocks.append(formatted_text)
+            
+            # Add any remaining pre-image text
+            if text_blocks:
+                user_messages.append({"role": "user", "content": "\n\n".join(text_blocks)})
+            
+            # Build assistant prefix from post-image history
+            assistant_parts = []
+            for turn in raw_history[last_image_index + 1:]:
+                formatted_text = self._format_turn_for_prefill(
+                    turn.get("role"), 
+                    turn.get("content"), 
+                    turn.get("character"),
+                    character_name,
+                    prefill_name
+                )
+                if formatted_text:
+                    assistant_parts.append(formatted_text)
+            
+            # Create assistant message with prefill
+            assistant_content = "\n\n".join(assistant_parts) + f"\n\n{prefill_name}:" if assistant_parts else f"{prefill_name}:"
+            
+            return [{"role": "system", "content": system_prompt}] + user_messages + [{"role": "assistant", "content": assistant_content}]
+        else:
+            # No images - simpler format
+            conversation_parts = []
+            
+            for turn in raw_history:
+                formatted_text = self._format_turn_for_prefill(
+                    turn.get("role"),
+                    turn.get("content"),
+                    turn.get("character"),
+                    character_name,
+                    prefill_name
+                )
+                if formatted_text:
+                    conversation_parts.append(formatted_text)
+            
+            # Create prefill format
+            assistant_content = "\n\n".join(conversation_parts) + f"\n\n{prefill_name}:" if conversation_parts else f"{prefill_name}:"
+            
+            return [
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": self.config.conversation.prefill_user_message},
+                {"role": "assistant", "content": assistant_content}
+            ]
+    
+    def _format_turn_for_prefill(self, role: str, content: Any, character: Optional[str], 
+                                 current_character: str, prefill_name: str) -> Optional[str]:
+        """Format a single turn for prefill conversation."""
+        # Extract text from content
+        if isinstance(content, list):
+            text_parts = []
+            for item in content:
+                if isinstance(item, dict) and item.get("type") == "text":
+                    text_parts.append(item.get("text", ""))
+            content = " ".join(text_parts)
+        
+        if not content or not isinstance(content, str):
+            return None
+        
+        if role == "user":
+            # Human messages
+            return f"H: {content}"
+        elif role == "assistant":
+            # Character messages
+            if character == current_character:
+                # This character's own messages
+                return f"{prefill_name}: {content}"
+            elif character:
+                # Other character's messages - get their prefill name
+                other_config = self.character_manager.get_character_config(character)
+                if other_config and other_config.prefill_name:
+                    return f"{other_config.prefill_name}: {content}"
+                else:
+                    return f"{character}: {content}"
+            else:
+                # Generic assistant
+                return f"Assistant: {content}"
+        elif role == "system":
+            # System messages (like interruptions)
+            return f"System: {content}"
+        
+        return None
+    
     def _convert_character_messages_to_prefill(self, messages: List[Dict[str, str]], character_prefill_name: str) -> List[Dict[str, str]]:
-        """Convert character messages to prefill format with character-specific name."""
+        """Convert character messages to prefill format with character-specific name, preserving images.
+        
+        This handles messages that have already been formatted by format_messages_for_character,
+        which means other characters' messages are already prefixed with their names.
+        """
         # Extract system prompt
         system_prompt = ""
         chat_messages = []
@@ -1205,43 +1703,126 @@ class UnifiedVoiceConversation:
             else:
                 chat_messages.append(msg)
         
-        # Convert to prefill format with character name
-        conversation_parts = []
-        human_name = "H"  # Default human name
+        # Use the same image-aware conversion as regular prefill
+        # First, find the last image index
+        last_image_index = -1
+        for i, msg in enumerate(chat_messages):
+            if msg.get("role") == "user" and isinstance(msg.get("content"), list):
+                # Check if this message contains an image
+                for content_item in msg["content"]:
+                    if content_item.get("type") == "image":
+                        last_image_index = i
+                        break
         
-        for msg in chat_messages:
-            if msg["role"] == "user":
-                # Check if it's a character message or human message
-                if msg["content"].startswith("[") and "]: " in msg["content"]:
-                    # It's another character's message
-                    conversation_parts.append(msg["content"])
-                else:
-                    # It's a human message - check if it already has a speaker prefix
-                    content = msg['content']
-                    if not re.match(r'^[^:]+:', content):
+        # If there are images, use the image-aware prefill format
+        if last_image_index >= 0:
+            # Build user messages and assistant prefix using image-aware logic
+            user_messages = []
+            current_text_block = []
+            
+            # Process messages up to and including the last image
+            for i, msg in enumerate(chat_messages):
+                # Check if this is an image message
+                is_image_message = False
+                if msg.get("role") == "user" and isinstance(msg.get("content"), list):
+                    for content_item in msg["content"]:
+                        if content_item.get("type") == "image":
+                            is_image_message = True
+                            break
+                
+                if is_image_message and i <= last_image_index:
+                    # First, add any accumulated text block
+                    if current_text_block:
+                        text_content = "\n\n".join(current_text_block)
+                        user_messages.append({"role": "user", "content": text_content})
+                        current_text_block = []
+                    
+                    # Then add the image message as-is
+                    user_messages.append(msg)
+                elif i <= last_image_index:
+                    # Regular text message before the last image - format and accumulate
+                    content = msg.get('content', '')
+                    if msg["role"] == "user":
+                        # User messages might already have character names from format_messages_for_character
+                        # Only add "H:" if there's no existing prefix
+                        if isinstance(content, str) and not re.match(r'^[^:]+:', content):
+                            content = f"H: {content}"
+                        current_text_block.append(content)
+                    else:  # assistant
+                        # Assistant messages are already properly formatted
+                        # Just use the content as-is
+                        current_text_block.append(content)
+            
+            # Add any remaining text block before the last image
+            if current_text_block and last_image_index >= 0:
+                text_content = "\n\n".join(current_text_block)
+                user_messages.append({"role": "user", "content": text_content})
+                current_text_block = []
+            
+            # Build assistant prefix from everything after the last image
+            assistant_parts = []
+            for i, msg in enumerate(chat_messages):
+                if i > last_image_index:
+                    content = msg.get('content', '')
+                    if isinstance(content, list):
+                        # Extract text from list content
+                        text_parts = []
+                        for item in content:
+                            if item.get("type") == "text":
+                                text_parts.append(item.get("text", ""))
+                        content = " ".join(text_parts)
+                    
+                    if msg["role"] == "user":
+                        # User messages might already have character names from format_messages_for_character
+                        # Only add "H:" if there's no existing prefix
+                        if isinstance(content, str) and not re.match(r'^[^:]+:', content):
+                            content = f"H: {content}"
+                        assistant_parts.append(content)
+                    else:  # assistant
+                        # Assistant messages are already properly formatted
+                        # Just use the content as-is
+                        assistant_parts.append(content)
+            
+            # Create assistant prefix
+            if assistant_parts:
+                assistant_prefix = "\n\n".join(assistant_parts) + f"\n\n{character_prefill_name}:"
+            else:
+                assistant_prefix = f"{character_prefill_name}:"
+            
+            # If no user messages were created, use the default
+            if not user_messages:
+                user_messages = [{"role": "user", "content": self.config.conversation.prefill_user_message}]
+            
+            # Build final messages
+            prefill_messages = [{"role": "system", "content": system_prompt}] + user_messages + [{"role": "assistant", "content": assistant_prefix}]
+        else:
+            # No images - use the original text-only approach
+            conversation_parts = []
+            human_name = "H"
+            
+            for msg in chat_messages:
+                content = msg["content"]
+                
+                if msg["role"] == "user":
+                    if isinstance(content, str) and not re.match(r'^[^:]+:', content):
                         content = f"{human_name}: {content}"
                     conversation_parts.append(content)
-            else:  # assistant
-                # This character's previous messages
-                conversation_parts.append(f"{character_prefill_name}: {msg['content']}")
-        
-        # Create prefill format
-        # For character prefill, we need to put the conversation in the assistant prefix
-        # not in the user message, similar to regular prefill format
-        if conversation_parts:
-            assistant_prefix = "\n\n".join(conversation_parts) + f"\n\n{character_prefill_name}:"
-        else:
-            assistant_prefix = f"{character_prefill_name}:"
-        
-        # Use the standard prefill user message
-        user_message = self.config.conversation.prefill_user_message
-        
-        # Return in Anthropic prefill format with metadata
-        prefill_messages = [
-            {"role": "system", "content": system_prompt},
-            {"role": "user", "content": user_message},
-            {"role": "assistant", "content": assistant_prefix}
-        ]
+                else:  # assistant
+                    # Assistant messages are already properly formatted
+                    # Just use the content as-is
+                    conversation_parts.append(content)
+            
+            # Create prefill format
+            if conversation_parts:
+                assistant_prefix = "\n\n".join(conversation_parts) + f"\n\n{character_prefill_name}:"
+            else:
+                assistant_prefix = f"{character_prefill_name}:"
+            
+            prefill_messages = [
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": self.config.conversation.prefill_user_message},
+                {"role": "assistant", "content": assistant_prefix}
+            ]
         
         # Add metadata to indicate this is prefill format
         prefill_messages[-1]["_is_prefill"] = True
@@ -1250,14 +1831,16 @@ class UnifiedVoiceConversation:
         return prefill_messages
     
     def _get_conversation_history_for_character(self):
-        """Get conversation history formatted for character LLM."""
+        """Get conversation history formatted for character LLM.
+        Preserves full content including images.
+        """
         history = []
         for turn in self.state.conversation_history:
             # Include both completed and interrupted turns
             if turn.status in ["completed", "interrupted"]:
                 entry = {
                     "role": turn.role,
-                    "content": turn.content
+                    "content": turn.content  # Keep as-is (string or list)
                 }
                 if turn.character:
                     entry["character"] = turn.character
@@ -1322,501 +1905,8 @@ class UnifiedVoiceConversation:
                 turn.status = "completed"
                 print(f"   ✅ Marked user turn as completed: '{turn.content[:50]}...'")
         
-        # If multi-character mode, delegate to character processing
-        if self.character_manager:
-            await self._process_with_character_llm(user_input, reference_turn)
-            return
-        
-        try:
-            self.state.is_processing_llm = True
-            self.state.current_processing_turn = reference_turn
-            print(f"🔄 Starting LLM processing for: '{user_input}'")
-            
-            # Mark all processing user turns as completed NOW since we're committing to process them
-            for turn in self.state.conversation_history:
-                if turn.role == "user" and turn.status == "processing":
-                    turn.status = "completed"
-                    print(f"   ✅ Marked user turn as completed: '{turn.content[:50]}...'")
-            
-            # Build messages from conversation history (completed turns only)
-            messages = [{"role": "system", "content": self.config.conversation.system_prompt}]
-            
-            # Debug: Show conversation history state
-            print(f"📊 Building LLM context from {len(self.state.conversation_history)} total turns")
-            status_counts = {}
-            for turn in self.state.conversation_history:
-                status_counts[turn.status] = status_counts.get(turn.status, 0) + 1
-            print(f"   Status breakdown: {status_counts}")
-            
-            # Add ALL turns from conversation history (simpler is better)
-            # The only turns we exclude are assistant turns that never started
-            included_count = 0
-            all_turns = self.state.conversation_history[-200:]  # Keep last 200 exchanges
-            
-            # Only print last 20 for brevity
-            print_threshold = max(0, len(all_turns) - 20)
-            
-            for i, turn in enumerate(all_turns):
-                # Include everything except assistant turns that were never spoken
-                if turn.role == "user" or turn.status in ["completed", "interrupted"]:
-                    # For prefill mode, add speaker prefix
-                    content = turn.content
-                    if self.config.conversation.conversation_mode == "prefill":
-                        if turn.role == "user":
-                            # User messages should have the user participant name
-                            user_name = self.config.conversation.prefill_participants[0] if self.config.conversation.prefill_participants else "H"
-                            if not content.startswith(f"{user_name}:"):
-                                content = f"{user_name}: {content}"
-                        else:  # assistant
-                            # Assistant messages should have the assistant participant name
-                            assistant_name = self.config.conversation.prefill_participants[1] if len(self.config.conversation.prefill_participants) > 1 else "Claude"
-                            if not content.startswith(f"{assistant_name}:"):
-                                content = f"{assistant_name}: {content}"
-                    
-                    messages.append({
-                        "role": turn.role,
-                        "content": content
-                    })
-                    included_count += 1
-                    if i >= print_threshold:  # Only print last 20
-                        print(f"   ✅ Including {turn.role} ({turn.status}): '{content[:50]}...'")
-                else:
-                    if i >= print_threshold:  # Only print last 20
-                        print(f"   ⚠️ Excluding {turn.role} turn with status '{turn.status}': '{turn.content[:50]}...'")
-            
-            print(f"   ✅ Total included: {included_count} turns in LLM context")
-            
-            print("🤖 Getting LLM response...")
-            
-            # Create task for streaming LLM response to TTS
-            self.state.current_llm_task = asyncio.create_task(
-                self._stream_llm_to_tts(messages, user_input)
-            )
-            
-            # Wait for the task to complete
-            try:
-                await self.state.current_llm_task
-            except asyncio.CancelledError:
-                print("🛑 LLM streaming task was cancelled")
-            finally:
-                self.state.current_llm_task = None
-            
-        except Exception as e:
-            print(f"LLM processing error: {e}")
-            self.logger.error(f"LLM processing error: {e}")
-            await self._speak_text("Sorry, I encountered an error processing your request.")
-        finally:
-            self.state.is_processing_llm = False
-            self.state.current_processing_turn = None
-            print(f"🔄 LLM processing finished, state cleared")
-    
-    async def _stream_llm_to_tts(self, messages: List[Dict[str, str]], user_input: str):
-        """Stream LLM completion to TTS."""
-        call_id = f"{time.time():.3f}"  # Unique ID for this call
-        print(f"🔍 _stream_llm_to_tts called with ID: {call_id} for input: '{user_input[:50]}...'")
-        
-        assistant_response = ""  # Initialize at method level to fix scoping
-        request_timestamp = time.time()
-        request_filename = ""
-        was_interrupted = False
-        error_msg = None
-        tts_processing_complete = False  # Flag to prevent duplicate processing
-        response_added_to_history = False  # Prevent duplicate history additions
-        
-        # Request will be logged when we make the actual API call
-        
-        try:
-            # Check if task was cancelled before we even start
-            if asyncio.current_task() and asyncio.current_task().cancelled():
-                print(f"🚫 Task {call_id} cancelled before starting")
-                return
-                
-            self.state.is_speaking = True
-            
-            # Create async generator for LLM response
-            async def llm_generator():
-                nonlocal assistant_response, request_filename, was_interrupted, error_msg  # Access the method-level variables
-                
-                if self.config.conversation.llm_provider == "openai":
-                    async for chunk in self._stream_openai_response(messages, request_timestamp):
-                        if isinstance(chunk, dict) and 'request_filename' in chunk:
-                            request_filename = chunk['request_filename']
-                            continue
-                        # Check for interruption during LLM generation
-                        if not self.state.is_speaking or not self.state.is_processing_llm:
-                            print("🛑 LLM streaming interrupted by user")
-                            was_interrupted = True
-                            break
-                        
-                        if chunk is None:  # Error occurred
-                            error_msg = "OpenAI API error"
-                            yield "Sorry, I encountered an error with the language model."
-                            return
-                            
-                        assistant_response += chunk
-                        if self.show_tts_chunks:
-                            print(f"🔊 TTS chunk: {chunk}")
-                        yield chunk
-                        
-                elif self.config.conversation.llm_provider == "anthropic":
-                    async for chunk in self._stream_anthropic_response(messages, request_timestamp):
-                        if isinstance(chunk, dict) and 'request_filename' in chunk:
-                            request_filename = chunk['request_filename']
-                            continue
-                        # Check for interruption during LLM generation
-                        if not self.state.is_speaking or not self.state.is_processing_llm:
-                            print("🛑 LLM streaming interrupted by user")
-                            was_interrupted = True
-                            break
-                        
-                        if chunk is None:  # Error occurred
-                            error_msg = "Anthropic API error"
-                            yield "Sorry, I encountered an error with the language model."
-                            return
-                            
-                        assistant_response += chunk
-                        if self.show_tts_chunks:
-                            print(f"🔊 TTS chunk: {chunk}")
-                        yield chunk
-                        
-                else:
-                    error_msg = f"Unsupported LLM provider: {self.config.conversation.llm_provider}"
-                    yield f"Sorry, unsupported language model provider: {self.config.conversation.llm_provider}"
-                
-
-            
-            # Use multi-voice TTS streaming
-            print("🎭 Using multi-voice streaming")
-            result = await self.tts.speak_stream_multi_voice(llm_generator())
-            
-            # Check if we were cancelled during TTS
-            if asyncio.current_task() and asyncio.current_task().cancelled():
-                print(f"🚫 Task {call_id} cancelled during/after TTS")
-                raise asyncio.CancelledError()
-                
-            print(f"🎭 Multi-voice result: {result}")
-            tts_processing_complete = True
-            
-            if not result:
-                print("⚠️ Multi-voice TTS failed or was interrupted")
-                # For interrupted responses, we should capture ALL the text that was generated
-                # not just what was spoken (for proper context in future turns)
-                if hasattr(self.tts, 'current_session') and self.tts.current_session:
-                    full_generated = self.tts.current_session.generated_text.strip()
-                    if full_generated and not response_added_to_history:
-                        # Add the full generated text with interrupted status
-                        assistant_turn = ConversationTurn(
-                            role="assistant",
-                            content=full_generated,
-                            timestamp=datetime.now(),
-                            status="interrupted"
-                        )
-                        self.state.conversation_history.append(assistant_turn)
-                        self._log_conversation_turn("assistant", full_generated)
-                        print(f"💬 Added interrupted assistant response (full):")
-                        print(f"   Generated: {len(full_generated)} chars - '{full_generated[:80]}...'")
-                        response_added_to_history = True
-                        
-                        # Add system message about interruption
-                        system_message = "[Assistant was interrupted by user speaking]"
-                        system_turn = ConversationTurn(
-                            role="system",
-                            content=system_message,
-                            timestamp=datetime.now(),
-                            status="completed"
-                        )
-                        self.state.conversation_history.append(system_turn)
-                        self._log_conversation_turn("system", system_message)
-                        print(f"📝 Added interruption notice to conversation history")
-                else:
-                    # Fallback to heuristic if we can't get full text
-                    spoken_heuristic = self.tts.get_spoken_text_heuristic().strip()
-                    if spoken_heuristic and not response_added_to_history:
-                        assistant_turn = ConversationTurn(
-                            role="assistant",
-                            content=spoken_heuristic,
-                            timestamp=datetime.now(),
-                            status="interrupted"
-                        )
-                        self.state.conversation_history.append(assistant_turn)
-                        self._log_conversation_turn("assistant", spoken_heuristic)
-                        print(f"💬 Added interrupted assistant response (heuristic): '{spoken_heuristic[:100]}...'")
-                        response_added_to_history = True
-                        
-                        # Add system message about interruption
-                        system_message = "[Assistant was interrupted by user speaking]"
-                        system_turn = ConversationTurn(
-                            role="system",
-                            content=system_message,
-                            timestamp=datetime.now(),
-                            status="completed"
-                        )
-                        self.state.conversation_history.append(system_turn)
-                        self._log_conversation_turn("system", system_message)
-                        print(f"📝 Added interruption notice to conversation history")
-                return
-            
-            # Use heuristic approach for conversation history (preserves exact LLM text)
-            spoken_heuristic = self.tts.get_spoken_text_heuristic().strip()
-            generated_vs_spoken = self.tts.get_generated_vs_spoken()
-            was_fully_spoken = self.tts.was_fully_spoken()
-            
-            if spoken_heuristic or generated_vs_spoken.get('spoken_whisper'):
-                print(f"🎙️ WHISPER TRACKING RESULTS:")
-                print(f"   Generated: {len(generated_vs_spoken['generated'])} chars")
-                print(f"   Whisper raw: {len(generated_vs_spoken['spoken_whisper'])} chars")
-                print(f"   Heuristic: {len(spoken_heuristic)} chars")
-                print(f"   Fully spoken: {was_fully_spoken}")
-                print(f"   Heuristic text: '{spoken_heuristic[:200]}...'")
-            
-            # Determine content for history
-            # If fully spoken, use the complete generated text (no need for Whisper)
-            # If interrupted, use Whisper heuristic to get only what was spoken
-            if was_fully_spoken:
-                content_for_history = assistant_response  # Use full generated text
-            else:
-                content_for_history = spoken_heuristic if spoken_heuristic else assistant_response
-            
-            # Update conversation history based on completion status
-            if content_for_history.strip() and not response_added_to_history:
-                # User turns are already marked as completed at the start of LLM processing
-                        
-                # Add the assistant response
-                assistant_turn = ConversationTurn(
-                    role="assistant",
-                    content=content_for_history,  # What was actually spoken
-                    timestamp=datetime.now(),
-                    status="completed" if was_fully_spoken else "interrupted"
-                )
-                self.state.conversation_history.append(assistant_turn)
-                self._log_conversation_turn("assistant", content_for_history)
-                response_added_to_history = True
-                
-                if was_fully_spoken:
-                    print(f"💬 Added complete assistant response: {len(content_for_history)} chars")
-                    print(f"   Content: '{content_for_history[:100]}...'")
-                else:
-                    print(f"💬 Added partial assistant response (Whisper heuristic):")
-                    print(f"   Generated: {len(assistant_response)} chars")
-                    
-                    # Add system message about interruption
-                    system_message = "[Assistant was interrupted by user speaking]"
-                    system_turn = ConversationTurn(
-                        role="system",
-                        content=system_message,
-                        timestamp=datetime.now(),
-                        status="completed"
-                    )
-                    self.state.conversation_history.append(system_turn)
-                    self._log_conversation_turn("system", system_message)
-                    print(f"📝 Added interruption notice to conversation history")
-                    print(f"   Spoken: {len(content_for_history)} chars - '{content_for_history[:80]}...'")
-                
-            else:
-                # User turns remain completed even if assistant response was interrupted
-                print(f"🛑 Response was interrupted - no assistant content added (call_id: {call_id})")
-            
-        except asyncio.CancelledError:
-            print(f"🚫 LLM streaming task {call_id} was cancelled")
-            # Make sure to stop TTS if it's still running
-            if self.tts.is_streaming:
-                await self.tts.stop()
-            
-            # Add the interrupted response to history before exiting
-            if not response_added_to_history:
-                # Try to get what was actually spoken using Whisper heuristic
-                spoken_text = self.tts.get_spoken_text_heuristic().strip()
-                generated_text = ""
-                if hasattr(self.tts, 'current_session') and self.tts.current_session:
-                    generated_text = self.tts.current_session.generated_text.strip()
-                
-                if spoken_text:
-                    assistant_turn = ConversationTurn(
-                        role="assistant",
-                        content=spoken_text,
-                        timestamp=datetime.now(),
-                        status="interrupted"
-                    )
-                    self.state.conversation_history.append(assistant_turn)
-                    self._log_conversation_turn("assistant", spoken_text)
-                    print(f"💬 Added cancelled assistant response (Whisper):")
-                    print(f"   Generated: {len(generated_text)} chars - '{generated_text[:80]}...'")
-                    print(f"   Spoken:    {len(spoken_text)} chars - '{spoken_text[:80]}...'")
-                    response_added_to_history = True
-                # Fallback to full generated text if Whisper not available
-                elif hasattr(self.tts, 'current_session') and self.tts.current_session:
-                    full_generated = self.tts.current_session.generated_text.strip()
-                    if full_generated:
-                        assistant_turn = ConversationTurn(
-                            role="assistant",
-                            content=full_generated,
-                            timestamp=datetime.now(),
-                            status="interrupted"
-                        )
-                        self.state.conversation_history.append(assistant_turn)
-                        self._log_conversation_turn("assistant", full_generated)
-                        print(f"💬 Added cancelled assistant response (full): '{full_generated[:100]}...'")
-                        response_added_to_history = True
-                # Final fallback to assistant_response if no TTS session
-                elif assistant_response.strip():
-                    assistant_turn = ConversationTurn(
-                        role="assistant",
-                        content=assistant_response,
-                        timestamp=datetime.now(),
-                        status="interrupted"
-                    )
-                    self.state.conversation_history.append(assistant_turn)
-                    self._log_conversation_turn("assistant", assistant_response)
-                    print(f"💬 Added cancelled assistant response (fallback): '{assistant_response[:100]}...'")
-                    response_added_to_history = True
-            
-            raise  # Re-raise to let the caller know we were cancelled
-        except Exception as e:
-            error_msg = str(e)
-            print(f"Error in _stream_llm_to_tts: {e}")
-            self.logger.error(f"Error in _stream_llm_to_tts: {e}")
-            await self._speak_text("Sorry, I encountered an error processing your request.")
-        finally:
-            # Only do cleanup if TTS processing was attempted
-            if tts_processing_complete:
-                # Log the response (or error) after completion
-                response_timestamp = time.time()
-                if request_filename:  # Only log if we made a request
-                    self._log_llm_response(
-                        assistant_response, 
-                        request_filename, 
-                        response_timestamp, 
-                        was_interrupted, 
-                        error_msg,
-                        self.config.conversation.llm_provider
-                    )
-                
-                self.state.is_speaking = False
-                print(f"✅ Response completed successfully (call_id: {call_id})")
-            else:
-                print("⚠️ TTS processing was not completed, skipping cleanup")
-
-    async def _stream_openai_response(self, messages: List[Dict[str, str]], request_timestamp: float):
-        """Stream response from OpenAI API."""
-        models_to_try = [self.config.conversation.llm_model]
-        
-        for model in models_to_try:
-            try:
-                # Log the request right before making the API call
-                request_filename = self._log_llm_request(messages, model, request_timestamp, "openai")
-                yield {'request_filename': request_filename}
-                
-                response = self.openai_client.chat.completions.create(
-                    model=model,
-                    messages=messages,
-                    stream=True,
-                    max_tokens=self.config.conversation.max_tokens
-                )
-                
-                for chunk in response:
-                    if chunk.choices[0].delta.content:
-                        yield chunk.choices[0].delta.content
-                return  # Success
-                
-            except Exception as e:
-                print(f"Failed with OpenAI model {model}: {e}")
-                if model == models_to_try[-1]:
-                    yield None  # Signal error
-                    return
-
-    async def _stream_anthropic_response(self, messages: List[Dict[str, str]], request_timestamp: float):
-        """Stream response from Anthropic API."""
-        models_to_try = [self.config.conversation.llm_model]
-        
-        for model in models_to_try:
-            try:
-                # Convert to appropriate format based on conversation mode
-                if self.config.conversation.conversation_mode == "prefill":
-                    user_message, assistant_prefix = self._convert_to_prefill_format(messages)
-                    
-                    # Use Anthropic's completion API with prefill and CLI system prompt
-                    # Generate stop sequences from configured participant names and detected speakers
-                    human_name = self.config.conversation.prefill_participants[0]
-                    ai_name = self.config.conversation.prefill_participants[1]
-                    
-                    # Start with configured participants
-                    stop_sequences = [f"\n\n{human_name}:", f"\n\n{ai_name}:"]
-                    
-                    # Add all detected speakers from history to prevent bleeding into other speakers
-                    if hasattr(self, 'detected_speakers') and self.detected_speakers:
-                        for speaker in self.detected_speakers:
-                            speaker_stop = f"\n\n{speaker}:"
-                            if speaker_stop not in stop_sequences:
-                                stop_sequences.append(speaker_stop)
-                    
-                    print(f"🛑 Using stop sequences: {stop_sequences}")
-                    
-                    # Log the prefilled messages right before the API call
-                    prefill_messages = [
-                        {"role": "user", "content": user_message},
-                        {"role": "assistant", "content": assistant_prefix}
-                    ]
-                    request_filename = self._log_llm_request(prefill_messages, model, request_timestamp, "anthropic")
-                    yield {'request_filename': request_filename}
-                    
-                    response = await self.async_anthropic_client.messages.create(
-                        model=model,
-                        max_tokens=self.config.conversation.max_tokens,
-                        system=self.config.conversation.prefill_system_prompt,
-                        messages=prefill_messages,
-                        stop_sequences=stop_sequences,
-                        stream=True
-                    )
-                else:
-                    # Chat mode - convert system message if present
-                    anthropic_messages = []
-                    system_message = None
-                    
-                    for msg in messages:
-                        if msg["role"] == "system":
-                            system_message = msg["content"]
-                        else:
-                            anthropic_messages.append(msg)
-                    
-                    # Log the request right before making the API call
-                    request_filename = self._log_llm_request(anthropic_messages, model, request_timestamp, "anthropic")
-                    yield {'request_filename': request_filename}
-                    
-                    # Use Anthropic's chat API
-                    kwargs = {
-                        "model": model,
-                        "max_tokens": self.config.conversation.max_tokens,
-                        "messages": anthropic_messages,
-                        "stream": True
-                    }
-                    
-                    if system_message:
-                        kwargs["system"] = system_message
-                    
-                    response = await self.async_anthropic_client.messages.create(**kwargs)
-                
-                # Stream the response
-                accumulated_response = ""
-                async for chunk in response:
-                    if chunk.type == "content_block_delta":
-                        if hasattr(chunk.delta, 'text'):
-                            content = chunk.delta.text
-                            accumulated_response += content
-                            yield content
-                
-                # Convert from prefill format if needed
-                if self.config.conversation.conversation_mode == "prefill":
-                    # The response should already be clean since we prefilled with the participant name
-                    pass  # No additional processing needed
-                    
-                return  # Success
-                
-            except Exception as e:
-                print(f"Failed with Anthropic model {model}: {e}")
-                if model == models_to_try[-1]:
-                    yield None  # Signal error
-                    return
-    
+        # Always use character processing
+        await self._process_with_character_llm(user_input, reference_turn)
     async def _speak_text(self, text: str):
         """Speak a simple text message."""
         try:
@@ -1844,6 +1934,13 @@ class UnifiedVoiceConversation:
             await self.stt.cleanup()
         except Exception as e:
             print(f"Error cleaning up STT: {e}")
+            
+        try:
+            if self.camera:
+                self.camera.stop()
+                print("📷 Camera stopped")
+        except Exception as e:
+            print(f"Error cleaning up camera: {e}")
         
         try:
             await self.tts.cleanup()

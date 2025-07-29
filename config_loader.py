@@ -6,7 +6,7 @@ Loads YAML configuration and creates appropriate dataclass configurations.
 
 import yaml
 import os
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Optional, Dict, Any, List
 from pathlib import Path
 from copy import deepcopy
@@ -64,10 +64,9 @@ class ConversationConfig:
     # Tools configuration
     tools_config: Optional[Dict[str, Any]] = None
     
-    # Multi-character configuration
+    # Character configuration
     characters_config: Optional[Dict[str, Any]] = None
     director_config: Optional[Dict[str, Any]] = None
-    enable_multi_character: bool = False
     
     def __post_init__(self):
         if self.prefill_participants is None:
@@ -88,6 +87,17 @@ class LoggingConfig:
     show_audio_debug: bool = False
 
 @dataclass
+class CameraConfig:
+    """Camera capture configuration."""
+    enabled: bool = False
+    device_id: int = 0
+    resolution: List[int] = field(default_factory=lambda: [640, 480])
+    capture_on_speech: bool = True
+    save_captures: bool = False
+    capture_dir: str = "camera_captures"
+    jpeg_quality: int = 85
+
+@dataclass
 class DevelopmentConfig:
     """Development and testing configuration."""
     enable_debug_mode: bool = False
@@ -103,6 +113,7 @@ class VoiceAIConfig:
     audio: AudioConfig
     logging: LoggingConfig
     development: DevelopmentConfig
+    camera: Optional[CameraConfig] = None
 
 def deep_merge(base: Dict[str, Any], override: Dict[str, Any]) -> Dict[str, Any]:
     """
@@ -251,6 +262,7 @@ class ConfigLoader:
         dev_config_data = config_data.get('development', {})
         tools_config = config_data.get('tools', {})
         characters_config = config_data.get('characters', {})
+        camera_config_data = config_data.get('camera', {})
         director_config = config_data.get('director', {})
         
         # Parse keywords if provided
@@ -335,7 +347,6 @@ class ConfigLoader:
             tools_config=tools_config,
             characters_config=characters_config,
             director_config=director_config,
-            enable_multi_character=bool(characters_config)
         )
         
         # Create other configurations
@@ -357,13 +368,27 @@ class ConfigLoader:
             mock_apis=dev_config_data.get('mock_apis', False)
         )
         
+        # Create camera config if provided
+        camera_config = None
+        if camera_config_data:
+            camera_config = CameraConfig(
+                enabled=camera_config_data.get('enabled', False),
+                device_id=camera_config_data.get('device_id', 0),
+                resolution=camera_config_data.get('resolution', [640, 480]),
+                capture_on_speech=camera_config_data.get('capture_on_speech', True),
+                save_captures=camera_config_data.get('save_captures', False),
+                capture_dir=camera_config_data.get('capture_dir', 'camera_captures'),
+                jpeg_quality=camera_config_data.get('jpeg_quality', 85)
+            )
+        
         return VoiceAIConfig(
             conversation=conversation_config,
             stt=stt_config,
             tts=tts_config,
             audio=audio_config,
             logging=logging_config,
-            development=development_config
+            development=development_config,
+            camera=camera_config
         )
     
     @classmethod
