@@ -24,6 +24,7 @@ from config_loader import load_config, VoiceAIConfig
 from tools import create_tool_registry
 from character_system import create_character_manager, CharacterManager
 from camera_capture import CameraCapture, CameraConfig as CameraCaptureConfig
+from thinking_sound import ThinkingSoundPlayer
 
 @dataclass
 class ConversationTurn:
@@ -144,6 +145,9 @@ class UnifiedVoiceConversation:
                 }
         
         self.character_manager: CharacterManager = create_character_manager(characters_config)
+        
+        # Initialize thinking sound player
+        self.thinking_sound = ThinkingSoundPlayer(sample_rate=22050)
         
         # Show appropriate message
         if len(characters_config["characters"]) > 1:
@@ -1217,11 +1221,14 @@ class UnifiedVoiceConversation:
             if generation is not None and generation != self._processing_generation:
                 print(f"🚫 Character LLM processing cancelled - newer request exists")
                 self.state.is_processing_llm = False
-                return
+                return  # Don't stop sound here - it hasn't started yet
             
             # Increment director generation and store it
             self._director_generation += 1
             director_gen = self._director_generation
+            
+            # Start thinking sound with director generation
+            await self.thinking_sound.start(generation=director_gen)
             
             # Let director decide who speaks next
             next_speaker = await self.character_manager.select_next_speaker(
@@ -1231,16 +1238,19 @@ class UnifiedVoiceConversation:
             # Check both processing generation and director generation
             if generation is not None and generation != self._processing_generation:
                 print(f"🚫 Processing cancelled after director - newer utterance exists")
+                await self.thinking_sound.stop(generation=director_gen)
                 self.state.is_processing_llm = False
                 return
                 
             if director_gen != self._director_generation:
                 print(f"🚫 Processing cancelled after director - newer director request exists")
+                await self.thinking_sound.stop(generation=director_gen)
                 self.state.is_processing_llm = False
                 return
             
             if next_speaker == "USER" or next_speaker is None:
                 print("🎭 Director: User should speak next")
+                await self.thinking_sound.stop(generation=director_gen)
                 self.state.is_processing_llm = False
                 return
             
@@ -1250,6 +1260,7 @@ class UnifiedVoiceConversation:
             
             if not character_config:
                 print(f"❌ Unknown character: {next_speaker}")
+                await self.thinking_sound.stop(generation=director_gen)
                 self.state.is_processing_llm = False
                 return
             
@@ -1292,13 +1303,22 @@ class UnifiedVoiceConversation:
             # Check both generations before starting LLM
             if generation is not None and generation != self._processing_generation:
                 print(f"🚫 Processing cancelled before LLM call - newer utterance exists")
+                await self.thinking_sound.stop(generation=director_gen)
                 self.state.is_processing_llm = False
                 return
                 
             if director_gen != self._director_generation:
                 print(f"🚫 Processing cancelled before LLM call - newer director request exists")
+                await self.thinking_sound.stop(generation=director_gen)
                 self.state.is_processing_llm = False
                 return
+            
+            # Set callback to stop thinking sound when first audio arrives
+            # Create a closure that captures the current director generation
+            async def stop_thinking_for_generation():
+                await self.thinking_sound.stop(generation=director_gen)
+            
+            self.tts.first_audio_callback = stop_thinking_for_generation
             
             # Stream response based on provider
             assistant_response = ""
@@ -1435,6 +1455,8 @@ class UnifiedVoiceConversation:
             print(f"❌ Character LLM error: {e}")
             self.logger.error(f"Character LLM error: {e}")
         finally:
+            # Always stop thinking sound (no generation means force stop)
+            await self.thinking_sound.stop()
             self.state.is_processing_llm = False
     
     async def _stream_character_openai_response(self, messages, character_config, request_timestamp):
@@ -2011,16 +2033,26 @@ class UnifiedVoiceConversation:
     
     async def cleanup(self):
         """Clean up all resources."""
+        # First stop the conversation to prevent new operations
         try:
             await self.stop_conversation()
         except Exception as e:
             print(f"Error stopping conversation: {e}")
         
+        # Stop thinking sound early to prevent conflicts
+        try:
+            await self.thinking_sound.stop()  # Force stop any playing sound
+            await asyncio.sleep(0.1)  # Give it time to stop
+        except Exception as e:
+            print(f"Error stopping thinking sound: {e}")
+        
+        # Clean up STT
         try:
             await self.stt.cleanup()
         except Exception as e:
             print(f"Error cleaning up STT: {e}")
             
+        # Clean up camera
         try:
             if self.camera:
                 self.camera.stop()
@@ -2028,10 +2060,17 @@ class UnifiedVoiceConversation:
         except Exception as e:
             print(f"Error cleaning up camera: {e}")
         
+        # Clean up TTS
         try:
             await self.tts.cleanup()
         except Exception as e:
             print(f"Error cleaning up TTS: {e}")
+            
+        # Finally clean up thinking sound resources
+        try:
+            self.thinking_sound.cleanup()
+        except Exception as e:
+            print(f"Error cleaning up thinking sound: {e}")
 
 async def main():
     """Main function for the unified voice conversation system."""
