@@ -25,6 +25,7 @@ from tools import create_tool_registry
 from character_system import create_character_manager, CharacterManager
 from camera_capture import CameraCapture, CameraConfig as CameraCaptureConfig
 from thinking_sound import ThinkingSoundPlayer
+from websocket_ui_server import VoiceUIServer
 
 @dataclass
 class ConversationTurn:
@@ -35,6 +36,7 @@ class ConversationTurn:
     status: str = "completed"  # "pending", "processing", "completed", "interrupted"
     speaker_id: Optional[int] = None
     character: Optional[str] = None  # Character name for multi-character conversations
+    metadata: Optional[Dict[str, Any]] = None  # Additional metadata for special handling
 
 @dataclass 
 class ConversationState:
@@ -148,6 +150,10 @@ class UnifiedVoiceConversation:
         
         # Initialize thinking sound player
         self.thinking_sound = ThinkingSoundPlayer(sample_rate=22050)
+        
+        # Initialize UI server
+        ui_port = config.ui_port if hasattr(config, 'ui_port') else 8765
+        self.ui_server = VoiceUIServer(self, host='localhost', port=ui_port)
         
         # Show appropriate message
         if len(characters_config["characters"]) > 1:
@@ -881,6 +887,9 @@ class UnifiedVoiceConversation:
             # Start conversation management
             self.conversation_task = asyncio.create_task(self._conversation_manager())
             
+            # Start UI server
+            asyncio.create_task(self.ui_server.start())
+            
             print("✅ Conversation system active!")
             print("💡 Tips:")
             print("   - Speak naturally and pause when done")
@@ -941,6 +950,14 @@ class UnifiedVoiceConversation:
         speaker_info = f" (Speaker {result.speaker_id})" if result.speaker_id is not None else ""
         print(f"🎯 Final{speaker_info}: {result.text}")
         
+        # Broadcast final transcription
+        if hasattr(self, 'ui_server'):
+            await self.ui_server.broadcast_transcription(
+                speaker="USER",
+                text=result.text,
+                is_final=True
+            )
+        
         # Capture image if camera is enabled
         captured_image = None
         if self.camera and self.config.camera.capture_on_speech:
@@ -998,6 +1015,15 @@ class UnifiedVoiceConversation:
             self.state.is_processing_llm = False
             self.state.current_processing_turn = None
             print("🔄 All AI processing interrupted and state cleared")
+            
+            # Broadcast state cleared
+            if hasattr(self, 'ui_server'):
+                await self.ui_server.broadcast_speaker_status(
+                    current_speaker=None,
+                    is_speaking=False,
+                    is_processing=False,
+                    thinking_sound=False
+                )
         
         # Add the new user utterance to conversation history AFTER handling interruption
         # Include captured image if available
@@ -1043,6 +1069,14 @@ class UnifiedVoiceConversation:
         # Show interim results based on configuration
         if self.show_interim:
             print(f"💭 Interim: {result.text}")
+            
+        # Broadcast to UI
+        if hasattr(self, 'ui_server'):
+            await self.ui_server.broadcast_transcription(
+                speaker="USER",
+                text=result.text,
+                is_interim=True
+            )
     
     async def _on_speech_started(self, data):
         """Handle speech start events."""
@@ -1230,10 +1264,29 @@ class UnifiedVoiceConversation:
             # Start thinking sound with director generation
             await self.thinking_sound.start(generation=director_gen)
             
-            # Let director decide who speaks next
-            next_speaker = await self.character_manager.select_next_speaker(
-                self._get_conversation_history_for_director()
-            )
+            # Broadcast thinking sound status
+            if hasattr(self, 'ui_server'):
+                await self.ui_server.broadcast_speaker_status(thinking_sound=True)
+            
+            # Check if this is a manual trigger from UI
+            next_speaker = None
+            if hasattr(reference_turn, 'metadata') and reference_turn.metadata:
+                if reference_turn.metadata.get('is_manual_trigger'):
+                    next_speaker = reference_turn.metadata.get('triggered_speaker')
+                    print(f"🎯 Using manually triggered speaker: {next_speaker}")
+            
+            # If no manual trigger, let director decide who speaks next
+            if not next_speaker:
+                next_speaker = await self.character_manager.select_next_speaker(
+                    self._get_conversation_history_for_director()
+                )
+            
+            # Broadcast pending speaker
+            if hasattr(self, 'ui_server'):
+                await self.ui_server.broadcast_speaker_status(
+                    pending_speaker=next_speaker,
+                    is_processing=True
+                )
             
             # Check both processing generation and director generation
             if generation is not None and generation != self._processing_generation:
@@ -1265,6 +1318,14 @@ class UnifiedVoiceConversation:
                 return
             
             print(f"🎭 {next_speaker} is responding...")
+            
+            # Broadcast current speaker
+            if hasattr(self, 'ui_server'):
+                await self.ui_server.broadcast_speaker_status(
+                    current_speaker=next_speaker,
+                    is_speaking=False,  # Not speaking yet, just processing
+                    is_processing=True
+                )
             
             # Request timestamp for logging
             request_timestamp = time.time()
@@ -1314,9 +1375,15 @@ class UnifiedVoiceConversation:
                 return
             
             # Set callback to stop thinking sound when first audio arrives
-            # Create a closure that captures the current director generation
+            # Create a closure that captures the current director generation and speaker
             async def stop_thinking_for_generation():
                 await self.thinking_sound.stop(generation=director_gen)
+                if hasattr(self, 'ui_server'):
+                    await self.ui_server.broadcast_speaker_status(
+                        thinking_sound=False,
+                        is_speaking=True,  # Now actually speaking
+                        current_speaker=next_speaker
+                    )
             
             self.tts.first_audio_callback = stop_thinking_for_generation
             
@@ -1458,6 +1525,15 @@ class UnifiedVoiceConversation:
             # Always stop thinking sound (no generation means force stop)
             await self.thinking_sound.stop()
             self.state.is_processing_llm = False
+            
+            # Broadcast that speaking/processing has ended
+            if hasattr(self, 'ui_server'):
+                await self.ui_server.broadcast_speaker_status(
+                    current_speaker=None,
+                    is_speaking=False,
+                    is_processing=False,
+                    thinking_sound=False
+                )
     
     async def _stream_character_openai_response(self, messages, character_config, request_timestamp):
         """Stream response from OpenAI for a specific character."""
@@ -1474,7 +1550,15 @@ class UnifiedVoiceConversation:
             
             async for chunk in response:
                 if chunk.choices[0].delta.content:
-                    yield chunk.choices[0].delta.content
+                    content = chunk.choices[0].delta.content
+                    yield content
+                    # Broadcast to UI
+                    if hasattr(self, 'ui_server'):
+                        await self.ui_server.broadcast_ai_stream(
+                            speaker=character_config.name,
+                            text=content,
+                            session_id=f"session_{request_timestamp}"
+                        )
                     
         except Exception as e:
             print(f"❌ OpenAI streaming error for {character_config.name}: {e}")
@@ -1583,6 +1667,13 @@ class UnifiedVoiceConversation:
                         # else continue buffering
                     else:
                         yield text
+                        # Broadcast to UI
+                        if hasattr(self, 'ui_server'):
+                            await self.ui_server.broadcast_ai_stream(
+                                speaker=character_config.name,
+                                text=text,
+                                session_id=f"session_{request_timestamp}"
+                            )
                     
         except Exception as e:
             print(f"❌ Anthropic streaming error for {character_config.name}: {e}")
@@ -2065,6 +2156,12 @@ class UnifiedVoiceConversation:
             await self.tts.cleanup()
         except Exception as e:
             print(f"Error cleaning up TTS: {e}")
+            
+        # Clean up UI server
+        try:
+            await self.ui_server.stop()
+        except Exception as e:
+            print(f"Error cleaning up UI server: {e}")
             
         # Finally clean up thinking sound resources
         try:

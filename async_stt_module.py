@@ -84,6 +84,7 @@ class AsyncSTTStreamer:
         self.current_speaker = None
         self.last_utterance_time = None
         self.session_speakers = {}  # Maps session speaker IDs to names
+        self.is_paused = False  # For pause/resume functionality
         
         # Speaker identification (optional)
         self.speaker_identifier = None
@@ -221,6 +222,18 @@ class AsyncSTTStreamer:
             })
             return False
     
+    async def pause(self):
+        """Pause STT processing (keeps connection alive but stops sending audio)."""
+        if not self.is_paused:
+            self.is_paused = True
+            print("⏸️ STT paused")
+            
+    async def resume(self):
+        """Resume STT processing."""
+        if self.is_paused:
+            self.is_paused = False
+            print("▶️ STT resumed")
+    
     async def stop_listening(self):
         """Stop listening for speech."""
         print("🛑 STT stop requested")
@@ -300,6 +313,11 @@ class AsyncSTTStreamer:
                         print("🔌 Connection no longer alive, stopping audio stream")
                         break
                     
+                    # Skip sending audio if paused
+                    if self.is_paused:
+                        await asyncio.sleep(0.1)  # Small delay to prevent busy loop
+                        continue
+                        
                     # Read audio data in executor to avoid blocking
                     try:
                         loop = asyncio.get_event_loop()
