@@ -145,10 +145,18 @@ class VoiceUIServer:
         self.conversation.state.is_processing_llm = False
         self.conversation.state.is_speaking = False
         
-        # Clear any pending utterances to prevent director from being triggered
-        for turn in self.conversation.state.conversation_history:
-            if turn.status == "pending":
-                turn.status = "interrupted"
+        # Increment processing generation to cancel any ongoing processing
+        if hasattr(self.conversation, '_processing_generation'):
+            self.conversation._processing_generation += 1
+            
+        # Also increment director generation to cancel any director requests
+        if hasattr(self.conversation, '_director_generation'):
+            self.conversation._director_generation += 1
+            
+        # Cancel any pending processing task
+        if hasattr(self.conversation, '_processing_task'):
+            if self.conversation._processing_task and not self.conversation._processing_task.done():
+                self.conversation._processing_task.cancel()
         
         # Update and broadcast state
         self.current_state.update({
