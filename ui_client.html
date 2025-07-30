@@ -1,0 +1,716 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Voice Conversation Control Panel</title>
+    <style>
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+            max-width: 1200px;
+            margin: 0 auto;
+            padding: 20px;
+            background: #f5f5f5;
+        }
+        
+        h1 {
+            color: #333;
+            margin-bottom: 30px;
+        }
+        
+        .status-panel {
+            display: flex;
+            gap: 20px;
+            margin-bottom: 30px;
+            flex-wrap: wrap;
+        }
+        
+        .speaker-card {
+            padding: 20px;
+            border-radius: 12px;
+            min-width: 180px;
+            text-align: center;
+            transition: all 0.3s ease;
+            background: white;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+            position: relative;
+            overflow: hidden;
+        }
+        
+        .speaker-card.active {
+            background: #4CAF50;
+            color: white;
+            transform: translateY(-2px);
+            box-shadow: 0 4px 12px rgba(76, 175, 80, 0.3);
+        }
+        
+        .speaker-card.thinking {
+            background: #FF9800;
+            color: white;
+            animation: pulse 1.5s infinite;
+        }
+        
+        .speaker-card.idle {
+            background: white;
+            color: #666;
+        }
+        
+        @keyframes pulse {
+            0% { opacity: 1; }
+            50% { opacity: 0.8; }
+            100% { opacity: 1; }
+        }
+        
+        .speaker-card h3 {
+            margin: 0 0 10px 0;
+            font-size: 20px;
+        }
+        
+        .status-indicator {
+            display: inline-block;
+            width: 10px;
+            height: 10px;
+            border-radius: 50%;
+            margin-right: 8px;
+            background: #ddd;
+        }
+        
+        .status-indicator.active {
+            background: #4CAF50;
+            animation: blink 1s infinite;
+        }
+        
+        @keyframes blink {
+            0%, 100% { opacity: 1; }
+            50% { opacity: 0.5; }
+        }
+        
+        .controls {
+            margin: 30px 0;
+            display: flex;
+            gap: 12px;
+            flex-wrap: wrap;
+        }
+        
+        button {
+            padding: 12px 24px;
+            border: none;
+            border-radius: 8px;
+            background: #2196F3;
+            color: white;
+            cursor: pointer;
+            font-size: 16px;
+            font-weight: 500;
+            transition: all 0.2s;
+            display: flex;
+            align-items: center;
+            gap: 8px;
+        }
+        
+        button:hover {
+            background: #1976D2;
+            transform: translateY(-1px);
+            box-shadow: 0 2px 8px rgba(33, 150, 243, 0.3);
+        }
+        
+        button:active {
+            transform: translateY(0);
+        }
+        
+        button.danger {
+            background: #f44336;
+        }
+        
+        button.danger:hover {
+            background: #d32f2f;
+            box-shadow: 0 2px 8px rgba(244, 67, 54, 0.3);
+        }
+        
+        button:disabled {
+            background: #ccc;
+            cursor: not-allowed;
+            transform: none;
+        }
+        
+        button.trigger-model {
+            background: #9C27B0;
+        }
+        
+        button.trigger-model:hover {
+            background: #7B1FA2;
+            box-shadow: 0 2px 8px rgba(156, 39, 176, 0.3);
+        }
+        
+        .status-bar {
+            background: white;
+            padding: 12px 20px;
+            border-radius: 8px;
+            margin-bottom: 20px;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+        }
+        
+        .connection-status {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            font-size: 14px;
+        }
+        
+        .connection-dot {
+            width: 8px;
+            height: 8px;
+            border-radius: 50%;
+            background: #ddd;
+        }
+        
+        .connection-dot.connected {
+            background: #4CAF50;
+        }
+        
+        .connection-dot.disconnected {
+            background: #f44336;
+        }
+        
+        .transcript-container {
+            background: white;
+            border-radius: 12px;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+            overflow: hidden;
+        }
+        
+        .transcript-header {
+            padding: 16px 20px;
+            background: #f8f8f8;
+            border-bottom: 1px solid #eee;
+            font-weight: 600;
+            color: #333;
+        }
+        
+        .transcript {
+            height: 400px;
+            overflow-y: auto;
+            padding: 20px;
+            background: white;
+        }
+        
+        .message {
+            margin: 12px 0;
+            padding: 12px 16px;
+            border-radius: 12px;
+            position: relative;
+            animation: fadeIn 0.3s ease;
+        }
+        
+        @keyframes fadeIn {
+            from { opacity: 0; transform: translateY(10px); }
+            to { opacity: 1; transform: translateY(0); }
+        }
+        
+        .message.user {
+            background: #E3F2FD;
+            margin-left: 20%;
+            border-bottom-right-radius: 4px;
+        }
+        
+        .message.ai {
+            background: #F3E5F5;
+            margin-right: 20%;
+            border-bottom-left-radius: 4px;
+        }
+        
+        .message.ai.opus {
+            background: #E8F5E9;
+        }
+        
+        .message.ai.sonnet {
+            background: #FFF3E0;
+        }
+        
+        .message.interim {
+            opacity: 0.6;
+            font-style: italic;
+        }
+        
+        .speaker-name {
+            font-weight: 600;
+            color: #666;
+            font-size: 12px;
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+            margin-bottom: 4px;
+        }
+        
+        .message-content {
+            color: #333;
+            line-height: 1.5;
+        }
+        
+        .thinking-indicator {
+            display: inline-block;
+            margin-left: 8px;
+        }
+        
+        .thinking-indicator span {
+            display: inline-block;
+            width: 4px;
+            height: 4px;
+            border-radius: 50%;
+            background: currentColor;
+            margin: 0 2px;
+            animation: bounce 1.4s infinite ease-in-out both;
+        }
+        
+        .thinking-indicator span:nth-child(1) { animation-delay: -0.32s; }
+        .thinking-indicator span:nth-child(2) { animation-delay: -0.16s; }
+        
+        @keyframes bounce {
+            0%, 80%, 100% { transform: scale(0); }
+            40% { transform: scale(1); }
+        }
+        
+        .stats {
+            display: flex;
+            gap: 20px;
+            margin-top: 20px;
+            font-size: 14px;
+            color: #666;
+        }
+        
+        .stat-item {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+        }
+        
+        /* Responsive design */
+        @media (max-width: 768px) {
+            .message.user { margin-left: 10%; }
+            .message.ai { margin-right: 10%; }
+            .controls { justify-content: center; }
+            .status-panel { justify-content: center; }
+        }
+    </style>
+</head>
+<body>
+    <h1>🎙️ Voice Conversation Control Panel</h1>
+    
+    <div class="status-bar">
+        <div class="connection-status">
+            <div class="connection-dot" id="connection-dot"></div>
+            <span id="connection-text">Connecting...</span>
+        </div>
+        <div class="stats">
+            <div class="stat-item">
+                <span>Generation:</span>
+                <strong id="generation-count">0</strong>
+            </div>
+            <div class="stat-item">
+                <span>Messages:</span>
+                <strong id="message-count">0</strong>
+            </div>
+        </div>
+    </div>
+    
+    <div class="status-panel" id="status-panel">
+        <div id="user-card" class="speaker-card idle">
+            <h3>👤 USER</h3>
+            <span class="status-indicator"></span>
+            <span class="status-text">Idle</span>
+        </div>
+        <!-- Character cards will be dynamically added here -->
+    </div>
+    
+    <div class="controls">
+        <button class="danger" onclick="forceInterrupt()" id="interrupt-btn">
+            <span>🛑</span> Force Interrupt
+        </button>
+        <button id="stt-toggle" onclick="toggleSTT()">
+            <span>⏸️</span> Pause STT
+        </button>
+        <button onclick="clearTranscript()">
+            <span>🗑️</span> Clear Transcript
+        </button>
+        <button onclick="exportTranscript()">
+            <span>💾</span> Export
+        </button>
+    </div>
+    
+    <div class="controls" style="margin-top: 10px;" id="trigger-buttons">
+        <!-- Trigger buttons will be dynamically added here -->
+    </div>
+    
+    <div class="transcript-container">
+        <div class="transcript-header">
+            Conversation Transcript
+            <span id="typing-indicator" style="display: none;">
+                <span class="thinking-indicator">
+                    <span></span><span></span><span></span>
+                </span>
+            </span>
+        </div>
+        <div id="transcript" class="transcript"></div>
+    </div>
+    
+    <script>
+        let ws = null;
+        let sttActive = true;
+        let currentMessages = {};  // Track ongoing AI messages by session
+        let messageCount = 0;
+        let isConnected = false;
+        let availableCharacters = [];  // Track available AI characters
+        
+        function updateConnectionStatus(connected) {
+            isConnected = connected;
+            const dot = document.getElementById('connection-dot');
+            const text = document.getElementById('connection-text');
+            
+            if (connected) {
+                dot.classList.add('connected');
+                dot.classList.remove('disconnected');
+                text.textContent = 'Connected to voice system';
+            } else {
+                dot.classList.remove('connected');
+                dot.classList.add('disconnected');
+                text.textContent = 'Disconnected - Reconnecting...';
+            }
+            
+            // Enable/disable buttons based on connection
+            document.querySelectorAll('button').forEach(btn => {
+                if (btn.id !== 'connection-btn') {
+                    btn.disabled = !connected;
+                }
+            });
+        }
+        
+        function connect() {
+            ws = new WebSocket('ws://localhost:8765');
+            
+            ws.onopen = () => {
+                console.log('Connected to voice system');
+                updateConnectionStatus(true);
+                ws.send(JSON.stringify({ type: 'ui_ready', data: { client_id: 'web-ui' }}));
+            };
+            
+            ws.onclose = () => {
+                console.log('Disconnected from voice system');
+                updateConnectionStatus(false);
+                setTimeout(connect, 3000);  // Reconnect after 3s
+            };
+            
+            ws.onerror = (error) => {
+                console.error('WebSocket error:', error);
+                updateConnectionStatus(false);
+            };
+            
+            ws.onmessage = (event) => {
+                const msg = JSON.parse(event.data);
+                handleMessage(msg);
+            };
+        }
+        
+        function handleMessage(msg) {
+            switch(msg.type) {
+                case 'speaker_status':
+                    updateSpeakerStatus(msg.data);
+                    break;
+                case 'transcription':
+                    updateTranscription(msg.data);
+                    break;
+                case 'ai_stream':
+                    updateAIStream(msg.data);
+                    break;
+                case 'system_status':
+                    updateSystemStatus(msg.data);
+                    break;
+                case 'error':
+                    console.error('Server error:', msg.data);
+                    showError(msg.data.message);
+                    break;
+                case 'available_characters':
+                    updateAvailableCharacters(msg.data);
+                    break;
+            }
+        }
+        
+        function updateSpeakerStatus(data) {
+            // Reset all cards
+            document.querySelectorAll('.speaker-card').forEach(card => {
+                card.className = 'speaker-card idle';
+                card.querySelector('.status-text').textContent = 'Idle';
+                card.querySelector('.status-indicator').classList.remove('active');
+            });
+            
+            // Update thinking status
+            if (data.thinking_sound && data.pending_speaker) {
+                const card = document.getElementById(`${data.pending_speaker.toLowerCase()}-card`);
+                if (card) {
+                    card.className = 'speaker-card thinking';
+                    card.querySelector('.status-text').textContent = 'Thinking...';
+                }
+            }
+            
+            // Update current speaker
+            if (data.current_speaker) {
+                const card = document.getElementById(`${data.current_speaker.toLowerCase()}-card`);
+                if (card) {
+                    card.className = 'speaker-card active';
+                    card.querySelector('.status-text').textContent = data.is_speaking ? 'Speaking' : 'Processing';
+                    if (data.is_speaking) {
+                        card.querySelector('.status-indicator').classList.add('active');
+                    }
+                }
+            }
+            
+            // Update pending speaker if not thinking
+            if (data.is_processing && data.pending_speaker && !data.thinking_sound) {
+                const card = document.getElementById(`${data.pending_speaker.toLowerCase()}-card`);
+                if (card && !data.current_speaker) {
+                    card.className = 'speaker-card thinking';
+                    card.querySelector('.status-text').textContent = 'Processing...';
+                }
+            }
+        }
+        
+        function updateTranscription(data) {
+            const transcript = document.getElementById('transcript');
+            
+            if (data.is_interim) {
+                // Update or create interim message
+                let interim = document.getElementById('interim-msg');
+                if (!interim) {
+                    interim = document.createElement('div');
+                    interim.id = 'interim-msg';
+                    interim.className = 'message user interim';
+                    transcript.appendChild(interim);
+                }
+                interim.innerHTML = `
+                    <div class="speaker-name">USER</div>
+                    <div class="message-content">${escapeHtml(data.text)}</div>
+                `;
+                
+                // Show typing indicator
+                document.getElementById('typing-indicator').style.display = 'inline';
+            } else if (data.is_final) {
+                // Remove interim and add final
+                const interim = document.getElementById('interim-msg');
+                if (interim) interim.remove();
+                
+                // Hide typing indicator
+                document.getElementById('typing-indicator').style.display = 'none';
+                
+                const msg = document.createElement('div');
+                msg.className = 'message user';
+                msg.innerHTML = `
+                    <div class="speaker-name">USER</div>
+                    <div class="message-content">${escapeHtml(data.text)}</div>
+                `;
+                transcript.appendChild(msg);
+                messageCount++;
+                updateStats();
+            }
+            
+            transcript.scrollTop = transcript.scrollHeight;
+        }
+        
+        function updateAIStream(data) {
+            const transcript = document.getElementById('transcript');
+            
+            // Get or create message for this session
+            let msg = currentMessages[data.session_id];
+            if (!msg) {
+                msg = document.createElement('div');
+                msg.className = `message ai ${data.speaker.toLowerCase()}`;
+                msg.innerHTML = `
+                    <div class="speaker-name">${data.speaker}</div>
+                    <div class="message-content"></div>
+                `;
+                transcript.appendChild(msg);
+                currentMessages[data.session_id] = msg;
+                messageCount++;
+                updateStats();
+            }
+            
+            // Append new text
+            const content = msg.querySelector('.message-content');
+            content.textContent += data.text;
+            
+            // Clean up if complete
+            if (data.is_complete) {
+                delete currentMessages[data.session_id];
+            }
+            
+            transcript.scrollTop = transcript.scrollHeight;
+        }
+        
+        function updateSystemStatus(data) {
+            // Update STT button
+            const sttBtn = document.getElementById('stt-toggle');
+            sttBtn.innerHTML = data.stt_active ? 
+                '<span>⏸️</span> Pause STT' : 
+                '<span>▶️</span> Resume STT';
+            sttActive = data.stt_active;
+            
+            // Update generation count
+            if (data.current_generation !== undefined) {
+                document.getElementById('generation-count').textContent = data.current_generation;
+            }
+        }
+        
+        function updateStats() {
+            document.getElementById('message-count').textContent = messageCount;
+        }
+        
+        function forceInterrupt() {
+            if (ws && ws.readyState === WebSocket.OPEN) {
+                ws.send(JSON.stringify({ type: 'force_interrupt', data: {} }));
+                
+                // Visual feedback
+                const btn = document.getElementById('interrupt-btn');
+                btn.style.transform = 'scale(0.95)';
+                setTimeout(() => btn.style.transform = '', 100);
+            }
+        }
+        
+        function triggerModel(modelName) {
+            if (ws && ws.readyState === WebSocket.OPEN) {
+                ws.send(JSON.stringify({ 
+                    type: 'trigger_speaker', 
+                    data: { speaker: modelName }
+                }));
+                
+                // Visual feedback
+                const btn = document.getElementById(`trigger-${modelName.toLowerCase()}`);
+                btn.style.transform = 'scale(0.95)';
+                setTimeout(() => btn.style.transform = '', 100);
+                
+                // Show in transcript
+                const transcript = document.getElementById('transcript');
+                const msg = document.createElement('div');
+                msg.className = 'message system';
+                msg.style.background = '#E1F5FE';
+                msg.style.textAlign = 'center';
+                msg.style.fontStyle = 'italic';
+                msg.innerHTML = `<div class="message-content">🎯 Triggering ${modelName} to speak...</div>`;
+                transcript.appendChild(msg);
+                transcript.scrollTop = transcript.scrollHeight;
+            }
+        }
+        
+        function toggleSTT() {
+            if (ws && ws.readyState === WebSocket.OPEN) {
+                ws.send(JSON.stringify({ 
+                    type: 'stt_control', 
+                    data: { action: sttActive ? 'pause' : 'resume' }
+                }));
+            }
+        }
+        
+        function clearTranscript() {
+            if (confirm('Clear all transcript history?')) {
+                document.getElementById('transcript').innerHTML = '';
+                currentMessages = {};
+                messageCount = 0;
+                updateStats();
+            }
+        }
+        
+        function exportTranscript() {
+            const transcript = document.getElementById('transcript');
+            const messages = Array.from(transcript.querySelectorAll('.message')).map(msg => {
+                const speaker = msg.querySelector('.speaker-name').textContent;
+                const content = msg.querySelector('.message-content').textContent;
+                return `${speaker}: ${content}`;
+            }).join('\n\n');
+            
+            const blob = new Blob([messages], { type: 'text/plain' });
+            const url = URL.createObjectURL(blob);
+            const a = document.createElement('a');
+            a.href = url;
+            a.download = `conversation_${new Date().toISOString()}.txt`;
+            a.click();
+            URL.revokeObjectURL(url);
+        }
+        
+        function showError(message) {
+            // You could show a toast notification here
+            console.error('Error:', message);
+        }
+        
+        function escapeHtml(text) {
+            const div = document.createElement('div');
+            div.textContent = text;
+            return div.innerHTML;
+        }
+        
+        function updateAvailableCharacters(data) {
+            availableCharacters = data.characters || [];
+            
+            // Update speaker cards
+            const statusPanel = document.getElementById('status-panel');
+            // Remove existing character cards (keep USER card)
+            const existingCards = statusPanel.querySelectorAll('.speaker-card:not(#user-card)');
+            existingCards.forEach(card => card.remove());
+            
+            // Add cards for each character
+            availableCharacters.forEach((char, index) => {
+                const card = document.createElement('div');
+                card.id = `${char.name.toLowerCase()}-card`;
+                card.className = 'speaker-card idle';
+                card.innerHTML = `
+                    <h3>${getCharacterEmoji(char.name)} ${char.name}</h3>
+                    <span class="status-indicator"></span>
+                    <span class="status-text">Idle</span>
+                `;
+                statusPanel.appendChild(card);
+            });
+            
+            // Update trigger buttons
+            const triggerButtons = document.getElementById('trigger-buttons');
+            triggerButtons.innerHTML = '';
+            
+            availableCharacters.forEach((char, index) => {
+                const button = document.createElement('button');
+                button.className = 'trigger-model';
+                button.id = `trigger-${char.name.toLowerCase()}`;
+                button.onclick = () => triggerModel(char.name);
+                button.innerHTML = `<span>${getCharacterEmoji(char.name)}</span> Trigger ${char.name}`;
+                triggerButtons.appendChild(button);
+            });
+        }
+        
+        function getCharacterEmoji(name) {
+            // Map character names to emojis
+            const emojiMap = {
+                'Opus': '🎭',
+                'Sonnet': '🎨',
+                'GPT': '🤖',
+                'Sage': '🧙',
+                'Claude': '🎓'
+            };
+            return emojiMap[name] || '🎯';
+        }
+        
+        // Connect on load
+        connect();
+        
+        // Keyboard shortcuts
+        document.addEventListener('keydown', (e) => {
+            if (e.key === 'i' && (e.metaKey || e.ctrlKey)) {
+                e.preventDefault();
+                forceInterrupt();
+            } else if (e.key === 'p' && (e.metaKey || e.ctrlKey)) {
+                e.preventDefault();
+                toggleSTT();
+            } else if ((e.metaKey || e.ctrlKey) && e.key >= '1' && e.key <= '9') {
+                // Number keys trigger characters by index
+                e.preventDefault();
+                const index = parseInt(e.key) - 1;
+                if (index < availableCharacters.length) {
+                    triggerModel(availableCharacters[index].name);
+                }
+            }
+        });
+    </script>
+</body>
+</html>
