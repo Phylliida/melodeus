@@ -137,3 +137,8 @@ $RECYCLE.BIN/
 .specstory/
 llm_logs/*
 conversation_logs/*
+*.md
+*.json
+*.yaml
+*.log
+*.patch
