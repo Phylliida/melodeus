@@ -119,6 +119,11 @@ class AsyncTTSStreamer:
         # Tool execution callback
         self.on_tool_execution = None  # Callback: async def(tool_call: ToolCall) -> ToolResult
         
+        # Voice connection management for prosodic continuity
+        self._current_voice_connection = None  # Current voice connection
+        self._current_voice_key = None  # Key of current voice
+        self._current_voice_task = None  # Task handling current connection
+        
         # Whisper will be initialized per session
     
     def _fuzzy_find_position(self, whisper_text: str, tts_text: str) -> int:
@@ -325,6 +330,10 @@ class AsyncTTSStreamer:
                 print(f"⚠️ Cancelling previous session: {self.current_session.session_id}")
                 self.current_session.was_interrupted = True
                 
+            # Close any existing voice connection from previous session
+            if self._current_voice_connection:
+                await self._close_current_voice_connection()
+            
             # Create a new session for this speaking operation
             self.current_session = self._create_session()
             print(f"🆕 Created TTS session: {self.current_session.session_id}")
@@ -470,6 +479,10 @@ class AsyncTTSStreamer:
             # Mark that all text has been sent
             self._all_text_sent = True
             print(f"📝 All text sent to TTS ({self._total_websockets} websockets created)")
+            
+            # Close current voice connection and send completion signal
+            if self._current_voice_connection:
+                await self._close_current_voice_connection()
             
             # Start monitoring speech progress for tool execution if we have tool calls
             if self.current_session.tool_calls and self.track_spoken_content:
@@ -665,19 +678,58 @@ class AsyncTTSStreamer:
         """Speak a sentence with appropriate voice switching for emotive parts."""
         parts = self._parse_emotive_text(sentence)
         
+        # Group consecutive parts by voice to maintain prosodic continuity
+        voice_groups = []
+        current_group = {"voice_id": None, "voice_settings": None, "parts": []}
+        
         for text_part, is_emotive in parts:
             if text_part.strip():
                 voice_id = self.config.emotive_voice_id if is_emotive else self.config.voice_id
                 voice_settings = self._get_voice_settings(is_emotive)
                 
-                # Track total websockets for completion detection
+                # Check if this part uses the same voice as current group
+                if (current_group["voice_id"] == voice_id and 
+                    current_group["voice_settings"] == voice_settings):
+                    # Add to current group
+                    current_group["parts"].append(text_part)
+                else:
+                    # Start new group, but first save the current one
+                    if current_group["parts"]:
+                        voice_groups.append(current_group)
+                    
+                    current_group = {
+                        "voice_id": voice_id,
+                        "voice_settings": voice_settings,
+                        "parts": [text_part]
+                    }
+        
+        # Add the final group
+        if current_group["parts"]:
+            voice_groups.append(current_group)
+        
+        # Process each voice group
+        for group in voice_groups:
+            if self._stop_requested:
+                break
+                
+            # Get voice key for this group
+            voice_key = self._get_voice_key(group["voice_id"], group["voice_settings"])
+            
+            # Check if we need to switch voices (close current and create new)
+            if self._current_voice_key and self._current_voice_key != voice_key:
+                # Voice change detected - close current connection
+                print(f"🔄 Voice change detected: {self._current_voice_key} → {voice_key}")
+                await self._close_current_voice_connection()
+            
+            # Track websockets created
+            if self._current_voice_key != voice_key:
                 self._total_websockets += 1
-                
-                # Create a separate connection for this voice part
-                await self._speak_text_part(text_part, voice_id, voice_settings)
-                
-                if self._stop_requested:
-                    break
+            
+            # Combine all parts for this voice into one text
+            combined_text = "".join(group["parts"])
+            
+            # Speak using current or new connection
+            await self._speak_text_part(combined_text, group["voice_id"], group["voice_settings"])
 
     def _get_voice_settings(self, is_emotive: bool) -> Dict[str, float]:
         """Get voice settings for regular or emotive speech."""
@@ -694,6 +746,75 @@ class AsyncTTSStreamer:
                 "similarity_boost": self.config.similarity_boost
             }
 
+    def _get_voice_key(self, voice_id: str, voice_settings: Dict[str, float]) -> str:
+        """Generate a unique key for voice and settings combination."""
+        settings_str = "_".join(f"{k}:{v}" for k, v in sorted(voice_settings.items()))
+        return f"{voice_id}_{settings_str}"
+    
+    async def _get_or_create_voice_connection(self, voice_id: str, voice_settings: Dict[str, float]):
+        """Get current voice connection or create a new one."""
+        voice_key = self._get_voice_key(voice_id, voice_settings)
+        
+        # Check if this is the current voice
+        if self._current_voice_key == voice_key and self._current_voice_connection:
+            return self._current_voice_connection
+        
+        # If we have a different voice active, it should have been closed already
+        # Create new connection
+        uri = f"wss://api.elevenlabs.io/v1/text-to-speech/{voice_id}/stream-input"
+        params = f"?model_id={self.config.model_id}&output_format={self.config.output_format}"
+        
+        websocket = await websockets.connect(uri + params)
+        
+        # Send initial configuration
+        initial_message = {
+            "text": " ",
+            "voice_settings": voice_settings,
+            "xi_api_key": self.config.api_key
+        }
+        await websocket.send(json.dumps(initial_message))
+        
+        # Store as current connection
+        self._current_voice_connection = websocket
+        self._current_voice_key = voice_key
+        
+        # Start task to handle audio responses
+        self._current_voice_task = asyncio.create_task(self._handle_websocket_audio(websocket))
+        
+        print(f"🔗 Created voice connection: {voice_key}")
+        return websocket
+    
+    async def _close_current_voice_connection(self):
+        """Close the current voice connection after sending completion signal."""
+        if not self._current_voice_connection:
+            return
+            
+        try:
+            # Send completion signal to trigger audio generation
+            await self._current_voice_connection.send(json.dumps({"text": ""}))
+            print(f"🔚 Sent completion signal for voice: {self._current_voice_key}")
+            
+            # IMPORTANT: Wait for audio task to complete BEFORE closing the connection
+            # This ensures all audio is received and played
+            if self._current_voice_task:
+                try:
+                    await self._current_voice_task
+                except Exception as e:
+                    print(f"Error in audio task: {e}")
+            
+            # Now safe to close the connection
+            await self._current_voice_connection.close()
+            # Track completion
+            self._websockets_completed += 1
+            print(f"🔗 Closed voice connection: {self._current_voice_key} ({self._websockets_completed}/{self._total_websockets})")
+        except Exception as e:
+            print(f"Error closing voice connection {self._current_voice_key}: {e}")
+        
+        # Clear current connection
+        self._current_voice_connection = None
+        self._current_voice_key = None
+        self._current_voice_task = None
+
     async def _speak_text_part(self, text: str, voice_id: str, voice_settings: Dict[str, float]):
         """Speak a single text part with specified voice and settings."""
         try:
@@ -701,38 +822,20 @@ class AsyncTTSStreamer:
             if self._stop_requested:
                 return
                 
-            # Create websocket connection for this voice
-            uri = f"wss://api.elevenlabs.io/v1/text-to-speech/{voice_id}/stream-input"
-            params = f"?model_id={self.config.model_id}&output_format={self.config.output_format}"
+            # Get or create persistent connection for this voice
+            websocket = await self._get_or_create_voice_connection(voice_id, voice_settings)
             
-            async with websockets.connect(uri + params) as websocket:
-                # Check interruption again
-                if self._stop_requested:
-                    return
-                    
-                # Send initial configuration
-                initial_message = {
-                    "text": " ",
-                    "voice_settings": voice_settings,
-                    "xi_api_key": self.config.api_key
-                }
-                await websocket.send(json.dumps(initial_message))
+            # Check interruption before sending text
+            if self._stop_requested:
+                return
                 
-                # Check interruption before sending text
-                if self._stop_requested:
-                    return
-                    
-                # Send the text
-                text_message = {"text": text}
-                await websocket.send(json.dumps(text_message))
-                print(f"📤 Sent to TTS websocket: '{text[:50]}{'...' if len(text) > 50 else ''}'")
-                
-                # Send completion signal
-                if not self._stop_requested:
-                    await websocket.send(json.dumps({"text": ""}))
-                
-                # Handle audio responses (this will check for interruption)
-                await self._handle_websocket_audio(websocket)
+            # Send the text to existing connection
+            text_message = {
+                "text": text,
+                "try_trigger_generation": True
+            }
+            await websocket.send(json.dumps(text_message))
+            print(f"📤 Sent to persistent TTS connection: '{text[:50]}{'...' if len(text) > 50 else ''}'")
                 
         except Exception as e:
             if not self._stop_requested:  # Don't log errors if we were interrupted
