@@ -7,12 +7,22 @@ Provides callback-based speech recognition with speaker identification.
 import asyncio
 import pyaudio
 import time
+import numpy as np
 from dataclasses import dataclass, field
 from typing import Optional, Callable, Dict, Any, List, Tuple
 from datetime import datetime
 from enum import Enum
 
 from deepgram import DeepgramClient, LiveTranscriptionEvents, LiveOptions
+
+try:
+    from titanet_voice_fingerprinting import TitaNetVoiceFingerprinter, create_word_timing_from_deepgram_word
+    VOICE_FINGERPRINTING_AVAILABLE = True
+    print("✅ TitaNet voice fingerprinting available")
+except ImportError:
+    VOICE_FINGERPRINTING_AVAILABLE = False
+    print("❌ TitaNet voice fingerprinting not available (requires nemo_toolkit)")
+    print("💡 Install with: pip install 'nemo_toolkit[asr]'")
 
 class STTEventType(Enum):
     """Types of STT events."""
@@ -56,12 +66,15 @@ class STTConfig:
     speaker_profiles_path: Optional[str] = None
     # Custom vocabulary/keywords for better recognition
     keywords: Optional[List[Tuple[str, float]]] = None  # List of (word, weight) tuples
+    # Debug settings
+    debug_speaker_data: bool = False  # Enable detailed speaker/timing debug output
 
 class AsyncSTTStreamer:
     """Async STT Streamer with callback support."""
     
-    def __init__(self, config: STTConfig):
+    def __init__(self, config: STTConfig, speakers_config=None):
         self.config = config
+        self.speakers_config = speakers_config
         self.is_listening = False
         self.connection = None
         self.microphone = None
@@ -85,6 +98,19 @@ class AsyncSTTStreamer:
         self.last_utterance_time = None
         self.session_speakers = {}  # Maps session speaker IDs to names
         self.is_paused = False  # For pause/resume functionality
+        
+        # TitaNet voice fingerprinting (optional)
+        self.voice_fingerprinter = None
+        if VOICE_FINGERPRINTING_AVAILABLE and speakers_config and config.enable_speaker_id:
+            try:
+                # Enable debug audio saving if debug_speaker_data is enabled
+                debug_save_audio = getattr(config, 'debug_speaker_data', False)
+                self.voice_fingerprinter = TitaNetVoiceFingerprinter(speakers_config, debug_save_audio=debug_save_audio)
+                print(f"🤖 TitaNet voice fingerprinting enabled")
+                if debug_save_audio:
+                    print(f"🐛 Debug audio saving enabled - extracted segments will be saved to debug_audio_segments/")
+            except Exception as e:
+                print(f"⚠️  TitaNet voice fingerprinting failed to initialize: {e}")
         
         # Speaker identification (optional)
         self.speaker_identifier = None
@@ -113,6 +139,11 @@ class AsyncSTTStreamer:
         try:
             # Setup microphone in executor to avoid blocking
             loop = asyncio.get_event_loop()
+            
+            # Debug: Check what sample rates are actually supported
+            print(f"🔧 [AUDIO DEBUG] Requested sample rate: {self.config.sample_rate}Hz")
+            print(f"🔧 [AUDIO DEBUG] Chunk size: {self.config.chunk_size} samples")
+            
             self.microphone = await loop.run_in_executor(
                 None,
                 lambda: self.p.open(
@@ -123,6 +154,12 @@ class AsyncSTTStreamer:
                     frames_per_buffer=self.config.chunk_size
                 )
             )
+            
+            # Verify the actual sample rate being used
+            actual_rate = self.microphone._rate
+            print(f"🔧 [AUDIO DEBUG] Actual microphone rate: {actual_rate}Hz")
+            if actual_rate != self.config.sample_rate:
+                print(f"⚠️ [AUDIO DEBUG] SAMPLE RATE MISMATCH! Expected {self.config.sample_rate}Hz, got {actual_rate}Hz")
             
             # Setup Deepgram connection
             self.connection = self.deepgram.listen.websocket.v("1")
@@ -302,6 +339,11 @@ class AsyncSTTStreamer:
         print("🎵 Starting audio streaming loop...")
         chunk_count = 0
         
+        # Track stream start time for voice fingerprinting synchronization
+        self.stream_start_time = time.time()
+        if self.voice_fingerprinter:
+            print(f"🕐 [STREAM] Stream started at {self.stream_start_time:.3f}")
+        
         # Minimal wait for connection to be fully established
         await asyncio.sleep(0.001)
         
@@ -331,6 +373,19 @@ class AsyncSTTStreamer:
                     except Exception as read_error:
                         print(f"❌ Failed to read audio data: {read_error}")
                         break
+                    
+                    # Convert audio data to numpy array for voice fingerprinting
+                    if self.voice_fingerprinter:
+                        try:
+                            # Convert bytes to int16 numpy array, then to float32
+                            audio_np = np.frombuffer(data, dtype=np.int16).astype(np.float32) / 32768.0
+                            # Feed to voice fingerprinter with stream-relative timestamp
+                            stream_relative_time = time.time() - self.stream_start_time
+                            self.voice_fingerprinter.add_audio_chunk(audio_np, stream_relative_time)
+                        except Exception as fp_error:
+                            # Don't break streaming if fingerprinting fails
+                            if chunk_count % 1000 == 0:  # Only log occasionally
+                                print(f"⚠️  Voice fingerprinting error: {fp_error}")
                     
                     # Try to send data to Deepgram
                     try:
@@ -390,14 +445,82 @@ class AsyncSTTStreamer:
             confidence = alternative.confidence
             is_final = result.is_final
             
+            # # Debug: Print raw response structure for final results
+            # if is_final and hasattr(self.config, 'debug_speaker_data') and self.config.debug_speaker_data:
+            #     print(f"🔬 [RAW DEBUG] Full response structure:")
+            #     print(f"  result.is_final: {is_final}")
+            #     print(f"  channel has alternatives: {hasattr(channel, 'alternatives')}")
+            #     if hasattr(channel, 'alternatives') and channel.alternatives and len(channel.alternatives) > 0 and len(channel.alternatives[0].words) > 0:
+            #         alt = channel.alternatives[0]
+            #         print(f"  alternative.transcript: '{alt.transcript}'")
+            #         print(f"  alternative.confidence: {alt.confidence}")
+            #         print(f"  alternative has words: {hasattr(alt, 'words')}")
+            #         if hasattr(alt, 'words'):
+            #             print(f"  words count: {len(alt.words) if alt.words else 0}")
+            
             if not transcript:
                 return
             
-            # Extract speaker information
+            # Extract speaker information from words (for live streaming)
             speaker_id = None
             speaker_name = None
             
-            if hasattr(channel, 'metadata') and channel.metadata:
+            # Get speaker information from words array (this is where Deepgram puts it for live streaming)
+            if hasattr(alternative, 'words') and alternative.words:
+                # Debug: Print detailed word-level information (show when diarization enabled or debug flag set)
+                if is_final and (self.config.debug_speaker_data or self.config.diarize):
+                    print(f"🔍 [SPEAKER DEBUG] Found {len(alternative.words)} words with timing:")
+                    for i, word in enumerate(alternative.words):
+                        word_text = getattr(word, 'word', 'NO_WORD')
+                        word_speaker = getattr(word, 'speaker', 'NO_SPEAKER')
+                        word_start = getattr(word, 'start', 'NO_START')
+                        word_end = getattr(word, 'end', 'NO_END')
+                        word_confidence = getattr(word, 'confidence', 'NO_CONF')
+                        print(f"  [{i:2d}] '{word_text}' | Speaker: {word_speaker} | Time: {word_start:.3f}-{word_end:.3f}s | Conf: {word_confidence:.3f}")
+                
+                # Find the most common speaker in this utterance
+                speaker_counts = {}
+                for word in alternative.words:
+                    if hasattr(word, 'speaker'):
+                        speaker = word.speaker
+                        speaker_counts[speaker] = speaker_counts.get(speaker, 0) + 1
+                
+                if speaker_counts:
+                    # Use the speaker that spoke the most words in this utterance
+                    speaker_id = max(speaker_counts, key=speaker_counts.get)
+                    speaker_name = self.session_speakers.get(speaker_id)
+                    if is_final and (self.config.debug_speaker_data or self.config.diarize):
+                        print(f"🎯 [SPEAKER DEBUG] Speaker analysis: {speaker_counts} → Primary speaker: {speaker_id}")
+                    
+                    # Process words for voice fingerprinting
+                    if is_final and self.voice_fingerprinter:
+                        try:
+                            print(f"🔊 [VOICE FINGERPRINT] Processing {len(alternative.words)} words for fingerprinting")
+                            # Convert Deepgram words to our format
+                            word_timings = []
+                            utterance_start_time = time.time() - (alternative.words[-1].end if alternative.words else 0.0)
+                            
+                            for word in alternative.words:
+                                word_timing = create_word_timing_from_deepgram_word(word)
+                                word_timing.utterance_start = utterance_start_time
+                                word_timings.append(word_timing)
+                            
+                            # Process synchronously (called from sync callback context)
+                            if word_timings:
+                                print(f"🔊 [VOICE FINGERPRINT] Processing transcript words")
+                                self.voice_fingerprinter.process_transcript_words(word_timings, utterance_start_time)
+                        except Exception as fp_error:
+                            print(f"⚠️  Voice fingerprinting word processing error: {fp_error}")
+                    
+                    # Check if we have a speaker name from voice fingerprinting
+                    if self.voice_fingerprinter and speaker_id is not None:
+                        fingerprint_name = self.voice_fingerprinter.get_speaker_name(speaker_id)
+                        if fingerprint_name:
+                            speaker_name = fingerprint_name
+                            self.session_speakers[speaker_id] = fingerprint_name
+            
+            # Fallback: check metadata (for pre-recorded files)
+            if speaker_id is None and hasattr(channel, 'metadata') and channel.metadata:
                 speaker_id = getattr(channel.metadata, 'speaker', None)
                 if speaker_id is not None:
                     speaker_name = self.session_speakers.get(speaker_id)

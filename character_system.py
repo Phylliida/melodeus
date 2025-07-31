@@ -174,7 +174,17 @@ class CharacterManager:
             f"- {name}"
             for name, config in self.characters.items()
         ])
-        participants = participants + "\n- USER\n- H\n- None"
+        
+        # Add actual speaker names from conversation history
+        speaker_names = set()
+        for turn in conversation_history[-20:]:  # Look at recent turns
+            if turn.get("role") == "user" and turn.get("speaker_name"):
+                speaker_names.add(turn.get("speaker_name"))
+        
+        # Add dynamic speaker names and fallbacks
+        for speaker in sorted(speaker_names):
+            participants += f"\n- {speaker}"
+        participants += "\n- USER\n- H\n- None"  # Keep fallbacks
         
         
         # Format conversation for director in prefill format
@@ -185,8 +195,9 @@ class CharacterManager:
             character = turn.get("character")
             
             if role == "user":
-                # Use 'H' for human in prefill format
-                recent_turns.append(f"H: {content}")
+                # Use speaker name if available, otherwise fallback to 'H' for human 
+                speaker_name = turn.get("speaker_name", "H")
+                recent_turns.append(f"{speaker_name}: {content}")
             elif role == "assistant":
                 # Use character name or prefill name if available
                 if character:
@@ -217,41 +228,61 @@ class CharacterManager:
         system_prompt = self.director_config.system_prompt.format(participants=participants)
         
         # For director, present the conversation as context, then ask the question
+        
         if conversation_text:
-            user_prompt = conversation_text + "\n\nSystem: Who should speak next? Respond with just the name of the participant (if no one should speak, respond with 'None'). Director: "
+            main_prompt = "\n\nSystem: Who should speak next? Respond with just the name of the participant (if no one should speak, respond with 'None')."
         else:
-            user_prompt = "This is the start of a conversation. Who should speak first? Respond with just the name of the participant (if no one should speak, respond with 'None')."
+            main_prompt = "This is the start of a conversation. Who should speak first? Respond with just the name of the participant (if no one should speak, respond with 'None')."
         
         # Log director request
         request_timestamp = time.time()
         llm_logs_dir = Path("llm_logs")
         llm_logs_dir.mkdir(exist_ok=True)
         
-        # Apply token limit to director messages
-        from token_utils import truncate_messages_to_fit
-        director_messages = [
-            {"role": "system", "content": system_prompt},
-            {"role": "user", "content": user_prompt}
-        ]
+        # Apply token limit by truncating logs only, preserving message order
+        from token_utils import count_message_tokens, estimate_tokens
         
-        truncated_director_messages = truncate_messages_to_fit(
-            director_messages,
-            self.director_config.max_prompt_tokens,
-            self.director_config.llm_model,
-            keep_system=True
-        )
+        # Calculate token budget for logs
+        system_msg = {"role": "system", "content": system_prompt}
+        question_msg = {"role": "user", "content": main_prompt}
         
-        # If the user prompt was truncated, we need to re-add the question
-        if len(truncated_director_messages) < 2:
-            # System message took up too much space, try with shorter conversation
-            print(f"⚠️ Director prompt too long, truncating conversation history")
-            # Keep only last 5 turns for director
-            shorter_turns = recent_turns[-5:] if len(recent_turns) > 5 else recent_turns
-            shorter_text = "\n\n".join(shorter_turns)
-            user_prompt = shorter_text + "\n\nSystem: Who should speak next? Respond with just the name of the participant (use 'USER' or 'H' for human). Director: "
+        system_tokens = count_message_tokens(system_msg, self.director_config.llm_model)
+        question_tokens = count_message_tokens(question_msg, self.director_config.llm_model)
+        
+        # Reserve tokens for logs message structure: {"role": "user", "content": "<logs>\n...\n</logs>"}
+        logs_overhead = 20  # Approximate tokens for role + "<logs>" wrapper
+        available_for_logs = self.director_config.max_prompt_tokens - system_tokens - question_tokens - logs_overhead
+        
+        if conversation_text and available_for_logs > 50:  # Need reasonable space for logs
+            # Truncate conversation text to fit available budget
+            if estimate_tokens(conversation_text, self.director_config.llm_model) > available_for_logs:
+                print(f"⚠️ Director conversation too long, truncating to fit {available_for_logs} tokens")
+                
+                # Truncate by taking recent turns that fit within budget
+                truncated_turns = []
+                current_tokens = 0
+                
+                for turn in reversed(recent_turns):
+                    turn_tokens = estimate_tokens(turn, self.director_config.llm_model)
+                    if current_tokens + turn_tokens <= available_for_logs:
+                        truncated_turns.insert(0, turn)  # Add to beginning to maintain order
+                        current_tokens += turn_tokens
+                    else:
+                        break
+                
+                conversation_text = "\n\n".join(truncated_turns)
+            
+            # Build final messages in correct order
             truncated_director_messages = [
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": user_prompt}
+                system_msg,
+                {"role": "user", "content": "<logs>\n" + conversation_text + "\n</logs>"},
+                question_msg
+            ]
+        else:
+            # No conversation or not enough space for logs
+            truncated_director_messages = [
+                system_msg,
+                question_msg
             ]
         
         # Create request log
@@ -268,7 +299,7 @@ class CharacterManager:
         
         with open(llm_logs_dir / request_filename, 'w', encoding='utf-8') as f:
             json.dump(request_data, f, indent=2, ensure_ascii=False)
-        print(f"📝 Director request logged: {request_filename}")
+        print(f"📝 Director request logged: {request_filename} -> {self.director_config.llm_provider}/{self.director_config.llm_model}")
         
         try:
             if self.director_config.llm_provider == "openai":
@@ -332,7 +363,7 @@ class CharacterManager:
             
             with open(llm_logs_dir / response_filename, 'w', encoding='utf-8') as f:
                 json.dump(response_data, f, indent=2, ensure_ascii=False)
-            print(f"📝 Director response logged: {response_filename} -> {next_speaker}")
+            print(f"📝 Director response logged: {response_filename} -> {next_speaker} (via {self.director_config.llm_provider}/{self.director_config.llm_model})")
             
             # Clean up response (take only first line if multiple)
             if '\n' in next_speaker:
@@ -352,6 +383,12 @@ class CharacterManager:
                 if char_config.prefill_name and char_config.prefill_name == next_speaker:
                     print(f"🎭 Director used prefill name '{next_speaker}', mapping to character '{char_name}'")
                     return char_name
+            
+            # Check if it's a detected speaker from voice fingerprinting
+            # These are valid user speakers, so treat as USER
+            if hasattr(self, '_detected_speakers') and next_speaker in self._detected_speakers:
+                print(f"🎯 Director selected detected speaker '{next_speaker}' - treating as USER")
+                return "USER"
             
             # If we don't recognize the speaker, default to USER
             print(f"⚠️ Director returned unknown speaker: '{next_speaker}' - defaulting to USER")

@@ -73,6 +73,27 @@ class ConversationConfig:
             self.prefill_participants = ['H', 'Claude']
 
 @dataclass
+class SpeakerProfile:
+    """Configuration for a known speaker."""
+    name: str
+    description: str = ""
+    reference_audio: Optional[str] = None  # Path to reference audio file (30+ seconds)
+
+@dataclass
+class SpeakerRecognitionConfig:
+    """Configuration for speaker recognition settings."""
+    confidence_threshold: float = 0.7
+    learning_mode: bool = True
+    max_speakers: int = 4
+    voice_fingerprint_length: int = 128
+
+@dataclass
+class SpeakersConfig:
+    """Configuration for speaker identification and voice fingerprinting."""
+    profiles: Dict[str, SpeakerProfile] = field(default_factory=dict)
+    recognition: SpeakerRecognitionConfig = field(default_factory=SpeakerRecognitionConfig)
+
+@dataclass
 class AudioConfig:
     """Audio device configuration."""
     input_device_index: Optional[int] = None
@@ -121,6 +142,7 @@ class VoiceAIConfig:
     audio: AudioConfig
     logging: LoggingConfig
     development: DevelopmentConfig
+    speakers: SpeakersConfig = field(default_factory=SpeakersConfig)
     camera: Optional[CameraConfig] = None
     echo_filter: Optional[EchoFilterConfig] = None
 
@@ -303,7 +325,8 @@ class ConfigLoader:
             vad_events=stt_config_data.get('vad_events', True),
             enable_speaker_id=stt_config_data.get('enable_speaker_id', False),
             speaker_profiles_path=stt_config_data.get('speaker_profiles_path'),
-            keywords=keywords
+            keywords=keywords,
+            debug_speaker_data=stt_config_data.get('debug_speaker_data', False)
         )
         
         # Create TTS configuration
@@ -401,6 +424,33 @@ class ConfigLoader:
                 min_length=echo_filter_data.get('min_length', 3)
             )
         
+        # Create speakers config
+        speakers_data = config_data.get('speakers', {})
+        
+        # Parse speaker profiles
+        speaker_profiles = {}
+        profiles_data = speakers_data.get('profiles', {})
+        for profile_id, profile_data in profiles_data.items():
+            speaker_profiles[profile_id] = SpeakerProfile(
+                name=profile_data.get('name', profile_id),
+                description=profile_data.get('description', ''),
+                reference_audio=profile_data.get('reference_audio')
+            )
+        
+        # Parse recognition settings
+        recognition_data = speakers_data.get('recognition', {})
+        recognition_config = SpeakerRecognitionConfig(
+            confidence_threshold=recognition_data.get('confidence_threshold', 0.7),
+            learning_mode=recognition_data.get('learning_mode', True),
+            max_speakers=recognition_data.get('max_speakers', 4),
+            voice_fingerprint_length=recognition_data.get('voice_fingerprint_length', 128)
+        )
+        
+        speakers_config = SpeakersConfig(
+            profiles=speaker_profiles,
+            recognition=recognition_config
+        )
+        
         return VoiceAIConfig(
             conversation=conversation_config,
             stt=stt_config,
@@ -408,6 +458,7 @@ class ConfigLoader:
             audio=audio_config,
             logging=logging_config,
             development=development_config,
+            speakers=speakers_config,
             camera=camera_config,
             echo_filter=echo_filter_config
         )

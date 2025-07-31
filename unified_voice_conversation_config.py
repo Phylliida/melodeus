@@ -36,6 +36,7 @@ class ConversationTurn:
     timestamp: datetime
     status: str = "completed"  # "pending", "processing", "completed", "interrupted"
     speaker_id: Optional[int] = None
+    speaker_name: Optional[str] = None  # Identified speaker name from voice fingerprinting
     character: Optional[str] = None  # Character name for multi-character conversations
     metadata: Optional[Dict[str, Any]] = None  # Additional metadata for special handling
 
@@ -83,7 +84,7 @@ class UnifiedVoiceConversation:
         
         # Initialize STT system with participant names as keywords
         self._setup_stt_keywords(config)
-        self.stt = AsyncSTTStreamer(config.stt)
+        self.stt = AsyncSTTStreamer(config.stt, config.speakers)
         
         # Initialize TTS system
         self.tts = AsyncTTSStreamer(config.tts)
@@ -212,12 +213,13 @@ class UnifiedVoiceConversation:
         
         print(f"📝 Conversation logging to: {self.conversation_log_file}")
     
-    def _log_conversation_turn(self, role: str, content: Union[str, List[Dict[str, Any]]]):
+    def _log_conversation_turn(self, role: str, content: Union[str, List[Dict[str, Any]]], speaker_name: Optional[str] = None):
         """Log a conversation turn in history file format.
         
         Args:
             role: 'user' or 'assistant'
             content: The message content (may already include speaker prefix) or image content
+            speaker_name: The identified speaker name (for user messages)
         """
         try:
             # Handle image content
@@ -239,7 +241,8 @@ class UnifiedVoiceConversation:
             else:
                 # Determine participant name based on role
                 if role == "user":
-                    participant = "H"
+                    # Use speaker name if available, otherwise fallback to "H"
+                    participant = speaker_name if speaker_name else "H"
                 else:  # assistant
                     # Use the AI participant name from prefill config if available
                     participant = "Claude"
@@ -958,7 +961,25 @@ class UnifiedVoiceConversation:
     
     async def _on_utterance_complete(self, result: STTResult):
         """Handle completed utterances from STT."""
-        speaker_info = f" (Speaker {result.speaker_id})" if result.speaker_id is not None else ""
+        # Use speaker name if available from voice fingerprinting, otherwise fall back to speaker ID
+        if result.speaker_name:
+            speaker_info = f" ({result.speaker_name})"
+            ui_speaker_name = result.speaker_name
+            
+            # Add new speaker to detected speakers for stop sequences
+            if not hasattr(self, 'detected_speakers'):
+                self.detected_speakers = set()
+            if result.speaker_name not in ["H", "USER"]:  # Don't add generic fallbacks
+                if result.speaker_name not in self.detected_speakers:
+                    self.detected_speakers.add(result.speaker_name)
+                    print(f"🎯 Added '{result.speaker_name}' to detected speakers for stop sequences")
+                    
+        elif result.speaker_id is not None:
+            speaker_info = f" (Speaker {result.speaker_id})"
+            ui_speaker_name = f"Speaker {result.speaker_id}"
+        else:
+            speaker_info = ""
+            ui_speaker_name = "USER"
         
         # Check if this is an echo of TTS output
         # Check echo filter
@@ -973,7 +994,7 @@ class UnifiedVoiceConversation:
             # Still broadcast to UI but mark as echo
             if hasattr(self, 'ui_server'):
                 await self.ui_server.broadcast_transcription(
-                    speaker="USER",
+                    speaker=ui_speaker_name,
                     text=f"[Echo filtered] {result.text}",
                     is_final=True
                 )
@@ -984,7 +1005,7 @@ class UnifiedVoiceConversation:
         # Broadcast final transcription
         if hasattr(self, 'ui_server'):
             await self.ui_server.broadcast_transcription(
-                speaker="USER",
+                speaker=ui_speaker_name,
                 text=result.text,
                 is_final=True
             )
@@ -1079,10 +1100,11 @@ class UnifiedVoiceConversation:
             content=content,
             timestamp=result.timestamp,
             status="pending",
-            speaker_id=result.speaker_id
+            speaker_id=result.speaker_id,
+            speaker_name=result.speaker_name
         )
         self.state.conversation_history.append(user_turn)
-        self._log_conversation_turn("user", content)
+        self._log_conversation_turn("user", content, speaker_name=result.speaker_name)
         print(f"💬 Added user utterance: '{result.text}'" + (" with image" if captured_image else ""))
         
         # Process the new utterance immediately
@@ -1097,6 +1119,14 @@ class UnifiedVoiceConversation:
         # Interruption is now handled only in _on_utterance_complete for final utterances
         # This is just for showing interim results
         
+        # Determine speaker name for UI
+        if result.speaker_name:
+            ui_speaker_name = result.speaker_name
+        elif result.speaker_id is not None:
+            ui_speaker_name = f"Speaker {result.speaker_id}"
+        else:
+            ui_speaker_name = "USER"
+        
         # Show interim results based on configuration
         if self.show_interim:
             print(f"💭 Interim: {result.text}")
@@ -1104,7 +1134,7 @@ class UnifiedVoiceConversation:
         # Broadcast to UI
         if hasattr(self, 'ui_server'):
             await self.ui_server.broadcast_transcription(
-                speaker="USER",
+                speaker=ui_speaker_name,
                 text=result.text,
                 is_interim=True
             )
@@ -1133,6 +1163,13 @@ class UnifiedVoiceConversation:
         speaker_id = data['speaker_id']
         speaker_name = data.get('speaker_name', f"Speaker {speaker_id}")
         print(f"👤 Speaker changed to: {speaker_name}")
+        
+        # Add new speaker to detected speakers for stop sequences
+        if not hasattr(self, 'detected_speakers'):
+            self.detected_speakers = set()
+        if speaker_name and speaker_name not in ["H", "USER"]:  # Don't add generic fallbacks
+            self.detected_speakers.add(speaker_name)
+            print(f"🎯 Added '{speaker_name}' to detected speakers for stop sequences")
         
         if self.config.development.enable_debug_mode:
             self.logger.debug(f"Speaker change: {speaker_id} -> {speaker_name}")
@@ -1308,6 +1345,10 @@ class UnifiedVoiceConversation:
             
             # If no manual trigger, let director decide who speaks next
             if not next_speaker:
+                # Pass detected speakers to character manager for validation
+                if hasattr(self, 'detected_speakers'):
+                    self.character_manager._detected_speakers = self.detected_speakers
+                    
                 next_speaker = await self.character_manager.select_next_speaker(
                     self._get_conversation_history_for_director()
                 )
@@ -1784,6 +1825,8 @@ class UnifiedVoiceConversation:
                 }
                 if turn.character:
                     entry["character"] = turn.character
+                if turn.speaker_name:
+                    entry["speaker_name"] = turn.speaker_name
                 history.append(entry)
         return history
     
@@ -1907,7 +1950,8 @@ class UnifiedVoiceConversation:
                     turn.get("content"),
                     turn.get("character"),
                     character_name,
-                    prefill_name
+                    prefill_name,
+                    speaker_name=turn.get("speaker_name")
                 )
                 if formatted_text:
                     conversation_parts.append(formatted_text)
@@ -1922,7 +1966,7 @@ class UnifiedVoiceConversation:
             ]
     
     def _format_turn_for_prefill(self, role: str, content: Any, character: Optional[str], 
-                                 current_character: str, prefill_name: str) -> Optional[str]:
+                                 current_character: str, prefill_name: str, speaker_name: Optional[str] = None) -> Optional[str]:
         """Format a single turn for prefill conversation."""
         # Extract text from content
         if isinstance(content, list):
@@ -1936,8 +1980,9 @@ class UnifiedVoiceConversation:
             return None
         
         if role == "user":
-            # Human messages
-            return f"H: {content}"
+            # Human messages - use speaker name if available, otherwise fallback to "H"
+            participant = speaker_name if speaker_name else "H"
+            return f"{participant}: {content}"
         elif role == "assistant":
             # Character messages
             if character == current_character:
@@ -2116,6 +2161,8 @@ class UnifiedVoiceConversation:
                 }
                 if turn.character:
                     entry["character"] = turn.character
+                if turn.speaker_name:
+                    entry["speaker_name"] = turn.speaker_name
                 history.append(entry)
         return history
     
