@@ -26,6 +26,7 @@ from character_system import create_character_manager, CharacterManager
 from camera_capture import CameraCapture, CameraConfig as CameraCaptureConfig
 from thinking_sound import ThinkingSoundPlayer
 from websocket_ui_server import VoiceUIServer
+from echo_filter import EchoFilter
 
 @dataclass
 class ConversationTurn:
@@ -150,6 +151,16 @@ class UnifiedVoiceConversation:
         
         # Initialize thinking sound player
         self.thinking_sound = ThinkingSoundPlayer(sample_rate=22050)
+        
+        # Initialize echo filter
+        if config.echo_filter and config.echo_filter.enabled:
+            self.echo_filter = EchoFilter(
+                similarity_threshold=config.echo_filter.similarity_threshold,
+                time_window=config.echo_filter.time_window,
+                min_length=config.echo_filter.min_length
+            )
+        else:
+            self.echo_filter = None
         
         # Initialize UI server
         ui_port = config.ui_port if hasattr(config, 'ui_port') else 8765
@@ -948,6 +959,26 @@ class UnifiedVoiceConversation:
     async def _on_utterance_complete(self, result: STTResult):
         """Handle completed utterances from STT."""
         speaker_info = f" (Speaker {result.speaker_id})" if result.speaker_id is not None else ""
+        
+        # Check if this is an echo of TTS output
+        # Check echo filter
+        is_echo = False
+        matched_tts = None
+        similarity = 0.0
+        if self.echo_filter:
+            is_echo, matched_tts, similarity = self.echo_filter.is_echo(result.text)
+        
+        if is_echo:
+            print(f"🔇 Ignoring echo{speaker_info}: {result.text} (matched {similarity:.0%})")
+            # Still broadcast to UI but mark as echo
+            if hasattr(self, 'ui_server'):
+                await self.ui_server.broadcast_transcription(
+                    speaker="USER",
+                    text=f"[Echo filtered] {result.text}",
+                    is_final=True
+                )
+            return  # Don't process as real user input
+            
         print(f"🎯 Final{speaker_info}: {result.text}")
         
         # Broadcast final transcription
@@ -1408,6 +1439,19 @@ class UnifiedVoiceConversation:
                         print("⚠️ Character response was interrupted")
                         completed = False
                     
+                    # Update echo filter with completion status
+                    session_id = f"openai_{character_config.name}_{request_timestamp}"
+                    if completed:
+                        if self.echo_filter:
+                            self.echo_filter.on_tts_complete(session_id)
+                    else:
+                        # Get spoken text if interrupted
+                        spoken_text = None
+                        if hasattr(self.tts, 'get_spoken_text_heuristic'):
+                            spoken_text = self.tts.get_spoken_text_heuristic()
+                        if self.echo_filter:
+                            self.echo_filter.on_tts_interrupted(session_id, spoken_text)
+                    
                     # Get the appropriate text based on whether it was interrupted
                     if hasattr(self.tts, 'current_session') and self.tts.current_session:
                         if completed:
@@ -1439,6 +1483,19 @@ class UnifiedVoiceConversation:
                     except asyncio.CancelledError:
                         print("⚠️ Character response was interrupted")
                         completed = False
+                    
+                    # Update echo filter with completion status
+                    session_id = f"anthropic_{character_config.name}_{request_timestamp}"
+                    if completed:
+                        if self.echo_filter:
+                            self.echo_filter.on_tts_complete(session_id)
+                    else:
+                        # Get spoken text if interrupted
+                        spoken_text = None
+                        if hasattr(self.tts, 'get_spoken_text_heuristic'):
+                            spoken_text = self.tts.get_spoken_text_heuristic()
+                        if self.echo_filter:
+                            self.echo_filter.on_tts_interrupted(session_id, spoken_text)
                     
                     # Get the appropriate text based on whether it was interrupted
                     if hasattr(self.tts, 'current_session') and self.tts.current_session:
@@ -1539,6 +1596,11 @@ class UnifiedVoiceConversation:
         """Stream response from OpenAI for a specific character."""
         client = self.character_manager.get_character_client(character_config.name)
         
+        # Create session ID for echo tracking
+        session_id = f"openai_{character_config.name}_{request_timestamp}"
+        if self.echo_filter:
+            self.echo_filter.on_tts_start(session_id, character_config.name)
+        
         try:
             response = await client.chat.completions.create(
                 model=character_config.llm_model,
@@ -1551,6 +1613,9 @@ class UnifiedVoiceConversation:
             async for chunk in response:
                 if chunk.choices[0].delta.content:
                     content = chunk.choices[0].delta.content
+                    # Track for echo filter
+                    if self.echo_filter:
+                        self.echo_filter.on_tts_chunk(session_id, content)
                     yield content
                     # Broadcast to UI
                     if hasattr(self, 'ui_server'):
@@ -1567,6 +1632,11 @@ class UnifiedVoiceConversation:
     async def _stream_character_anthropic_response(self, messages, character_config, request_timestamp):
         """Stream response from Anthropic for a specific character."""
         client = self.character_manager.get_character_client(character_config.name)
+        
+        # Create session ID for echo tracking
+        session_id = f"anthropic_{character_config.name}_{request_timestamp}"
+        if self.echo_filter:
+            self.echo_filter.on_tts_start(session_id, character_config.name)
         
         try:
             # Check if messages are already in prefill format
@@ -1659,13 +1729,21 @@ class UnifiedVoiceConversation:
                             # We've seen enough, check if it matches
                             if prefix_buffer.startswith(expected_prefix):
                                 # Skip the prefix, yield the rest
-                                yield prefix_buffer[len(expected_prefix):]
+                                text_to_yield = prefix_buffer[len(expected_prefix):]
+                                if self.echo_filter:
+                                    self.echo_filter.on_tts_chunk(session_id, text_to_yield)
+                                yield text_to_yield
                             else:
                                 # Doesn't match expected prefix, yield everything
+                                if self.echo_filter:
+                                    self.echo_filter.on_tts_chunk(session_id, prefix_buffer)
                                 yield prefix_buffer
                             prefix_buffer = None  # Stop checking
                         # else continue buffering
                     else:
+                        # Track for echo filter
+                        if self.echo_filter:
+                            self.echo_filter.on_tts_chunk(session_id, text)
                         yield text
                         # Broadcast to UI
                         if hasattr(self, 'ui_server'):

@@ -98,6 +98,14 @@ class CameraConfig:
     jpeg_quality: int = 85
 
 @dataclass
+class EchoFilterConfig:
+    """Echo filter configuration for preventing TTS feedback."""
+    enabled: bool = True
+    similarity_threshold: float = 0.75
+    time_window: float = 15.0
+    min_length: int = 3
+
+@dataclass
 class DevelopmentConfig:
     """Development and testing configuration."""
     enable_debug_mode: bool = False
@@ -114,6 +122,7 @@ class VoiceAIConfig:
     logging: LoggingConfig
     development: DevelopmentConfig
     camera: Optional[CameraConfig] = None
+    echo_filter: Optional[EchoFilterConfig] = None
 
 def deep_merge(base: Dict[str, Any], override: Dict[str, Any]) -> Dict[str, Any]:
     """
@@ -264,6 +273,7 @@ class ConfigLoader:
         characters_config = config_data.get('characters', {})
         camera_config_data = config_data.get('camera', {})
         director_config = config_data.get('director', {})
+        echo_filter_data = config_data.get('echo_filter', {})
         
         # Parse keywords if provided
         keywords = None
@@ -381,6 +391,16 @@ class ConfigLoader:
                 jpeg_quality=camera_config_data.get('jpeg_quality', 85)
             )
         
+        # Create echo filter config
+        echo_filter_config = None
+        if echo_filter_data or echo_filter_data is None:  # Create with defaults if not explicitly disabled
+            echo_filter_config = EchoFilterConfig(
+                enabled=echo_filter_data.get('enabled', True),
+                similarity_threshold=echo_filter_data.get('similarity_threshold', 0.75),
+                time_window=echo_filter_data.get('time_window', 15.0),
+                min_length=echo_filter_data.get('min_length', 3)
+            )
+        
         return VoiceAIConfig(
             conversation=conversation_config,
             stt=stt_config,
@@ -388,7 +408,8 @@ class ConfigLoader:
             audio=audio_config,
             logging=logging_config,
             development=development_config,
-            camera=camera_config
+            camera=camera_config,
+            echo_filter=echo_filter_config
         )
     
     @classmethod
