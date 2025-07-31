@@ -3,6 +3,7 @@ import asyncio
 import websockets
 import json
 import time
+from datetime import datetime
 from typing import Set, Dict, Any, Optional
 from dataclasses import dataclass, asdict
 import logging
@@ -110,9 +111,28 @@ class VoiceUIServer:
                 await self.send_state_sync(websocket)
                 
             elif msg_type == "ui_ready":
-                # Client is ready, maybe send recent history
+                # Client is ready, send conversation history
                 client_id = data.get("client_id", "unknown")
                 print(f"✅ UI client ready: {client_id}")
+                await self.send_conversation_history(websocket)
+                await self.send_current_state(websocket)
+                
+            elif msg_type == "edit_message":
+                # Handle message edit
+                msg_id = data.get("message_id")
+                new_text = data.get("new_text")
+                await self.handle_edit_message(msg_id, new_text)
+                
+            elif msg_type == "delete_message":
+                # Handle message deletion
+                msg_id = data.get("message_id")
+                await self.handle_delete_message(msg_id)
+                
+            elif msg_type == "send_text_message":
+                # Handle text message from UI
+                speaker_name = data.get("speaker_name", "USER")
+                text = data.get("text", "")
+                await self.handle_text_message(speaker_name, text)
                 
             else:
                 await self.send_error(websocket, f"Unknown message type: {msg_type}")
@@ -366,6 +386,150 @@ class VoiceUIServer:
             type="conversation_update",
             data={"turn": turn_data}
         ))
+    
+    async def send_conversation_history(self, websocket):
+        """Send full conversation history to a client."""
+        if not self.conversation:
+            return
+            
+        history = []
+        for i, turn in enumerate(self.conversation.state.conversation_history):
+            # Convert each turn to a format suitable for UI
+            # Handle timestamp serialization
+            timestamp = getattr(turn, 'timestamp', time.time())
+            # Convert datetime to timestamp if needed
+            if hasattr(timestamp, 'timestamp'):
+                timestamp = timestamp.timestamp()
+            elif isinstance(timestamp, str):
+                # If it's already a string, keep it
+                pass
+            elif not isinstance(timestamp, (int, float)):
+                # Fallback to current time if timestamp is invalid
+                timestamp = time.time()
+                
+            turn_data = {
+                "id": f"msg_{i}",  # Unique message ID
+                "role": turn.role,
+                "content": turn.content,
+                "speaker_name": getattr(turn, 'speaker_name', None),
+                "character": getattr(turn, 'character', None),
+                "timestamp": timestamp,
+                "status": getattr(turn, 'status', 'completed'),
+                "editable": turn.role == "user"  # Only user messages are editable
+            }
+            history.append(turn_data)
+        
+        msg = UIMessage("conversation_history", {"history": history})
+        await websocket.send(msg.to_json())
+        print(f"📜 Sent {len(history)} history messages to client")
+    
+    async def send_current_state(self, websocket):
+        """Send current system state to a client."""
+        msg = UIMessage("state_sync", self.current_state)
+        await websocket.send(msg.to_json())
+    
+    async def handle_edit_message(self, msg_id: str, new_text: str):
+        """Handle message edit request."""
+        if not self.conversation or not msg_id or not new_text:
+            return
+            
+        try:
+            # Extract index from msg_id (format: "msg_123")
+            index = int(msg_id.split('_')[1])
+            
+            if 0 <= index < len(self.conversation.state.conversation_history):
+                turn = self.conversation.state.conversation_history[index]
+                if turn.role == "user":
+                    # Update the message content
+                    old_text = turn.content
+                    turn.content = new_text
+                    print(f"✏️ Edited message {msg_id}: '{old_text}' → '{new_text}'")
+                    
+                    # Broadcast the edit to all clients
+                    update_data = {
+                        "id": msg_id,
+                        "new_text": new_text,
+                        "edited": True
+                    }
+                    await self.broadcast(UIMessage("message_edited", update_data))
+                else:
+                    await self.send_error(None, "Only user messages can be edited")
+            else:
+                await self.send_error(None, f"Invalid message ID: {msg_id}")
+                
+        except Exception as e:
+            self.logger.error(f"Error editing message: {e}")
+            await self.send_error(None, str(e))
+    
+    async def handle_delete_message(self, msg_id: str):
+        """Handle message deletion request."""
+        if not self.conversation or not msg_id:
+            return
+            
+        try:
+            # Extract index from msg_id
+            index = int(msg_id.split('_')[1])
+            
+            if 0 <= index < len(self.conversation.state.conversation_history):
+                # Mark as deleted but don't remove (to preserve indices)
+                turn = self.conversation.state.conversation_history[index]
+                turn.status = "deleted"
+                print(f"🗑️ Deleted message {msg_id}")
+                
+                # Broadcast deletion to all clients
+                await self.broadcast(UIMessage("message_deleted", {"id": msg_id}))
+            else:
+                await self.send_error(None, f"Invalid message ID: {msg_id}")
+                
+        except Exception as e:
+            self.logger.error(f"Error deleting message: {e}")
+            await self.send_error(None, str(e))
+    
+    async def handle_text_message(self, speaker_name: str, text: str):
+        """Handle text message from UI."""
+        if not self.conversation or not text.strip():
+            return
+            
+        print(f"💬 Text message from {speaker_name}: {text}")
+        
+        # Create a synthetic transcription result
+        from dataclasses import dataclass
+        
+        @dataclass
+        class SyntheticTranscriptionResult:
+            text: str
+            words: list
+            is_final: bool = True
+            is_complete_utterance: bool = True
+            speaker_name: str = None
+            speaker_id: int = None
+            timestamp: float = None
+            confidence: float = 1.0
+            raw_data: dict = None
+            
+        # Create a result that looks like it came from STT
+        result = SyntheticTranscriptionResult(
+            text=text,
+            words=[],  # Empty words list for text input
+            speaker_name=speaker_name,
+            speaker_id=None,  # Will be handled by conversation system
+            timestamp=time.time(),
+            confidence=1.0,
+            raw_data={}
+        )
+        
+        # Process through the conversation system
+        if hasattr(self.conversation, '_on_utterance_complete'):
+            await self.conversation._on_utterance_complete(result)
+        
+        # Broadcast the transcription to all UI clients
+        await self.broadcast_transcription(
+            speaker=speaker_name,
+            text=text,
+            is_final=True,
+            is_complete=True,
+            session_id=f"text_input_{int(time.time() * 1000)}"
+        )
 
 
 # Example usage
