@@ -1030,6 +1030,7 @@ class UnifiedVoiceConversation:
             
             # Get spoken content synchronously (available after stop() completes)
             spoken_content = self.tts.get_spoken_text_heuristic().strip()
+            print(f"🔍 [DEBUG] Interruption - get_spoken_text_heuristic returned: '{spoken_content}' ({len(spoken_content)} chars)")
             
             # Don't add assistant response here - character processing will handle it
             # This avoids duplicates
@@ -1643,14 +1644,6 @@ class UnifiedVoiceConversation:
             self.echo_filter.on_tts_start(session_id, character_config.name)
         
         try:
-            # Send initial empty message to create UI element
-            if hasattr(self, 'ui_server'):
-                await self.ui_server.broadcast_ai_stream(
-                    speaker=character_config.name,
-                    text="",
-                    session_id=f"session_{request_timestamp}"
-                )
-            
             response = await client.chat.completions.create(
                 model=character_config.llm_model,
                 messages=messages,
@@ -1752,14 +1745,6 @@ class UnifiedVoiceConversation:
                 stop_sequences = list(dict.fromkeys(stop_sequences))
                 print(f"🛑 Character using stop sequences: {stop_sequences}")
             
-            # Send initial empty message to create UI element
-            if hasattr(self, 'ui_server'):
-                await self.ui_server.broadcast_ai_stream(
-                    speaker=character_config.name,
-                    text="",
-                    session_id=f"session_{request_timestamp}"
-                )
-            
             response = await client.messages.create(
                 model=character_config.llm_model,
                 messages=anthropic_messages,
@@ -1791,25 +1776,11 @@ class UnifiedVoiceConversation:
                                 if self.echo_filter:
                                     self.echo_filter.on_tts_chunk(session_id, text_to_yield)
                                 yield text_to_yield
-                                # Broadcast to UI
-                                if hasattr(self, 'ui_server') and text_to_yield:
-                                    await self.ui_server.broadcast_ai_stream(
-                                        speaker=character_config.name,
-                                        text=text_to_yield,
-                                        session_id=f"session_{request_timestamp}"
-                                    )
                             else:
                                 # Doesn't match expected prefix, yield everything
                                 if self.echo_filter:
                                     self.echo_filter.on_tts_chunk(session_id, prefix_buffer)
                                 yield prefix_buffer
-                                # Broadcast to UI
-                                if hasattr(self, 'ui_server') and prefix_buffer:
-                                    await self.ui_server.broadcast_ai_stream(
-                                        speaker=character_config.name,
-                                        text=prefix_buffer,
-                                        session_id=f"session_{request_timestamp}"
-                                    )
                             prefix_buffer = None  # Stop checking
                         # else continue buffering
                     else:

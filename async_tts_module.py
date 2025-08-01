@@ -320,6 +320,9 @@ class AsyncTTSStreamer:
         if self.is_streaming:
             await self.stop()
             
+        # Initialize progress_monitor_task early to avoid UnboundLocalError
+        progress_monitor_task = None
+            
         try:
             self._stop_requested = False
             self._interrupted = False
@@ -349,7 +352,6 @@ class AsyncTTSStreamer:
                 self.current_session.whisper_tracker.start_tracking()
             
             # Don't start monitoring here - wait until we know if we have tool calls
-            progress_monitor_task = None
             
             # Ensure audio playback is ready
             # But first, ensure any previous audio is completely stopped
@@ -1447,7 +1449,16 @@ class AsyncTTSStreamer:
             # Get total character count from Whisper
             whisper_char_count = sum(len(content.text) for content in self.current_session.current_spoken_content)
             
+            # Debug logging
+            whisper_texts = [content.text for content in self.current_session.current_spoken_content]
+            print(f"🔍 [HEURISTIC DEBUG] Whisper segments: {len(whisper_texts)}")
+            print(f"🔍 [HEURISTIC DEBUG] Whisper texts: {whisper_texts}")
+            print(f"🔍 [HEURISTIC DEBUG] Whisper char count: {whisper_char_count}")
+            print(f"🔍 [HEURISTIC DEBUG] Generated text length: {len(self.current_session.generated_text)}")
+            print(f"🔍 [HEURISTIC DEBUG] Generated text: '{self.current_session.generated_text[:100]}...'")
+            
             if whisper_char_count == 0:
+                print("🔍 [HEURISTIC DEBUG] Returning empty - no Whisper characters")
                 return ""
             
             # Use spoken_text_for_tts as the reference since that's what was actually sent to TTS
@@ -1480,7 +1491,9 @@ class AsyncTTSStreamer:
                 if close_pos != -1:
                     word_end_position = close_pos + 1
             
-            return self.current_session.generated_text[:word_end_position].strip()
+            result = self.current_session.generated_text[:word_end_position].strip()
+            print(f"🔍 [HEURISTIC DEBUG] Returning heuristic result: '{result}' ({len(result)} chars)")
+            return result
         
         else:
             # TTS completed successfully - return full generated text

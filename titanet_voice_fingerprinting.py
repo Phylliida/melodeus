@@ -63,9 +63,11 @@ class TitaNetVoiceFingerprinter:
     discriminative than traditional MFCC features.
     """
     
-    def __init__(self, speakers_config, fingerprints_path: str = "titanet_fingerprints.pkl", debug_save_audio=False):
+    def __init__(self, speakers_config, fingerprints_path: str = "titanet_fingerprints.pkl", debug_save_audio=False, verbose=False):
         """Initialize TitaNet voice fingerprinting system."""
-        print("🔊 [TITANET] Initializing TitaNet voice fingerprinting system")
+        self.verbose = verbose
+        if self.verbose:
+            print("🔊 [TITANET] Initializing TitaNet voice fingerprinting system")
         
         if not NEMO_AVAILABLE:
             raise ImportError("NVIDIA NeMo toolkit is required for TitaNet fingerprinting")
@@ -176,7 +178,7 @@ class TitaNetVoiceFingerprinter:
         if not word_timings:
             return
         
-        print(f"🔊 [TITANET] Processing {len(word_timings)} words for fingerprinting")
+        # print(f"🔊 [TITANET] Processing {len(word_timings)} words for fingerprinting")
         
         # Group words by speaker
         speaker_segments = {}
@@ -197,12 +199,15 @@ class TitaNetVoiceFingerprinter:
             
             segment_duration = words[-1].end_time - words[0].start_time
             if len(words) < 2 and segment_duration < 0.5:
-                print(f"⏭️ [TITANET] Skipping short segment: {len(words)} words, {segment_duration:.2f}s duration")
+                if self.verbose:
+                    print(f"⏭️ [TITANET] Skipping short segment: {len(words)} words, {segment_duration:.2f}s duration")
                 continue
             
-            print(f"🎯 [TITANET] Processing segment: {len(words)} words, {segment_duration:.2f}s duration")
+            if self.verbose:
+                print(f"🎯 [TITANET] Processing segment: {len(words)} words, {segment_duration:.2f}s duration")
             words_text = ' '.join([w.word for w in words])
-            print(f"   Text: '{words_text}' (Speaker {speaker_id})")
+            if self.verbose:
+                print(f"   Text: '{words_text}' (Speaker {speaker_id})")
                 
             # Extract audio segment for this speaker
             voice_segment = self._extract_voice_segment(words, utterance_timestamp)
@@ -218,7 +223,8 @@ class TitaNetVoiceFingerprinter:
             matched_speaker = self._match_speaker(fingerprint)
             
             if matched_speaker:
-                print(f"✅ [TITANET] Matched speaker {speaker_id} to {matched_speaker}")
+                if self.verbose:
+                    print(f"✅ [TITANET] Matched speaker {speaker_id} to {matched_speaker}")
                 self.session_speakers[speaker_id] = matched_speaker
                 
                 # Add to reference fingerprints for continued learning
@@ -230,7 +236,8 @@ class TitaNetVoiceFingerprinter:
                     new_speaker_id = self._handle_unknown_speaker(speaker_id, fingerprint)
                     print(f"👤 [TITANET] Learning new speaker: {new_speaker_id}")
                 else:
-                    print(f"❓ [TITANET] Unknown speaker {speaker_id} (learning disabled)")
+                    if self.verbose:
+                        print(f"❓ [TITANET] Unknown speaker {speaker_id} (learning disabled)")
     
     def _extract_voice_segment(self, words: List[WordTiming], utterance_start: float) -> Optional[VoiceSegment]:
         """Extract audio segment from buffer based on word timings."""
@@ -247,48 +254,57 @@ class TitaNetVoiceFingerprinter:
         segment_end = last_word.end_time + padding
         segment_duration = segment_end - segment_start
         
-        print(f"🔍 [TITANET] Debug extraction:")
-        print(f"   Stream-relative word timings:")
-        print(f"   First word: '{first_word.word}' at {first_word.start_time:.3f}-{first_word.end_time:.3f}s")
-        print(f"   Last word: '{last_word.word}' at {last_word.start_time:.3f}-{last_word.end_time:.3f}s")
-        print(f"   Target segment: {segment_start:.3f}-{segment_end:.3f}s (duration: {segment_duration:.1f}s)")
+        # print(f"🔍 [TITANET] Debug extraction:")
+        # print(f"   Stream-relative word timings:")
+        # print(f"   First word: '{first_word.word}' at {first_word.start_time:.3f}-{first_word.end_time:.3f}s")
+        # print(f"   Last word: '{last_word.word}' at {last_word.start_time:.3f}-{last_word.end_time:.3f}s")
+        # print(f"   Target segment: {segment_start:.3f}-{segment_end:.3f}s (duration: {segment_duration:.1f}s)")
         
         # Debug: Check if timing seems reasonable for speech
         words_text = [w.word for w in words]
         estimated_syllables = sum(len(word) // 2 + 1 for word in words_text)  # Rough syllable estimate
         expected_duration = estimated_syllables / 3.5  # ~3.5 syllables/second normal speech
-        if segment_duration < expected_duration * 0.5:
+        if segment_duration < expected_duration * 0.5 and self.verbose:
             print(f"⚠️ [TITANET] Suspiciously fast speech: {segment_duration:.1f}s for {estimated_syllables} syllables (expected ~{expected_duration:.1f}s)")
             print(f"⚠️ [TITANET] This suggests a sample rate mismatch - Deepgram may think audio is faster than reality")
         
         if segment_duration < 0.5:  # Too short
-            print(f"❌ [TITANET] Segment too short: {segment_duration:.1f}s < 0.5s")
+            if self.verbose:
+                print(f"❌ [TITANET] Segment too short: {segment_duration:.1f}s < 0.5s")
             return None
         if segment_duration > 10.0:  # Too long  
-            print(f"❌ [TITANET] Segment too long: {segment_duration:.1f}s > 10.0s")
+            if self.verbose:
+                print(f"❌ [TITANET] Segment too long: {segment_duration:.1f}s > 10.0s")
             return None
         
         # Find buffer indices
         if not self.buffer_timestamps:
-            print(f"❌ [TITANET] No buffer timestamps available")
+            if self.verbose:
+                print(f"❌ [TITANET] No buffer timestamps available")
             return None
         
         buffer_times = np.array(list(self.buffer_timestamps))
-        print(f"   Buffer time range: {buffer_times[0]:.3f}-{buffer_times[-1]:.3f}s ({len(buffer_times)} samples)")
+        if self.verbose:
+            print(f"   Buffer time range: {buffer_times[0]:.3f}-{buffer_times[-1]:.3f}s ({len(buffer_times)} samples)")
         
         start_idx = np.searchsorted(buffer_times, segment_start, side='left')
         end_idx = np.searchsorted(buffer_times, segment_end, side='right')
         
         # Debug the timestamp calculations
-        print(f"   Segment target: {segment_start:.3f}-{segment_end:.3f}s")
+        if self.verbose:
+            print(f"   Segment target: {segment_start:.3f}-{segment_end:.3f}s")
         if start_idx < len(buffer_times):
-            print(f"   Buffer start time: {buffer_times[start_idx]:.3f}s (index {start_idx})")
+            if self.verbose:
+                print(f"   Buffer start time: {buffer_times[start_idx]:.3f}s (index {start_idx})")
         if end_idx > 0 and end_idx-1 < len(buffer_times):
-            print(f"   Buffer end time: {buffer_times[end_idx-1]:.3f}s (index {end_idx-1})")
+            if self.verbose:
+                print(f"   Buffer end time: {buffer_times[end_idx-1]:.3f}s (index {end_idx-1})")
         expected_samples = int((segment_end - segment_start) * self.sample_rate)
-        print(f"   Expected samples: {expected_samples}, Will extract: {end_idx - start_idx}")
+        if self.verbose:
+            print(f"   Expected samples: {expected_samples}, Will extract: {end_idx - start_idx}")
         
-        print(f"   Buffer indices: {start_idx}-{end_idx} (of {len(self.audio_buffer)} total)")
+        if self.verbose:
+            print(f"   Buffer indices: {start_idx}-{end_idx} (of {len(self.audio_buffer)} total)")
         
         if start_idx >= len(self.audio_buffer):
             print(f"❌ [TITANET] Start index beyond buffer: {start_idx} >= {len(self.audio_buffer)}")
@@ -303,7 +319,8 @@ class TitaNetVoiceFingerprinter:
             audio_samples.append(self.audio_buffer[i])
         
         if len(audio_samples) < self.sample_rate * 0.5:  # Less than 0.5 seconds
-            print(f"❌ [TITANET] Too few samples extracted: {len(audio_samples)} < {self.sample_rate * 0.5}")
+            if self.verbose:
+                print(f"❌ [TITANET] Too few samples extracted: {len(audio_samples)} < {self.sample_rate * 0.5}")
             return None
         
         audio_data = np.array(audio_samples, dtype=np.float32)
@@ -311,15 +328,19 @@ class TitaNetVoiceFingerprinter:
         # Check if audio actually contains speech energy
         audio_rms = np.sqrt(np.mean(audio_data**2))
         audio_max = np.max(np.abs(audio_data))
-        print(f"   Audio energy: RMS={audio_rms:.6f}, Max={audio_max:.6f}")
+        
+        if self.verbose:
+            print(f"   Audio energy: RMS={audio_rms:.6f}, Max={audio_max:.6f}")
         
         if audio_rms < 0.001:  # Very quiet audio, likely silence
-            print(f"⚠️ [TITANET] Audio segment appears to be silent (RMS={audio_rms:.6f})")
+            if self.verbose:
+                print(f"⚠️ [TITANET] Audio segment appears to be silent (RMS={audio_rms:.6f})")
             # Still proceed, but warn about it
         
         words_text = [w.word for w in words]
         
-        print(f"✅ [TITANET] Extracted {len(audio_samples)} samples ({segment_duration:.1f}s) from speaker {words[0].speaker_id}: '{' '.join(words_text)}'")
+        if self.verbose:
+            print(f"✅ [TITANET] Extracted {len(audio_samples)} samples ({segment_duration:.1f}s) from speaker {words[0].speaker_id}: '{' '.join(words_text)}'")
         
         return VoiceSegment(
             audio_data=audio_data,
@@ -350,12 +371,14 @@ class TitaNetVoiceFingerprinter:
                 import soundfile as sf
                 try:
                     sf.write(debug_path, audio_data, self.sample_rate)
-                    print(f"🐛 [TITANET] Saved debug audio: {debug_filename}")
+                    if self.verbose:
+                        print(f"🐛 [TITANET] Saved debug audio: {debug_filename}")
                     
                     # Also save audio characteristics
                     audio_rms = np.sqrt(np.mean(audio_data**2))
                     audio_range = [np.min(audio_data), np.max(audio_data)]
-                    print(f"🐛 [TITANET]   RMS: {audio_rms:.6f}, Range: [{audio_range[0]:.3f}, {audio_range[1]:.3f}]")
+                    if self.verbose:
+                        print(f"🐛 [TITANET]   RMS: {audio_rms:.6f}, Range: [{audio_range[0]:.3f}, {audio_range[1]:.3f}]")
                 except ImportError:
                     # Fallback to simple numpy save if soundfile not available
                     np.save(debug_path.with_suffix('.npy'), audio_data)
@@ -392,7 +415,8 @@ class TitaNetVoiceFingerprinter:
                     word_confidences.append(w.confidence)
             confidence = np.mean(word_confidences) if word_confidences else 0.95  # Default for reference audio
             
-            print(f"🔊 [TITANET] Created embedding (shape: {embedding.shape}, confidence: {confidence:.3f})")
+            if self.verbose:
+                print(f"🔊 [TITANET] Created embedding (shape: {embedding.shape}, confidence: {confidence:.3f})")
             
             return TitaNetFingerprint(
                 speaker_profile_id="",  # Will be set by caller
@@ -402,7 +426,7 @@ class TitaNetVoiceFingerprinter:
                 timestamp=time.time()
             )
             
-        except Exception as e:
+        except Exception as e:            
             print(f"❌ [TITANET] Error creating fingerprint: {e}")
             return None
     
@@ -411,7 +435,8 @@ class TitaNetVoiceFingerprinter:
         if not self.reference_fingerprints:
             return None
         
-        print(f"🔊 [TITANET] Matching against {len(self.reference_fingerprints)} speaker profiles (threshold: {self.confidence_threshold:.3f})")
+        if self.verbose:    
+            print(f"🔊 [TITANET] Matching against {len(self.reference_fingerprints)} speaker profiles (threshold: {self.confidence_threshold:.3f})")
         
         best_match = None
         best_similarity = 0.0
@@ -436,7 +461,8 @@ class TitaNetVoiceFingerprinter:
                     speaker_name = profile.name
                     break
             
-            print(f"🔊 [TITANET]   {speaker_name}: best similarity {speaker_similarity:.3f} (from {len(similarities)} references)")
+            if self.verbose:
+                print(f"🔊 [TITANET]   {speaker_name}: best similarity {speaker_similarity:.3f} (from {len(similarities)} references)")
             
             if speaker_similarity > best_similarity:
                 best_similarity = speaker_similarity
@@ -450,10 +476,12 @@ class TitaNetVoiceFingerprinter:
                     matched_name = profile.name
                     break
             
-            print(f"🎯 [TITANET] Best match: {matched_name} (similarity: {best_similarity:.3f})")
+            if self.verbose:
+                print(f"🎯 [TITANET] Best match: {matched_name} (similarity: {best_similarity:.3f})")
             return best_match
         else:
-            print(f"❌ [TITANET] No match found (best similarity: {best_similarity:.3f} < threshold: {self.confidence_threshold:.3f})")
+            if self.verbose:
+                print(f"❌ [TITANET] No match found (best similarity: {best_similarity:.3f} < threshold: {self.confidence_threshold:.3f})")
             return None
     
     def _cosine_similarity(self, a: np.ndarray, b: np.ndarray) -> float:

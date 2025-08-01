@@ -468,15 +468,15 @@ class AsyncSTTStreamer:
             # Get speaker information from words array (this is where Deepgram puts it for live streaming)
             if hasattr(alternative, 'words') and alternative.words:
                 # Debug: Print detailed word-level information (show when diarization enabled or debug flag set)
-                if is_final and (self.config.debug_speaker_data or self.config.diarize):
-                    print(f"🔍 [SPEAKER DEBUG] Found {len(alternative.words)} words with timing:")
-                    for i, word in enumerate(alternative.words):
-                        word_text = getattr(word, 'word', 'NO_WORD')
-                        word_speaker = getattr(word, 'speaker', 'NO_SPEAKER')
-                        word_start = getattr(word, 'start', 'NO_START')
-                        word_end = getattr(word, 'end', 'NO_END')
-                        word_confidence = getattr(word, 'confidence', 'NO_CONF')
-                        print(f"  [{i:2d}] '{word_text}' | Speaker: {word_speaker} | Time: {word_start:.3f}-{word_end:.3f}s | Conf: {word_confidence:.3f}")
+                # if is_final and (self.config.debug_speaker_data or self.config.diarize):
+                #     print(f"🔍 [SPEAKER DEBUG] Found {len(alternative.words)} words with timing:")
+                #     for i, word in enumerate(alternative.words):
+                #         word_text = getattr(word, 'word', 'NO_WORD')
+                #         word_speaker = getattr(word, 'speaker', 'NO_SPEAKER')
+                #         word_start = getattr(word, 'start', 'NO_START')
+                #         word_end = getattr(word, 'end', 'NO_END')
+                #         word_confidence = getattr(word, 'confidence', 'NO_CONF')
+                #         print(f"  [{i:2d}] '{word_text}' | Speaker: {word_speaker} | Time: {word_start:.3f}-{word_end:.3f}s | Conf: {word_confidence:.3f}")
                 
                 # Find the most common speaker in this utterance
                 speaker_counts = {}
@@ -489,13 +489,13 @@ class AsyncSTTStreamer:
                     # Use the speaker that spoke the most words in this utterance
                     speaker_id = max(speaker_counts, key=speaker_counts.get)
                     speaker_name = self.session_speakers.get(speaker_id)
-                    if is_final and (self.config.debug_speaker_data or self.config.diarize):
-                        print(f"🎯 [SPEAKER DEBUG] Speaker analysis: {speaker_counts} → Primary speaker: {speaker_id}")
+                    # if is_final and (self.config.debug_speaker_data or self.config.diarize):
+                    #     print(f"🎯 [SPEAKER DEBUG] Speaker analysis: {speaker_counts} → Primary speaker: {speaker_id}")
                     
                     # Process words for voice fingerprinting
                     if is_final and self.voice_fingerprinter:
                         try:
-                            print(f"🔊 [VOICE FINGERPRINT] Processing {len(alternative.words)} words for fingerprinting")
+                            #print(f"🔊 [VOICE FINGERPRINT] Processing {len(alternative.words)} words for fingerprinting")
                             # Convert Deepgram words to our format
                             word_timings = []
                             utterance_start_time = time.time() - (alternative.words[-1].end if alternative.words else 0.0)
@@ -507,7 +507,7 @@ class AsyncSTTStreamer:
                             
                             # Process synchronously (called from sync callback context)
                             if word_timings:
-                                print(f"🔊 [VOICE FINGERPRINT] Processing transcript words")
+                                #print(f"🔊 [VOICE FINGERPRINT] Processing transcript words")
                                 self.voice_fingerprinter.process_transcript_words(word_timings, utterance_start_time)
                         except Exception as fp_error:
                             print(f"⚠️  Voice fingerprinting word processing error: {fp_error}")

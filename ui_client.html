@@ -539,6 +539,9 @@
                 case 'message_deleted':
                     markMessageDeleted(msg.data);
                     break;
+                case 'ai_stream_correction':
+                    correctAIStream(msg.data);
+                    break;
             }
         }
         
@@ -630,6 +633,7 @@
             if (!msg) {
                 msg = document.createElement('div');
                 msg.className = `message ai ${data.speaker.toLowerCase()}`;
+                msg.setAttribute('data-session-id', data.session_id);  // Store session ID
                 msg.innerHTML = `
                     <div class="speaker-name">${data.speaker}</div>
                     <div class="message-content"></div>
@@ -956,6 +960,29 @@
                 msg.classList.add('deleted');
                 messageCount--;
                 updateStats();
+            }
+        }
+        
+        function correctAIStream(data) {
+            // Find the message by session ID
+            const msg = document.querySelector(`[data-session-id="${data.session_id}"]`);
+            if (msg) {
+                const msgContent = msg.querySelector('.message-content');
+                if (msgContent) {
+                    // Replace the content with the corrected (truncated) text
+                    msgContent.textContent = data.corrected_text;
+                    
+                    // Add an interrupted indicator
+                    if (data.was_interrupted && !msg.querySelector('.interrupted-indicator')) {
+                        const indicator = document.createElement('span');
+                        indicator.className = 'interrupted-indicator';
+                        indicator.textContent = ' (interrupted)';
+                        indicator.style.fontSize = '12px';
+                        indicator.style.opacity = '0.6';
+                        indicator.style.color = '#ff6b6b';
+                        msgContent.appendChild(indicator);
+                    }
+                }
             }
         }
         

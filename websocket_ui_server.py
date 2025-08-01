@@ -148,22 +148,59 @@ class VoiceUIServer:
             
         print("🛑 Force interrupt requested by UI")
         
-        # Stop TTS
+        # Stop TTS and clear audio queue
         if hasattr(self.conversation, 'tts'):
             await self.conversation.tts.stop()
+            
+        # Mark current processing as interrupted if needed
+        if hasattr(self.conversation.state, 'current_processing_turn') and self.conversation.state.current_processing_turn:
+            self.conversation.state.current_processing_turn.status = "interrupted"
             
         # Cancel current LLM task
         if hasattr(self.conversation.state, 'current_llm_task'):
             if self.conversation.state.current_llm_task and not self.conversation.state.current_llm_task.done():
                 self.conversation.state.current_llm_task.cancel()
+                # Wait for cancellation
+                try:
+                    await asyncio.wait_for(self.conversation.state.current_llm_task, timeout=0.5)
+                except (asyncio.CancelledError, asyncio.TimeoutError):
+                    pass
+                self.conversation.state.current_llm_task = None
+                
+        # Clear all processing state
+        if hasattr(self.conversation.state, 'is_speaking'):
+            self.conversation.state.is_speaking = False
+        if hasattr(self.conversation.state, 'is_processing_llm'):
+            self.conversation.state.is_processing_llm = False
+        if hasattr(self.conversation.state, 'current_processing_turn'):
+            self.conversation.state.current_processing_turn = None
+            
+        print("🔄 All AI processing interrupted and state cleared")
                 
         # Stop thinking sound
         if hasattr(self.conversation, 'thinking_sound'):
             await self.conversation.thinking_sound.stop()
-                
-        # Clear processing state
-        self.conversation.state.is_processing_llm = False
-        self.conversation.state.is_speaking = False
+        
+        # If TTS was interrupted, send UI update with truncated text
+        if hasattr(self.conversation, 'tts') and hasattr(self.conversation.tts, 'current_session'):
+            session = self.conversation.tts.current_session
+            if session:
+                # Get the truncated text from whisper
+                truncated_text = self.conversation.tts.get_spoken_text_heuristic().strip()
+                if truncated_text and hasattr(self.conversation.state, 'current_ui_session_id'):
+                    # Use the stored UI session ID
+                    ui_session_id = self.conversation.state.current_ui_session_id
+                    
+                    # Send correction to UI
+                    await self.broadcast(UIMessage(
+                        type="ai_stream_correction",
+                        data={
+                            "session_id": ui_session_id,
+                            "corrected_text": truncated_text,
+                            "was_interrupted": True
+                        }
+                    ))
+                    print(f"🔄 Sent UI correction for interrupted message: {len(truncated_text)} chars")
         
         # Increment processing generation to cancel any ongoing processing
         if hasattr(self.conversation, '_processing_generation'):
@@ -220,9 +257,46 @@ class VoiceUIServer:
             
         print(f"🎯 UI triggered speaker: {speaker}")
         
+        # First check if we need to interrupt ongoing processes
+        interrupted = False
+        
+        # Check if TTS is currently playing
+        if hasattr(self.conversation, 'tts') and self.conversation.tts.is_currently_playing():
+            print("🚫 Cancelling previous TTS playback")
+            # Stop TTS and get the spoken content
+            await self.conversation.tts.stop()
+            interrupted = True
+            
+        # Check if LLM is processing
+        if hasattr(self.conversation.state, 'is_processing_llm') and self.conversation.state.is_processing_llm:
+            print("🚫 Cancelling previous LLM generation")
+            # Mark current processing as interrupted
+            if hasattr(self.conversation.state, 'current_processing_turn') and self.conversation.state.current_processing_turn:
+                self.conversation.state.current_processing_turn.status = "interrupted"
+            interrupted = True
+            
+        # Cancel any ongoing LLM task
+        if hasattr(self.conversation.state, 'current_llm_task') and self.conversation.state.current_llm_task and not self.conversation.state.current_llm_task.done():
+            print("🚫 Cancelling previous processing task")
+            self.conversation.state.current_llm_task.cancel()
+            # Wait for cancellation
+            try:
+                await asyncio.wait_for(self.conversation.state.current_llm_task, timeout=0.5)
+            except (asyncio.CancelledError, asyncio.TimeoutError):
+                pass
+            self.conversation.state.current_llm_task = None
+            
+        # Clear state if we interrupted
+        if interrupted:
+            self.conversation.state.is_speaking = False
+            self.conversation.state.is_processing_llm = False
+            self.conversation.state.current_processing_turn = None
+            print("🔄 All AI processing interrupted and state cleared")
+        
         # Import necessary classes
         from unified_voice_conversation_config import ConversationTurn
         from datetime import datetime
+        import asyncio
         
         # Create a conversation turn with metadata
         trigger_turn = ConversationTurn(
@@ -241,6 +315,10 @@ class VoiceUIServer:
         
         # Log the turn
         self.conversation._log_conversation_turn(trigger_turn.role, trigger_turn.content)
+        
+        # If we interrupted, wait a bit for state to clear
+        if interrupted:
+            await asyncio.sleep(0.1)
         
         # Force processing of pending utterances
         asyncio.create_task(self.conversation._process_pending_utterances())
@@ -415,7 +493,7 @@ class VoiceUIServer:
                 "character": getattr(turn, 'character', None),
                 "timestamp": timestamp,
                 "status": getattr(turn, 'status', 'completed'),
-                "editable": turn.role == "user"  # Only user messages are editable
+                "editable": True  # All messages are editable/deletable
             }
             history.append(turn_data)
         
@@ -439,21 +517,23 @@ class VoiceUIServer:
             
             if 0 <= index < len(self.conversation.state.conversation_history):
                 turn = self.conversation.state.conversation_history[index]
-                if turn.role == "user":
-                    # Update the message content
-                    old_text = turn.content
-                    turn.content = new_text
-                    print(f"✏️ Edited message {msg_id}: '{old_text}' → '{new_text}'")
-                    
-                    # Broadcast the edit to all clients
-                    update_data = {
-                        "id": msg_id,
-                        "new_text": new_text,
-                        "edited": True
-                    }
-                    await self.broadcast(UIMessage("message_edited", update_data))
-                else:
-                    await self.send_error(None, "Only user messages can be edited")
+                # Update the message content for any role
+                old_text = turn.content
+                turn.content = new_text
+                print(f"✏️ Edited message {msg_id} ({turn.role}): '{old_text}' → '{new_text}'")
+                
+                # Update conversation log file if it exists
+                if hasattr(self.conversation, '_log_conversation_turn'):
+                    # Re-log the edited turn
+                    self.conversation._log_conversation_turn(turn.role, new_text)
+                
+                # Broadcast the edit to all clients
+                update_data = {
+                    "id": msg_id,
+                    "new_text": new_text,
+                    "edited": True
+                }
+                await self.broadcast(UIMessage("message_edited", update_data))
             else:
                 await self.send_error(None, f"Invalid message ID: {msg_id}")
                 
