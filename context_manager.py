@@ -104,10 +104,20 @@ class ConversationContext:
             # Prepare state data
             history_data = []
             for turn in self.current_history:
+                # Handle timestamp - could be datetime or float
+                if isinstance(turn.timestamp, datetime):
+                    timestamp_str = turn.timestamp.isoformat()
+                elif isinstance(turn.timestamp, (int, float)):
+                    # Convert Unix timestamp to datetime
+                    timestamp_str = datetime.fromtimestamp(turn.timestamp).isoformat()
+                else:
+                    # Fallback to current time if timestamp is invalid
+                    timestamp_str = datetime.now().isoformat()
+                
                 turn_data = {
                     'role': turn.role,
                     'content': turn.content,
-                    'timestamp': turn.timestamp.isoformat(),
+                    'timestamp': timestamp_str,
                     'status': turn.status,
                 }
                 if turn.character:

@@ -1073,10 +1073,12 @@ class UnifiedVoiceConversation:
             # Add new speaker to detected speakers for stop sequences
             if not hasattr(self, 'detected_speakers'):
                 self.detected_speakers = set()
-            if result.speaker_name not in ["H", "USER"]:  # Don't add generic fallbacks
+            # Always add the speaker name if it's not None and not empty
+            if result.speaker_name and result.speaker_name.strip():
                 if result.speaker_name not in self.detected_speakers:
                     self.detected_speakers.add(result.speaker_name)
                     print(f"🎯 Added '{result.speaker_name}' to detected speakers for stop sequences")
+                    print(f"📋 Current detected speakers: {sorted(self.detected_speakers)}")
                     
         elif result.speaker_id is not None:
             speaker_info = f" (Speaker {result.speaker_id})"
@@ -1230,7 +1232,7 @@ class UnifiedVoiceConversation:
         user_turn = ConversationTurn(
             role="user",
             content=content,
-            timestamp=result.timestamp,
+            timestamp=datetime.fromtimestamp(result.timestamp) if isinstance(result.timestamp, (int, float)) else datetime.now(),
             status="pending",
             speaker_id=result.speaker_id,
             speaker_name=result.speaker_name
@@ -1299,9 +1301,12 @@ class UnifiedVoiceConversation:
         # Add new speaker to detected speakers for stop sequences
         if not hasattr(self, 'detected_speakers'):
             self.detected_speakers = set()
-        if speaker_name and speaker_name not in ["H", "USER"]:  # Don't add generic fallbacks
-            self.detected_speakers.add(speaker_name)
-            print(f"🎯 Added '{speaker_name}' to detected speakers for stop sequences")
+        # Always add the speaker name if it's not None and not empty
+        if speaker_name and speaker_name.strip():
+            if speaker_name not in self.detected_speakers:
+                self.detected_speakers.add(speaker_name)
+                print(f"🎯 Added '{speaker_name}' to detected speakers for stop sequences")
+                print(f"📋 Current detected speakers: {sorted(self.detected_speakers)}")
         
         if self.config.development.enable_debug_mode:
             self.logger.debug(f"Speaker change: {speaker_id} -> {speaker_name}")

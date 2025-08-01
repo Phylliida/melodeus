@@ -297,7 +297,7 @@ class ToolRegistry:
         #'search': SearchTool,
         #'calculation': CalculationTool,
         #'custom': CustomTool,
-        'light_color': LightColorTool,
+        'lightcolor': LightColorTool,
     }
     
     def __init__(self):

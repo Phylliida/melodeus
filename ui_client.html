@@ -644,11 +644,29 @@
                 
                 const msg = document.createElement('div');
                 msg.className = 'message user';
+                
+                // Check if this is an ignored interruption message
+                const isIgnoredInterruption = data.text.startsWith('[Interruptions disabled]');
+                
                 msg.innerHTML = `
                     <div class="speaker-name">${escapeHtml(data.speaker || 'USER')}</div>
                     <div class="message-content">${escapeHtml(data.text)}</div>
                 `;
                 transcript.appendChild(msg);
+                
+                // Auto-delete ignored interruption messages after 3 seconds
+                if (isIgnoredInterruption) {
+                    msg.style.transition = 'opacity 0.5s ease-out';
+                    setTimeout(() => {
+                        msg.style.opacity = '0.5';  // First fade to 50% to show it's temporary
+                    }, 500);
+                    setTimeout(() => {
+                        msg.style.opacity = '0';
+                        setTimeout(() => {
+                            msg.remove();
+                        }, 100); // Wait for fade out animation
+                    }, 300); // Delete after 3 seconds
+                }
                 messageCount++;
                 updateStats();
             }
@@ -963,15 +981,13 @@
         };
         
         window.deleteMessage = function(msgId) {
-            if (confirm('Are you sure you want to delete this message?')) {
-                if (ws && ws.readyState === WebSocket.OPEN) {
-                    ws.send(JSON.stringify({
-                        type: 'delete_message',
-                        data: {
-                            message_id: msgId
-                        }
-                    }));
-                }
+            if (ws && ws.readyState === WebSocket.OPEN) {
+                ws.send(JSON.stringify({
+                    type: 'delete_message',
+                    data: {
+                        message_id: msgId
+                    }
+                }));
             }
         };
         
@@ -997,7 +1013,7 @@
         function markMessageDeleted(data) {
             const msg = document.getElementById(data.id);
             if (msg) {
-                msg.classList.add('deleted');
+                msg.remove();  // Instantly remove from DOM
                 messageCount--;
                 updateStats();
             }
@@ -1144,12 +1160,10 @@
         }
         
         function resetContext() {
-            if (confirm('Reset context to original history? This will clear all current conversation.')) {
-                if (ws && ws.readyState === WebSocket.OPEN) {
-                    ws.send(JSON.stringify({
-                        type: 'reset_context'
-                    }));
-                }
+            if (ws && ws.readyState === WebSocket.OPEN) {
+                ws.send(JSON.stringify({
+                    type: 'reset_context'
+                }));
             }
         }
         
