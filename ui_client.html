@@ -422,11 +422,8 @@
         <button id="interruptions-toggle" onclick="toggleInterruptions()">
             <span>🚫</span> Interruptions OFF
         </button>
-        <button onclick="clearTranscript()">
-            <span>🗑️</span> Clear Transcript
-        </button>
-        <button onclick="exportTranscript()">
-            <span>💾</span> Export
+        <button id="director-toggle" onclick="toggleDirector()">
+            <span>🚫</span> Director OFF
         </button>
     </div>
     
@@ -460,6 +457,7 @@
         let ws = null;
         let sttActive = true;
         let interruptionsEnabled = false;  // Default to false
+        let directorEnabled = false;  // Default to false
         let currentMessages = {};  // Track ongoing AI messages by session
         let messageCount = 0;
         let isConnected = false;
@@ -552,6 +550,9 @@
                     break;
                 case 'interruptions_toggled':
                     updateInterruptionsState(msg.data);
+                    break;
+                case 'director_toggled':
+                    updateDirectorState(msg.data);
                     break;
             }
         }
@@ -741,31 +742,17 @@
             }
         }
         
-        function clearTranscript() {
-            if (confirm('Clear all transcript history?')) {
-                document.getElementById('transcript').innerHTML = '';
-                currentMessages = {};
-                messageCount = 0;
-                updateStats();
+        function toggleDirector() {
+            if (ws && ws.readyState === WebSocket.OPEN) {
+                const newState = !directorEnabled;
+                ws.send(JSON.stringify({ 
+                    type: 'toggle_director', 
+                    data: { enabled: newState }
+                }));
+                // UI will update when we receive the confirmation
             }
         }
         
-        function exportTranscript() {
-            const transcript = document.getElementById('transcript');
-            const messages = Array.from(transcript.querySelectorAll('.message')).map(msg => {
-                const speaker = msg.querySelector('.speaker-name').textContent;
-                const content = msg.querySelector('.message-content').textContent;
-                return `${speaker}: ${content}`;
-            }).join('\n\n');
-            
-            const blob = new Blob([messages], { type: 'text/plain' });
-            const url = URL.createObjectURL(blob);
-            const a = document.createElement('a');
-            a.href = url;
-            a.download = `conversation_${new Date().toISOString()}.txt`;
-            a.click();
-            URL.revokeObjectURL(url);
-        }
         
         function showError(message) {
             // You could show a toast notification here
@@ -899,6 +886,12 @@
             if (data.interruptions_enabled !== undefined) {
                 interruptionsEnabled = data.interruptions_enabled;
                 updateInterruptionsButton();
+            }
+            
+            // Update director state
+            if (data.director_enabled !== undefined) {
+                directorEnabled = data.director_enabled;
+                updateDirectorButton();
             }
         }
         
@@ -1064,6 +1057,35 @@
             msg.style.textAlign = 'center';
             msg.style.fontStyle = 'italic';
             msg.innerHTML = `<div class="message-content">🔔 Voice interruptions ${interruptionsEnabled ? 'enabled' : 'disabled'}</div>`;
+            transcript.appendChild(msg);
+            transcript.scrollTop = transcript.scrollHeight;
+        }
+        
+        function updateDirectorButton() {
+            const btn = document.getElementById('director-toggle');
+            if (btn) {
+                if (directorEnabled) {
+                    btn.innerHTML = '<span>🎭</span> Director ON';
+                    btn.style.background = '#9C27B0';
+                } else {
+                    btn.innerHTML = '<span>🚫</span> Director OFF';
+                    btn.style.background = '#f44336';
+                }
+            }
+        }
+        
+        function updateDirectorState(data) {
+            directorEnabled = data.enabled;
+            updateDirectorButton();
+            
+            // Show feedback in transcript
+            const transcript = document.getElementById('transcript');
+            const msg = document.createElement('div');
+            msg.className = 'message system';
+            msg.style.background = '#E1F5FE';
+            msg.style.textAlign = 'center';
+            msg.style.fontStyle = 'italic';
+            msg.innerHTML = `<div class="message-content">🎭 Director ${directorEnabled ? 'enabled' : 'disabled'}</div>`;
             transcript.appendChild(msg);
             transcript.scrollTop = transcript.scrollHeight;
         }

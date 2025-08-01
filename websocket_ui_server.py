@@ -31,8 +31,10 @@ class VoiceUIServer:
         
         # Track current state for new clients
         interruptions_enabled = False
+        director_enabled = False
         if conversation and hasattr(conversation, 'config'):
             interruptions_enabled = conversation.config.conversation.interruptions_enabled
+            director_enabled = conversation.config.conversation.director_enabled
             
         self.current_state = {
             "current_speaker": None,
@@ -42,7 +44,8 @@ class VoiceUIServer:
             "thinking_sound": False,
             "stt_active": True,
             "conversation_active": False,
-            "interruptions_enabled": interruptions_enabled
+            "interruptions_enabled": interruptions_enabled,
+            "director_enabled": director_enabled
         }
         
     async def start(self):
@@ -143,6 +146,11 @@ class VoiceUIServer:
                 # Toggle interruptions on/off
                 enabled = data.get("enabled", False)
                 await self.handle_toggle_interruptions(enabled)
+                
+            elif msg_type == "toggle_director":
+                # Toggle director on/off
+                enabled = data.get("enabled", False)
+                await self.handle_toggle_director(enabled)
                 
             else:
                 await self.send_error(websocket, f"Unknown message type: {msg_type}")
@@ -265,6 +273,19 @@ class VoiceUIServer:
         if not self.conversation:
             return
             
+        # Prevent duplicate triggers
+        import time
+        current_time = time.time()
+        
+        if hasattr(self, '_last_trigger_time') and hasattr(self, '_last_trigger_speaker'):
+            if (self._last_trigger_speaker == speaker and 
+                current_time - self._last_trigger_time < 1.0):  # Within 1 second
+                print(f"⚠️ Ignoring duplicate trigger for {speaker} (too soon)")
+                return
+        
+        self._last_trigger_speaker = speaker
+        self._last_trigger_time = current_time
+            
         print(f"🎯 UI triggered speaker: {speaker}")
         
         # First check if we need to interrupt ongoing processes
@@ -301,37 +322,52 @@ class VoiceUIServer:
             self.conversation.state.is_speaking = False
             self.conversation.state.is_processing_llm = False
             self.conversation.state.current_processing_turn = None
-            print("🔄 All AI processing interrupted and state cleared")
+            # Increment generation to invalidate any ongoing processing
+            self.conversation.state.current_generation += 1
+            print(f"🔄 All AI processing interrupted and state cleared. New generation: {self.conversation.state.current_generation}")
         
-        # Import necessary classes
+        # Set the next speaker globally
+        async with self.conversation.state.speaker_lock:
+            self.conversation.state.next_speaker = speaker
+            print(f"📢 Set global next speaker: {speaker} (no system message added)")
+        
+        # Mark any pending user utterances as completed before processing
+        pending_count = 0
+        for turn in self.conversation.state.conversation_history:
+            if turn.role == "user" and turn.status == "pending":
+                turn.status = "completed"
+                pending_count += 1
+        if pending_count > 0:
+            print(f"✅ Marked {pending_count} pending user utterances as completed")
+        
+        # If we interrupted, wait a bit for state to clear
+        if interrupted:
+            await asyncio.sleep(0.1)
+        
+        # Store the task to prevent duplicate processing
+        if hasattr(self, '_trigger_task') and self._trigger_task and not self._trigger_task.done():
+            print("⚠️ Previous trigger task still running, skipping")
+            return
+            
+        # Create a reference turn for metadata without adding to history
         from unified_voice_conversation_config import ConversationTurn
         from datetime import datetime
-        import asyncio
         
-        # Create a conversation turn with metadata
-        trigger_turn = ConversationTurn(
-            role="user",
-            content=f"[System: {speaker}, please share your thoughts]",
+        reference_turn = ConversationTurn(
+            role="system",
+            content="",  # Empty content
             timestamp=datetime.now(),
-            status="pending",
+            status="completed",
             metadata={
                 "is_manual_trigger": True,
                 "triggered_speaker": speaker
             }
         )
         
-        # Add to conversation history
-        self.conversation.state.conversation_history.append(trigger_turn)
-        
-        # Log the turn
-        self.conversation._log_conversation_turn(trigger_turn.role, trigger_turn.content)
-        
-        # If we interrupted, wait a bit for state to clear
-        if interrupted:
-            await asyncio.sleep(0.1)
-        
-        # Force processing of pending utterances
-        asyncio.create_task(self.conversation._process_pending_utterances())
+        # Directly process with character LLM using empty input
+        self._trigger_task = asyncio.create_task(
+            self.conversation._process_with_character_llm("", reference_turn)
+        )
         
         # Broadcast status update
         await self.broadcast_speaker_status(
@@ -635,6 +671,29 @@ class VoiceUIServer:
         # Broadcast the update to all clients
         await self.broadcast(UIMessage(
             type="interruptions_toggled",
+            data={"enabled": enabled}
+        ))
+        
+        # Also send a state sync to update UI
+        await self.broadcast(UIMessage(
+            type="state_sync",
+            data=self.current_state
+        ))
+    
+    async def handle_toggle_director(self, enabled: bool):
+        """Handle toggling director on/off."""
+        print(f"{'🎭' if enabled else '🚫'} Director {'enabled' if enabled else 'disabled'}")
+        
+        # Update our state
+        self.current_state["director_enabled"] = enabled
+        
+        # Update the conversation config if available
+        if self.conversation and hasattr(self.conversation, 'config'):
+            self.conversation.config.conversation.director_enabled = enabled
+        
+        # Broadcast the update to all clients
+        await self.broadcast(UIMessage(
+            type="director_toggled",
             data={"enabled": enabled}
         ))
         

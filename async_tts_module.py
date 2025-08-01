@@ -115,6 +115,7 @@ class AsyncTTSStreamer:
         # Current session tracking
         self.current_session: Optional[TTSSession] = None
         self._session_counter = 0  # For generating unique session IDs
+        self._chunks_played = 0  # Track how many audio chunks have been played
         
         # Tool execution callback
         self.on_tool_execution = None  # Callback: async def(tool_call: ToolCall) -> ToolResult
@@ -241,6 +242,7 @@ class AsyncTTSStreamer:
             self._stop_requested = False
             self._interrupted = False
             self._first_audio_received = False
+            self._chunks_played = 0  # Reset chunks played counter
             
             # Create a new session for this speaking operation
             self.current_session = self._create_session()
@@ -945,6 +947,7 @@ class AsyncTTSStreamer:
             self._stop_requested = False
             self._interrupted = False
             self._first_audio_received = False
+            self._chunks_played = 0  # Reset chunks played counter
             
             # Create a new session for this speaking operation
             self.current_session = self._create_session()
@@ -1014,6 +1017,10 @@ class AsyncTTSStreamer:
                 self.playback_thread and 
                 self.playback_thread.is_alive() and
                 not self._stop_requested)
+    
+    def has_played_audio(self) -> bool:
+        """Check if any audio chunks have been played in the current session."""
+        return self._chunks_played > 0
     
     async def _start_streaming(self, text: str):
         """Start streaming a single text."""
@@ -1294,6 +1301,9 @@ class AsyncTTSStreamer:
                             try:
                                 if self.stream and self.stream._stream:
                                     self.stream.write(audio_segment)
+                                    # Track that we've played audio
+                                    if offset == 0:  # First segment of this chunk
+                                        self._chunks_played += 1
                             except Exception as e:
                                 # Stream was closed or error occurred
                                 if "Stream not open" not in str(e) and "-9986" not in str(e):

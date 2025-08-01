@@ -55,6 +55,12 @@ class ConversationState:
     pending_tool_response: Optional[str] = None
     # Track request generation to handle concurrent requests
     request_generation: int = 0
+    
+    # Global speaker management
+    next_speaker: Optional[str] = None  # Who should speak next
+    current_speaker: Optional[str] = None  # Who is currently speaking
+    current_generation: int = 0  # The active generation number
+    speaker_lock: asyncio.Lock = field(default_factory=asyncio.Lock)  # Prevent concurrent speaker selection
 
 class UnifiedVoiceConversation:
     """Unified voice conversation system with YAML configuration."""
@@ -1023,16 +1029,21 @@ class UnifiedVoiceConversation:
         interrupted = False
         
         # Check if voice interruptions are enabled
+        # Allow interruptions if no audio has been played yet (even if interruptions are disabled)
         if not self.config.conversation.interruptions_enabled and (self.tts.is_currently_playing() or self.state.is_processing_llm or self.state.is_speaking):
-            print(f"🚫 Voice interruptions disabled - ignoring: {result.text}")
-            # Still broadcast to UI but mark as ignored
-            if hasattr(self, 'ui_server'):
-                await self.ui_server.broadcast_transcription(
-                    speaker=ui_speaker_name,
-                    text=f"[Interruptions disabled] {result.text}",
-                    is_final=True
-                )
-            return  # Don't process as user input
+            # Check if any audio has been played
+            if self.tts.has_played_audio():
+                print(f"🚫 Voice interruptions disabled - ignoring: {result.text}")
+                # Still broadcast to UI but mark as ignored
+                if hasattr(self, 'ui_server'):
+                    await self.ui_server.broadcast_transcription(
+                        speaker=ui_speaker_name,
+                        text=f"[Interruptions disabled] {result.text}",
+                        is_final=True
+                    )
+                return  # Don't process as user input
+            else:
+                print(f"📣 Allowing interruption before audio started: {result.text}")
         
         if self.tts.is_currently_playing():
             print(f"🛑 Interrupting TTS playback with: {result.text}")
@@ -1053,6 +1064,10 @@ class UnifiedVoiceConversation:
             # Mark current processing as interrupted
             if self.state.current_processing_turn:
                 self.state.current_processing_turn.status = "interrupted"
+                # Add metadata to indicate this was a user speech interruption
+                if not self.state.current_processing_turn.metadata:
+                    self.state.current_processing_turn.metadata = {}
+                self.state.current_processing_turn.metadata['interrupted_by'] = 'user_speech'
             interrupted = True
             # Stop any ongoing TTS that might be starting
             if self.tts.is_streaming:
@@ -1061,6 +1076,12 @@ class UnifiedVoiceConversation:
         elif self.state.is_speaking:
             print(f"🛑 Interrupting TTS setup with: {result.text}")
             await self.tts.stop()
+            # Mark current processing as interrupted by user speech
+            if self.state.current_processing_turn:
+                self.state.current_processing_turn.status = "interrupted"
+                if not self.state.current_processing_turn.metadata:
+                    self.state.current_processing_turn.metadata = {}
+                self.state.current_processing_turn.metadata['interrupted_by'] = 'user_speech'
             interrupted = True
         
         if interrupted:
@@ -1332,11 +1353,17 @@ class UnifiedVoiceConversation:
         try:
             self.state.is_processing_llm = True
             
-            # Check generation early
-            if generation is not None and generation != self._processing_generation:
-                print(f"🚫 Character LLM processing cancelled - newer request exists")
-                self.state.is_processing_llm = False
-                return  # Don't stop sound here - it hasn't started yet
+            # Check if this is the current generation
+            if generation is not None:
+                if generation != self.state.current_generation:
+                    print(f"🚫 Character LLM processing cancelled - stale generation {generation} (current: {self.state.current_generation})")
+                    self.state.is_processing_llm = False
+                    return
+            else:
+                # If no generation specified, this is a new request - make it current
+                self.state.current_generation += 1
+                generation = self.state.current_generation
+                print(f"📍 New generation started: {generation}")
             
             # Increment director generation and store it
             self._director_generation += 1
@@ -1349,22 +1376,40 @@ class UnifiedVoiceConversation:
             if hasattr(self, 'ui_server'):
                 await self.ui_server.broadcast_speaker_status(thinking_sound=True)
             
-            # Check if this is a manual trigger from UI
-            next_speaker = None
-            if hasattr(reference_turn, 'metadata') and reference_turn.metadata:
-                if reference_turn.metadata.get('is_manual_trigger'):
-                    next_speaker = reference_turn.metadata.get('triggered_speaker')
-                    print(f"🎯 Using manually triggered speaker: {next_speaker}")
-            
-            # If no manual trigger, let director decide who speaks next
-            if not next_speaker:
-                # Pass detected speakers to character manager for validation
-                if hasattr(self, 'detected_speakers'):
-                    self.character_manager._detected_speakers = self.detected_speakers
+            # Determine next speaker with global lock
+            async with self.state.speaker_lock:
+                # Check if we already have a next speaker set globally
+                if self.state.next_speaker:
+                    next_speaker = self.state.next_speaker
+                    print(f"📢 Using globally set next speaker: {next_speaker}")
+                    # Clear it after use
+                    self.state.next_speaker = None
+                else:
+                    # Check if this is a manual trigger from UI
+                    next_speaker = None
+                    if hasattr(reference_turn, 'metadata') and reference_turn.metadata:
+                        if reference_turn.metadata.get('is_manual_trigger'):
+                            next_speaker = reference_turn.metadata.get('triggered_speaker')
+                            print(f"🎯 Using manually triggered speaker: {next_speaker}")
                     
-                next_speaker = await self.character_manager.select_next_speaker(
-                    self._get_conversation_history_for_director()
-                )
+                    # If no manual trigger, check if director is enabled
+                    if not next_speaker:
+                        # Check if director is enabled
+                        if self.config.conversation.director_enabled:
+                            # Pass detected speakers to character manager for validation
+                            if hasattr(self, 'detected_speakers'):
+                                self.character_manager._detected_speakers = self.detected_speakers
+                                
+                            next_speaker = await self.character_manager.select_next_speaker(
+                                self._get_conversation_history_for_director()
+                            )
+                        else:
+                            # Director is disabled, default to USER
+                            next_speaker = "USER"
+                            print("🚫 Director disabled - defaulting to USER")
+                
+                # Set as current speaker
+                self.state.current_speaker = next_speaker
             
             # Broadcast pending speaker
             if hasattr(self, 'ui_server'):
@@ -1598,18 +1643,24 @@ class UnifiedVoiceConversation:
                 self._log_conversation_turn("assistant", f"{next_speaker}: {assistant_response}")
                 print(f"✅ Added assistant response to conversation history")
                 
-                # If the response was interrupted, add a system message
+                # If the response was interrupted, add a system message only if it was interrupted by user speech
                 if status == "interrupted":
-                    system_message = f"[{next_speaker} was interrupted by user speaking]"
-                    system_turn = ConversationTurn(
-                        role="system",
-                        content=system_message,
-                        timestamp=datetime.now(),
-                        status="completed"
-                    )
-                    self.state.conversation_history.append(system_turn)
-                    self._log_conversation_turn("system", system_message)
-                    print(f"📝 Added interruption notice to conversation history")
+                    # Check if this was interrupted by user speech
+                    interrupted_by_user = False
+                    if self.state.current_processing_turn and self.state.current_processing_turn.metadata:
+                        interrupted_by_user = self.state.current_processing_turn.metadata.get('interrupted_by') == 'user_speech'
+                    
+                    if interrupted_by_user:
+                        system_message = f"[{next_speaker} was interrupted by user speaking]"
+                        system_turn = ConversationTurn(
+                            role="system",
+                            content=system_message,
+                            timestamp=datetime.now(),
+                            status="completed"
+                        )
+                        self.state.conversation_history.append(system_turn)
+                        self._log_conversation_turn("system", system_message)
+                        print(f"📝 Added interruption notice to conversation history")
                 
                 # Add to character manager context
                 self.character_manager.add_turn_to_context(next_speaker, assistant_response)
@@ -1619,15 +1670,35 @@ class UnifiedVoiceConversation:
             # After character speaks, check if another character should speak
             await asyncio.sleep(0.5)  # Brief pause
             
-            # Recursively check for next speaker (with depth limit)
-            if not hasattr(self, '_character_depth'):
-                self._character_depth = 0
-            
-            self._character_depth += 1
-            if self._character_depth < 3:  # Max 3 characters in a row
-                await self._process_with_character_llm("", reference_turn)
+            # Only continue if this is still the current generation
+            if generation == self.state.current_generation:
+                # Recursively check for next speaker (with depth limit)
+                if not hasattr(self, '_character_depth'):
+                    self._character_depth = 0
+                
+                self._character_depth += 1
+                if self._character_depth < 3:  # Max 3 characters in a row
+                    # Use director to determine next speaker if needed
+                    async with self.state.speaker_lock:
+                        if not self.state.next_speaker and self.config.conversation.director_enabled:
+                            # Director determines next speaker
+                            if hasattr(self, 'detected_speakers'):
+                                self.character_manager._detected_speakers = self.detected_speakers
+                            self.state.next_speaker = await self.character_manager.select_next_speaker(
+                                self._get_conversation_history_for_director()
+                            )
+                            print(f"🎭 Director selected next speaker: {self.state.next_speaker}")
+                        elif not self.state.next_speaker:
+                            # No director, default to USER
+                            self.state.next_speaker = "USER"
+                            print(f"📢 No director - next speaker set to USER")
+                    
+                    # Continue with the same generation number
+                    await self._process_with_character_llm("", reference_turn, generation)
+                else:
+                    self._character_depth = 0
             else:
-                self._character_depth = 0
+                print(f"⏭️ Skipping recursive call - generation {generation} is stale (current: {self.state.current_generation})")
                 
         except Exception as e:
             print(f"❌ Character LLM error: {e}")
@@ -1636,6 +1707,10 @@ class UnifiedVoiceConversation:
             # Always stop thinking sound (no generation means force stop)
             await self.thinking_sound.stop()
             self.state.is_processing_llm = False
+            
+            # Clear current speaker when done
+            async with self.state.speaker_lock:
+                self.state.current_speaker = None
             
             # Broadcast that speaking/processing has ended
             if hasattr(self, 'ui_server'):
@@ -2233,8 +2308,8 @@ class UnifiedVoiceConversation:
             return
         
         # Check generation if provided
-        if generation is not None and generation != self._processing_generation:
-            print(f"🚫 LLM processing cancelled - newer request exists")
+        if generation is not None and generation != self.state.current_generation:
+            print(f"🚫 LLM processing cancelled - stale generation {generation} (current: {self.state.current_generation})")
             return
             
         # Mark all processing user turns as completed NOW since we're committing to process them

@@ -68,6 +68,7 @@ class ConversationConfig:
     # Character configuration
     characters_config: Optional[Dict[str, Any]] = None
     director_config: Optional[Dict[str, Any]] = None
+    director_enabled: bool = False  # Default to disabled director
     
     def __post_init__(self):
         if self.prefill_participants is None:
@@ -382,6 +383,7 @@ class ConfigLoader:
             tools_config=tools_config,
             characters_config=characters_config,
             director_config=director_config,
+            director_enabled=conversation_config_data.get('director_enabled', False),
         )
         
         # Create other configurations
