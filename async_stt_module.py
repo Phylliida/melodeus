@@ -7,6 +7,7 @@ Provides callback-based speech recognition with speaker identification.
 import asyncio
 import pyaudio
 import time
+import json
 import numpy as np
 from dataclasses import dataclass, field
 from typing import Optional, Callable, Dict, Any, List, Tuple
@@ -116,6 +117,16 @@ class AsyncSTTStreamer:
         self.speaker_identifier = None
         if config.enable_speaker_id:
             self._setup_speaker_identification()
+        
+        # Reconnection settings
+        self.reconnect_attempts = 0
+        self.max_reconnect_attempts = 5
+        self.reconnect_delay = 1.0  # seconds
+        self.is_reconnecting = False
+        
+        # Keepalive settings
+        self.keepalive_task = None
+        self.keepalive_interval = 10.0  # seconds
     
     def on(self, event_type: STTEventType, callback: Callable):
         """Register a callback for an event type."""
@@ -237,9 +248,15 @@ class AsyncSTTStreamer:
                     # Start audio streaming task and track it
                     self.audio_task = asyncio.create_task(self._audio_streaming_loop())
                     
+                    # Start keepalive task to prevent connection timeout
+                    self.keepalive_task = asyncio.create_task(self._keepalive_loop())
+                    
                     await self._emit_event(STTEventType.CONNECTION_OPENED, {
                         "message": "STT connection established"
                     })
+                    
+                    # Reset reconnection attempts on successful connection
+                    self.reconnect_attempts = 0
                     
                     return True
                 else:
@@ -271,11 +288,138 @@ class AsyncSTTStreamer:
             self.is_paused = False
             print("▶️ STT resumed")
     
+    async def _handle_reconnection(self):
+        """Handle automatic reconnection with exponential backoff."""
+        self.is_reconnecting = True
+        
+        while self.reconnect_attempts < self.max_reconnect_attempts and self.is_listening:
+            self.reconnect_attempts += 1
+            wait_time = self.reconnect_delay * (2 ** (self.reconnect_attempts - 1))  # Exponential backoff
+            
+            print(f"🔄 Reconnection attempt {self.reconnect_attempts}/{self.max_reconnect_attempts} in {wait_time}s...")
+            await asyncio.sleep(wait_time)
+            
+            try:
+                # Clean up old connection
+                if self.connection:
+                    try:
+                        self.connection.finish()
+                    except:
+                        pass
+                
+                # Stop audio task if still running
+                if self.audio_task and not self.audio_task.done():
+                    self.audio_task.cancel()
+                    try:
+                        await self.audio_task
+                    except asyncio.CancelledError:
+                        pass
+                
+                # Try to reconnect
+                print("🔌 Attempting to reconnect to Deepgram...")
+                success = await self._reconnect()
+                
+                if success:
+                    print("✅ Successfully reconnected to Deepgram!")
+                    self.is_reconnecting = False
+                    return
+                    
+            except Exception as e:
+                print(f"❌ Reconnection attempt {self.reconnect_attempts} failed: {e}")
+        
+        # Max attempts reached
+        print(f"❌ Failed to reconnect after {self.max_reconnect_attempts} attempts")
+        self.is_reconnecting = False
+        self.is_listening = False
+        
+        await self._emit_event(STTEventType.ERROR, {
+            "error": "Failed to reconnect to Deepgram after multiple attempts"
+        })
+    
+    async def _reconnect(self):
+        """Attempt to reconnect to Deepgram."""
+        # Reset connection state
+        self.connection = None
+        self.connection_alive = False
+        
+        # Recreate connection
+        self.connection = self.deepgram.listen.websocket.v("1")
+        
+        # Reapply all the same options
+        options_dict = {
+            "model": self.config.model,
+            "language": self.config.language,
+            "encoding": "linear16",
+            "sample_rate": self.config.sample_rate,
+            "channels": self.config.channels,
+            "smart_format": self.config.smart_format,
+            "interim_results": self.config.interim_results,
+            "punctuate": self.config.punctuate,
+            "diarize": self.config.diarize,
+            "utterance_end_ms": self.config.utterance_end_ms,
+            "vad_events": self.config.vad_events
+        }
+        
+        # Re-add keywords/keyterms
+        if self.config.keywords:
+            if self.config.model == "nova-3":
+                keyterms = [word for word, weight in self.config.keywords]
+                if keyterms:
+                    options_dict["keyterm"] = " ".join(keyterms)
+            else:
+                sanitized_keywords = []
+                for word, weight in self.config.keywords:
+                    sanitized_word = word.replace(" ", "_").replace(",", "")
+                    if sanitized_word:
+                        sanitized_keywords.append(f"{sanitized_word}:{weight}")
+                if sanitized_keywords:
+                    options_dict["keywords"] = ",".join(sanitized_keywords)
+        
+        options = LiveOptions(**options_dict)
+        
+        # Re-setup event handlers
+        self.connection.on(LiveTranscriptionEvents.Open, self._on_open)
+        self.connection.on(LiveTranscriptionEvents.Transcript, self._on_transcript)
+        self.connection.on(LiveTranscriptionEvents.UtteranceEnd, self._on_utterance_end)
+        self.connection.on(LiveTranscriptionEvents.SpeechStarted, self._on_speech_started)
+        self.connection.on(LiveTranscriptionEvents.Error, self._on_error)
+        self.connection.on(LiveTranscriptionEvents.Close, self._on_close)
+        
+        # Start connection
+        loop = asyncio.get_event_loop()
+        connection_success = await loop.run_in_executor(
+            None, lambda: self.connection.start(options)
+        )
+        
+        if connection_success:
+            # Wait for connection to be confirmed
+            await asyncio.sleep(0.1)
+            
+            if self.connection_alive:
+                # Restart audio streaming
+                self.audio_task = asyncio.create_task(self._audio_streaming_loop())
+                
+                # Restart keepalive
+                self.keepalive_task = asyncio.create_task(self._keepalive_loop())
+                
+                return True
+        
+        return False
+    
     async def stop_listening(self):
         """Stop listening for speech."""
         print("🛑 STT stop requested")
         self.is_listening = False
         self.connection_alive = False
+        
+        # Cancel keepalive task if it's running
+        if self.keepalive_task and not self.keepalive_task.done():
+            print("🔄 Cancelling keepalive task...")
+            self.keepalive_task.cancel()
+            try:
+                await self.keepalive_task
+            except asyncio.CancelledError:
+                pass
         
         # Cancel audio streaming task if it's running
         if self.audio_task and not self.audio_task.done():
@@ -333,6 +477,20 @@ class AsyncSTTStreamer:
         """Register a name for a session speaker ID."""
         self.session_speakers[session_speaker_id] = name
         print(f"📝 Registered speaker {session_speaker_id} as '{name}'")
+    
+    async def _keepalive_loop(self):
+        """Send keepalive messages to prevent connection timeout."""
+        while self.is_listening and self.connection_alive:
+            try:
+                # Send a keepalive message every interval
+                if self.connection:
+                    # Deepgram expects a JSON message for keepalive
+                    keepalive_message = json.dumps({"type": "KeepAlive"})
+                    self.connection.send(keepalive_message)
+                await asyncio.sleep(self.keepalive_interval)
+            except Exception as e:
+                print(f"❌ Keepalive error: {e}")
+                break
     
     async def _audio_streaming_loop(self):
         """Main audio streaming loop with proper async handling."""
@@ -594,11 +752,21 @@ class AsyncSTTStreamer:
     def _on_close(self, *args, **kwargs):
         """Handle connection close."""
         print("🔌 Deepgram connection closed by server")
-        self.is_listening = False
         self.connection_alive = False
-        self._schedule_event(STTEventType.CONNECTION_CLOSED, {
-            "message": "Deepgram connection closed by server"
-        })
+        
+        # Cancel keepalive task if running
+        if self.keepalive_task and not self.keepalive_task.done():
+            self.keepalive_task.cancel()
+        
+        # Trigger reconnection if not already reconnecting and not shutting down
+        if self.is_listening and not self.is_reconnecting:
+            print("🔄 Attempting automatic reconnection...")
+            asyncio.create_task(self._handle_reconnection())
+        else:
+            self.is_listening = False
+            self._schedule_event(STTEventType.CONNECTION_CLOSED, {
+                "message": "Deepgram connection closed by server"
+            })
     
     def _setup_speaker_identification(self):
         """Setup speaker identification if enabled."""
