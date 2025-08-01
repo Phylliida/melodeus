@@ -245,5 +245,5 @@ if __name__ == "__main__":
         time.sleep(0.016)  # ~16ms for 256 samples at 16kHz
         
     # Print statistics
-    processor.print_stats()
+    #processor.print_stats()
  

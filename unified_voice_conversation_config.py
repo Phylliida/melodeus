@@ -243,7 +243,7 @@ class UnifiedVoiceConversation:
         
         # Initialize UI server
         ui_port = config.ui_port if hasattr(config, 'ui_port') else 8765
-        self.ui_server = VoiceUIServer(self, host='localhost', port=ui_port)
+        self.ui_server = VoiceUIServer(self, host='0.0.0.0', port=ui_port)
         
         # Show appropriate message
         if len(characters_config["characters"]) > 1:

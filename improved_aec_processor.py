@@ -232,8 +232,8 @@ class ImprovedEchoCancellationProcessor:
             return frame, 'low'
         else:
             # Complete underrun
-            if self.debug_level >= 1 and self.stats['consecutive_underruns'] % 10 == 0:
-                print(f"❌ Buffer underrun streak: {self.stats['consecutive_underruns']}")
+            # if self.debug_level >= 1 and self.stats['consecutive_underruns'] % 10 == 0:
+            #     print(f"❌ Buffer underrun streak: {self.stats['consecutive_underruns']}")
             return np.zeros(self.frame_size, dtype=np.int16), 'underrun'
 
     def _adapt_delay_improved(self):
@@ -401,7 +401,7 @@ if __name__ == "__main__":
         filter_length=2048,
         sample_rate=16000,
         initial_delay_ms=200,  # Higher initial delay
-        debug_level=1
+        debug_level=10
     )
     
     # Simulate realistic TTS bursts
@@ -423,7 +423,7 @@ if __name__ == "__main__":
         
         time.sleep(0.016)
     
-    processor.print_stats()
+    #processor.print_stats()
     
     # Phase 2: TTS speech (bursty)
     print("\n--- Phase 2: TTS Speech (Bursty) ---")
@@ -442,7 +442,7 @@ if __name__ == "__main__":
         
         time.sleep(0.016)
     
-    processor.print_stats()
+    #processor.print_stats()
     
     # Phase 3: Silence
     print("\n--- Phase 3: Silence ---")
@@ -452,6 +452,6 @@ if __name__ == "__main__":
         result = processor.process(mic_audio)
         time.sleep(0.016)
     
-    processor.print_stats()
+    #processor.print_stats()
     
     print("\n✅ Test completed!")

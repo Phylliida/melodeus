@@ -66,7 +66,7 @@ def simulate_realistic_scenario(processor, name="Processor"):
     
     # Get final statistics
     stats = processor.get_stats()
-    processor.print_stats()
+    #processor.print_stats()
     
     return stats, elapsed
 

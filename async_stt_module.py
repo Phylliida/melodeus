@@ -604,11 +604,11 @@ class AsyncSTTStreamer:
                             print(f"📊 Sent {chunk_count} audio chunks")
                             
                         # Print echo cancellation stats every 10 seconds
-                        if self.echo_canceller and hasattr(self.echo_canceller, 'print_stats'):
-                            current_time = time.time()
-                            if current_time - last_stats_time > 10:
-                                self.echo_canceller.print_stats()
-                                last_stats_time = current_time
+                        # if self.echo_canceller and hasattr(self.echo_canceller, 'print_stats'):
+                        #     current_time = time.time()
+                        #     if current_time - last_stats_time > 10:
+                        #         #self.echo_canceller.print_stats()
+                        #         last_stats_time = current_time
                             
                     except Exception as send_error:
                         print(f"❌ Failed to send audio data to Deepgram: {send_error}")

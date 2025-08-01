@@ -322,7 +322,7 @@ if __name__ == "__main__":
                 result = processor.process(mic_audio)
                 time.sleep(0.016)
         
-        processor.print_stats()
+        #processor.print_stats()
     
     print("\n✅ Test completed!")
  
