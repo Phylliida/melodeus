@@ -24,7 +24,7 @@ from config_loader import load_config, VoiceAIConfig
 from tools import create_tool_registry
 from character_system import create_character_manager, CharacterManager
 from camera_capture import CameraCapture, CameraConfig as CameraCaptureConfig
-from thinking_sound import ThinkingSoundPlayer
+from synchronized_thinking_sound import SynchronizedThinkingSoundPlayer
 from websocket_ui_server import VoiceUIServer
 from echo_filter import EchoFilter
 from context_manager import ContextManager
@@ -222,8 +222,14 @@ class UnifiedVoiceConversation:
             self.context_manager.auto_save_enabled = config.contexts.auto_save_enabled
             self.context_manager.auto_save_interval = config.contexts.auto_save_interval
         
-        # Initialize thinking sound player
-        self.thinking_sound = ThinkingSoundPlayer(sample_rate=22050)
+        # Initialize thinking sound player (use same sample rate as STT for echo cancellation)
+        self.thinking_sound = SynchronizedThinkingSoundPlayer(sample_rate=config.stt.sample_rate)
+        
+        # Connect thinking sound to echo cancellation if enabled
+        if config.conversation.enable_echo_cancellation:
+            if hasattr(self.stt, 'echo_canceller') and self.stt.echo_canceller is not None:
+                self.thinking_sound.set_echo_cancellation_callback(self.stt.add_reference_audio)
+                print("🔊 Echo cancellation connected: Thinking sound -> STT")
         
         # Initialize echo filter
         if config.echo_filter and config.echo_filter.enabled:

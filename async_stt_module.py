@@ -28,6 +28,7 @@ except ImportError:
 try:
     from improved_echo_cancellation import SimpleEchoCancellationProcessor
     from debug_echo_cancellation import DebugEchoCancellationProcessor
+    from advanced_echo_cancellation import AdaptiveEchoCancellationProcessor
     ECHO_CANCELLATION_AVAILABLE = True
     print("✅ Echo cancellation available")
 except ImportError:
@@ -147,12 +148,12 @@ class AsyncSTTStreamer:
                 filter_length = getattr(config, 'aec_filter_length', 2048)
                 delay_ms = getattr(config, 'aec_delay_ms', 100)
                 
-                # Use debug version for now to understand timing issues
-                self.echo_canceller = DebugEchoCancellationProcessor(
+                # Use adaptive version for better handling of timing mismatches
+                self.echo_canceller = AdaptiveEchoCancellationProcessor(
                     frame_size=frame_size,
                     filter_length=filter_length,
                     sample_rate=config.sample_rate,
-                    reference_delay_ms=delay_ms,
+                    initial_delay_ms=delay_ms,
                     debug_level=1  # Basic debug info
                 )
                 print(f"🔊 Echo cancellation enabled")

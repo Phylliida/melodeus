@@ -26,6 +26,10 @@ class ThinkingSoundPlayer:
         # Generate a soft, pleasant thinking sound
         self.thinking_sound = self._generate_thinking_sound()
         
+    def set_echo_cancellation_callback(self, callback):
+        """Set callback for echo cancellation."""
+        self.echo_cancellation_callback = callback
+        
     def _generate_thinking_sound(self) -> np.ndarray:
         """Generate a soft, rhythmic thinking sound."""
         duration = 0.15  # 150ms per pulse
@@ -67,10 +71,36 @@ class ThinkingSoundPlayer:
                 # Store reference for external access
                 self.stream = local_stream
             
+            # Calculate chunk size for echo cancellation (256 samples = 16ms at 16kHz)
+            chunk_size = 256  # samples
+            chunk_bytes = chunk_size * 2  # 16-bit = 2 bytes per sample
+            
             while not self._stop_event.is_set() and local_stream:
-                # Play one pulse
+                # Play one pulse in small chunks
                 try:
-                    local_stream.write(self.thinking_sound.tobytes())
+                    audio_data = self.thinking_sound.tobytes()
+                    
+                    # Stream the audio in small chunks for echo cancellation
+                    for i in range(0, len(audio_data), chunk_bytes):
+                        if self._stop_event.is_set():
+                            break
+                            
+                        chunk = audio_data[i:i + chunk_bytes]
+                        
+                        # Pad the last chunk if needed
+                        if len(chunk) < chunk_bytes:
+                            chunk = chunk + b'\x00' * (chunk_bytes - len(chunk))
+                        
+                        # Play the chunk
+                        local_stream.write(chunk)
+                        
+                        # Send to echo cancellation if callback is set
+                        if self.echo_cancellation_callback:
+                            try:
+                                self.echo_cancellation_callback(chunk)
+                            except Exception as ec_error:
+                                print(f"⚠️ Thinking sound echo cancellation error: {ec_error}")
+                                
                 except Exception as e:
                     # Stream might have been closed
                     if "Stream closed" not in str(e):
