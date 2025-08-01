@@ -322,9 +322,7 @@ class VoiceUIServer:
             self.conversation.state.is_speaking = False
             self.conversation.state.is_processing_llm = False
             self.conversation.state.current_processing_turn = None
-            # Increment generation to invalidate any ongoing processing
-            self.conversation.state.current_generation += 1
-            print(f"🔄 All AI processing interrupted and state cleared. New generation: {self.conversation.state.current_generation}")
+            print(f"🔄 All AI processing interrupted and state cleared")
         
         # Set the next speaker globally
         async with self.conversation.state.speaker_lock:

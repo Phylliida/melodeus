@@ -56,11 +56,12 @@ class ConversationState:
     # Track request generation to handle concurrent requests
     request_generation: int = 0
     
-    # Global speaker management
+        # Global speaker management
     next_speaker: Optional[str] = None  # Who should speak next
-    current_speaker: Optional[str] = None  # Who is currently speaking
+    current_speaker: Optional[str] = None  # Who is currently speaking  
     current_generation: int = 0  # The active generation number
     speaker_lock: asyncio.Lock = field(default_factory=asyncio.Lock)  # Prevent concurrent speaker selection
+
 
 class UnifiedVoiceConversation:
     """Unified voice conversation system with YAML configuration."""
@@ -76,7 +77,7 @@ class UnifiedVoiceConversation:
         
         # Track processing tasks to prevent race conditions
         self._processing_task = None
-        self._processing_generation = 0
+        # Removed _processing_generation - using state.current_generation instead
         # Track director requests separately
         self._director_generation = 0
         
@@ -965,7 +966,7 @@ class UnifiedVoiceConversation:
         
         print("✅ Conversation stopped")
     
-    async def _on_utterance_complete(self, result: STTResult):
+    async def _on_utterance_complete(self, result: STTResult, skip_processing: bool = False):
         """Handle completed utterances from STT."""
         # Use speaker name if available from voice fingerprinting, otherwise fall back to speaker ID
         if result.speaker_name:
@@ -1275,9 +1276,10 @@ class UnifiedVoiceConversation:
     
     async def _process_pending_utterances(self):
         """Process pending utterances from conversation history."""
-        # Increment generation to invalidate any previous processing
-        self._processing_generation += 1
-        current_generation = self._processing_generation
+        # Always increment generation for new utterance processing
+        self.state.current_generation += 1
+        current_generation = self.state.current_generation
+        print(f"📍 New utterance processing generation: {current_generation}")
         
         # Cancel any existing processing task
         if self._processing_task and not self._processing_task.done():
@@ -1301,8 +1303,8 @@ class UnifiedVoiceConversation:
                 return
                 
             # Check if we're still the current generation
-            if generation != self._processing_generation:
-                print(f"🚫 Processing cancelled - newer request exists (gen {generation} vs {self._processing_generation})")
+            if generation != self.state.current_generation:
+                print(f"🚫 Processing cancelled - newer request exists (gen {generation} vs {self.state.current_generation})")
                 return
                 
             # Process all pending turns
@@ -1325,7 +1327,7 @@ class UnifiedVoiceConversation:
                 turn.status = "processing"
             
             # Check generation again before processing
-            if generation != self._processing_generation:
+            if generation != self.state.current_generation:
                 print(f"🚫 Processing cancelled before LLM - newer request exists")
                 # Reset status for all turns
                 for turn in pending_turns:
@@ -1360,10 +1362,12 @@ class UnifiedVoiceConversation:
                     self.state.is_processing_llm = False
                     return
             else:
-                # If no generation specified, this is a new request - make it current
-                self.state.current_generation += 1
+                # If no generation specified, this is a new request
+                # Only increment if we're not already processing
+                if not self.state.is_processing_llm:
+                    self.state.current_generation += 1
                 generation = self.state.current_generation
-                print(f"📍 New generation started: {generation}")
+                print(f"📍 Generation: {generation}")
             
             # Increment director generation and store it
             self._director_generation += 1
@@ -1419,8 +1423,8 @@ class UnifiedVoiceConversation:
                 )
             
             # Check both processing generation and director generation
-            if generation is not None and generation != self._processing_generation:
-                print(f"🚫 Processing cancelled after director - newer utterance exists")
+            if generation is not None and generation != self.state.current_generation:
+                print(f"🚫 Processing cancelled after director - newer utterance exists (gen {generation} vs current {self.state.current_generation})")
                 await self.thinking_sound.stop(generation=director_gen)
                 self.state.is_processing_llm = False
                 return
@@ -1492,8 +1496,8 @@ class UnifiedVoiceConversation:
             )
             
             # Check both generations before starting LLM
-            if generation is not None and generation != self._processing_generation:
-                print(f"🚫 Processing cancelled before LLM call - newer utterance exists")
+            if generation is not None and generation != self.state.current_generation:
+                print(f"🚫 Processing cancelled before LLM call - newer utterance exists (gen {generation} vs current {self.state.current_generation})")
                 await self.thinking_sound.stop(generation=director_gen)
                 self.state.is_processing_llm = False
                 return
