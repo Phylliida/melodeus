@@ -139,6 +139,10 @@
             box-shadow: 0 2px 8px rgba(156, 39, 176, 0.3);
         }
         
+        #interruptions-toggle {
+            transition: all 0.3s ease;
+        }
+        
         .status-bar {
             background: white;
             padding: 12px 20px;
@@ -415,6 +419,9 @@
         <button id="stt-toggle" onclick="toggleSTT()">
             <span>⏸️</span> Pause STT
         </button>
+        <button id="interruptions-toggle" onclick="toggleInterruptions()">
+            <span>🚫</span> Interruptions OFF
+        </button>
         <button onclick="clearTranscript()">
             <span>🗑️</span> Clear Transcript
         </button>
@@ -452,6 +459,7 @@
     <script>
         let ws = null;
         let sttActive = true;
+        let interruptionsEnabled = false;  // Default to false
         let currentMessages = {};  // Track ongoing AI messages by session
         let messageCount = 0;
         let isConnected = false;
@@ -541,6 +549,9 @@
                     break;
                 case 'ai_stream_correction':
                     correctAIStream(msg.data);
+                    break;
+                case 'interruptions_toggled':
+                    updateInterruptionsState(msg.data);
                     break;
             }
         }
@@ -719,6 +730,17 @@
             }
         }
         
+        function toggleInterruptions() {
+            if (ws && ws.readyState === WebSocket.OPEN) {
+                const newState = !interruptionsEnabled;
+                ws.send(JSON.stringify({ 
+                    type: 'toggle_interruptions', 
+                    data: { enabled: newState }
+                }));
+                // UI will update when we receive the confirmation
+            }
+        }
+        
         function clearTranscript() {
             if (confirm('Clear all transcript history?')) {
                 document.getElementById('transcript').innerHTML = '';
@@ -872,6 +894,12 @@
                     thinking_sound: data.thinking_sound
                 });
             }
+            
+            // Update interruptions state
+            if (data.interruptions_enabled !== undefined) {
+                interruptionsEnabled = data.interruptions_enabled;
+                updateInterruptionsButton();
+            }
         }
         
         function editMessage(msgId) {
@@ -1009,6 +1037,35 @@
             } else {
                 showError('WebSocket not connected');
             }
+        }
+        
+        function updateInterruptionsButton() {
+            const btn = document.getElementById('interruptions-toggle');
+            if (btn) {
+                if (interruptionsEnabled) {
+                    btn.innerHTML = '<span>✅</span> Interruptions ON';
+                    btn.style.background = '#4CAF50';
+                } else {
+                    btn.innerHTML = '<span>🚫</span> Interruptions OFF';
+                    btn.style.background = '#f44336';
+                }
+            }
+        }
+        
+        function updateInterruptionsState(data) {
+            interruptionsEnabled = data.enabled;
+            updateInterruptionsButton();
+            
+            // Show feedback in transcript
+            const transcript = document.getElementById('transcript');
+            const msg = document.createElement('div');
+            msg.className = 'message system';
+            msg.style.background = '#E1F5FE';
+            msg.style.textAlign = 'center';
+            msg.style.fontStyle = 'italic';
+            msg.innerHTML = `<div class="message-content">🔔 Voice interruptions ${interruptionsEnabled ? 'enabled' : 'disabled'}</div>`;
+            transcript.appendChild(msg);
+            transcript.scrollTop = transcript.scrollHeight;
         }
         
         // Add enter key handler for text input

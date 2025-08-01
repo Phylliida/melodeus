@@ -30,6 +30,10 @@ class VoiceUIServer:
         self.logger = logging.getLogger(__name__)
         
         # Track current state for new clients
+        interruptions_enabled = False
+        if conversation and hasattr(conversation, 'config'):
+            interruptions_enabled = conversation.config.conversation.interruptions_enabled
+            
         self.current_state = {
             "current_speaker": None,
             "is_speaking": False,
@@ -37,7 +41,8 @@ class VoiceUIServer:
             "pending_speaker": None,
             "thinking_sound": False,
             "stt_active": True,
-            "conversation_active": False
+            "conversation_active": False,
+            "interruptions_enabled": interruptions_enabled
         }
         
     async def start(self):
@@ -133,6 +138,11 @@ class VoiceUIServer:
                 speaker_name = data.get("speaker_name", "USER")
                 text = data.get("text", "")
                 await self.handle_text_message(speaker_name, text)
+                
+            elif msg_type == "toggle_interruptions":
+                # Toggle interruptions on/off
+                enabled = data.get("enabled", False)
+                await self.handle_toggle_interruptions(enabled)
                 
             else:
                 await self.send_error(websocket, f"Unknown message type: {msg_type}")
@@ -610,6 +620,29 @@ class VoiceUIServer:
             is_complete=True,
             session_id=f"text_input_{int(time.time() * 1000)}"
         )
+    
+    async def handle_toggle_interruptions(self, enabled: bool):
+        """Handle toggling interruptions on/off."""
+        print(f"{'🟢' if enabled else '🔴'} Voice interruptions {'enabled' if enabled else 'disabled'}")
+        
+        # Update our state
+        self.current_state["interruptions_enabled"] = enabled
+        
+        # Update the conversation config if available
+        if self.conversation and hasattr(self.conversation, 'config'):
+            self.conversation.config.conversation.interruptions_enabled = enabled
+        
+        # Broadcast the update to all clients
+        await self.broadcast(UIMessage(
+            type="interruptions_toggled",
+            data={"enabled": enabled}
+        ))
+        
+        # Also send a state sync to update UI
+        await self.broadcast(UIMessage(
+            type="state_sync",
+            data=self.current_state
+        ))
 
 
 # Example usage

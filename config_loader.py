@@ -33,6 +33,7 @@ class ConversationConfig:
     max_wait_time: float = 10.0
     
     # Interruption settings
+    interruptions_enabled: bool = False  # Default to false for safety
     interruption_confidence: float = 0.8
     
     # STT settings
@@ -358,6 +359,7 @@ class ConfigLoader:
             pause_threshold=conversation_config_data.get('pause_threshold', 2.0),
             min_words_for_submission=conversation_config_data.get('min_words_for_submission', 3),
             max_wait_time=conversation_config_data.get('max_wait_time', 10.0),
+            interruptions_enabled=conversation_config_data.get('interruptions_enabled', False),
             interruption_confidence=conversation_config_data.get('interruption_confidence', 0.8),
             stt_model=stt_config_data.get('model', 'nova-3'),
             stt_language=stt_config_data.get('language', 'en-US'),

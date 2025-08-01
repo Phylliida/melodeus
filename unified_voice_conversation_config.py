@@ -1022,6 +1022,18 @@ class UnifiedVoiceConversation:
         # Check for interruption at ANY stage of AI response
         interrupted = False
         
+        # Check if voice interruptions are enabled
+        if not self.config.conversation.interruptions_enabled and (self.tts.is_currently_playing() or self.state.is_processing_llm or self.state.is_speaking):
+            print(f"🚫 Voice interruptions disabled - ignoring: {result.text}")
+            # Still broadcast to UI but mark as ignored
+            if hasattr(self, 'ui_server'):
+                await self.ui_server.broadcast_transcription(
+                    speaker=ui_speaker_name,
+                    text=f"[Interruptions disabled] {result.text}",
+                    is_final=True
+                )
+            return  # Don't process as user input
+        
         if self.tts.is_currently_playing():
             print(f"🛑 Interrupting TTS playback with: {result.text}")
             
