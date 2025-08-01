@@ -74,7 +74,7 @@ class ConversationConfig:
     enable_echo_cancellation: bool = False
     aec_frame_size: int = 256  # Must be power of 2
     aec_filter_length: int = 2048
-    aec_delay_ms: int = 100  # Reference delay in milliseconds
+    aec_delay_ms: int = 200  # Reference delay in milliseconds (increased for bursty TTS)
     
     def __post_init__(self):
         if self.prefill_participants is None:
@@ -426,7 +426,7 @@ class ConfigLoader:
             enable_echo_cancellation=conversation_config_data.get('enable_echo_cancellation', False),
             aec_frame_size=conversation_config_data.get('aec_frame_size', 256),
             aec_filter_length=conversation_config_data.get('aec_filter_length', 2048),
-            aec_delay_ms=conversation_config_data.get('aec_delay_ms', 100),
+            aec_delay_ms=conversation_config_data.get('aec_delay_ms', 200),
         )
         
         # Create other configurations

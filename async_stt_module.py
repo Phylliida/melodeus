@@ -29,6 +29,7 @@ try:
     from improved_echo_cancellation import SimpleEchoCancellationProcessor
     from debug_echo_cancellation import DebugEchoCancellationProcessor
     from advanced_echo_cancellation import AdaptiveEchoCancellationProcessor
+    from improved_aec_processor import ImprovedEchoCancellationProcessor
     ECHO_CANCELLATION_AVAILABLE = True
     print("✅ Echo cancellation available")
 except ImportError:
@@ -148,8 +149,8 @@ class AsyncSTTStreamer:
                 filter_length = getattr(config, 'aec_filter_length', 2048)
                 delay_ms = getattr(config, 'aec_delay_ms', 100)
                 
-                # Use adaptive version for better handling of timing mismatches
-                self.echo_canceller = AdaptiveEchoCancellationProcessor(
+                # Use improved version for better handling of bursty TTS
+                self.echo_canceller = ImprovedEchoCancellationProcessor(
                     frame_size=frame_size,
                     filter_length=filter_length,
                     sample_rate=config.sample_rate,
@@ -570,6 +571,9 @@ class AsyncSTTStreamer:
                     processed_data = data
                     if self.echo_canceller:
                         try:
+                            # Debug: log timing every 100 chunks
+                            if chunk_count % 100 == 0:
+                                print(f"🎤 MIC: Processing {len(data)} bytes at {time.time():.3f}")
                             processed_data = self.echo_canceller.process(data)
                         except Exception as aec_error:
                             # Don't break streaming if AEC fails

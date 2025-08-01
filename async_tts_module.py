@@ -83,7 +83,8 @@ class AsyncTTSStreamer:
     
     def __init__(self, config: TTSConfig):
         self.config = config
-        self.audio_queue = queue.Queue()
+        # Limit queue size to reduce buffering delay for better AEC
+        self.audio_queue = queue.Queue(maxsize=10)  # ~100ms of audio at most
         self.is_playing = False
         self.is_streaming = False
         self.playback_thread = None
@@ -863,7 +864,19 @@ class AsyncTTSStreamer:
                     # Decode and queue audio only if not stopped
                     audio_data = base64.b64decode(data["audio"])
                     if not self._stop_requested:  # Double-check before queuing
-                        self.audio_queue.put(audio_data)
+                        try:
+                            # Use timeout to avoid blocking forever if queue is full
+                            self.audio_queue.put(audio_data, timeout=0.1)
+                        except queue.Full:
+                            # Queue is full - this provides natural backpressure
+                            # The streaming will slow down to match playback speed
+                            if not self._stop_requested:
+                                # Try once more with longer timeout
+                                try:
+                                    self.audio_queue.put(audio_data, timeout=0.5)
+                                except queue.Full:
+                                    print("⚠️ Audio queue full - dropping chunk to prevent excessive delay")
+                                    pass
                         
                         # Call first audio callback if not already called
                         if not self._first_audio_received and self.first_audio_callback:
@@ -1148,7 +1161,16 @@ class AsyncTTSStreamer:
                     try:
                         audio_data = base64.b64decode(data["audio"])
                         if len(audio_data) > 0 and not self._stop_requested:  # Double-check before queuing
-                            self.audio_queue.put(audio_data)
+                            try:
+                                self.audio_queue.put(audio_data, timeout=0.1)
+                            except queue.Full:
+                                # Queue is full - provides natural backpressure
+                                if not self._stop_requested:
+                                    try:
+                                        self.audio_queue.put(audio_data, timeout=0.5)
+                                    except queue.Full:
+                                        print("⚠️ Audio queue full - dropping chunk")
+                                        pass
                             
                             # Call first audio callback if not already called
                             if not self._first_audio_received and self.first_audio_callback:
@@ -1303,9 +1325,11 @@ class AsyncTTSStreamer:
                         self._actively_playing_chunk = True
                         
                         # Split chunk into smaller pieces for more responsive stopping
-                        # Each chunk is about 1024 samples, we'll split into ~100ms pieces
+                        # Match AEC frame size for better alignment
                         chunk_samples = len(audio_chunk) // 2  # 16-bit audio = 2 bytes per sample
-                        samples_per_100ms = self.config.sample_rate // 10  # 100ms worth of samples
+                        # Use AEC frame size (256 samples) instead of arbitrary 100ms
+                        aec_frame_size = 256
+                        segment_samples = aec_frame_size  # Match AEC expectations
                         
                         # Play in smaller segments
                         offset = 0
@@ -1315,9 +1339,22 @@ class AsyncTTSStreamer:
                                 print("🛑 Stopping mid-chunk playback")
                                 break
                                 
-                            # Calculate segment size (100ms or remaining chunk)
-                            segment_size = min(samples_per_100ms * 2, len(audio_chunk) - offset)
+                            # Calculate segment size (match AEC frame size)
+                            segment_size = min(segment_samples * 2, len(audio_chunk) - offset)
                             audio_segment = audio_chunk[offset:offset + segment_size]
+                            
+                            # Send to echo cancellation RIGHT BEFORE playback
+                            if self.echo_cancellation_callback:
+                                try:
+                                    # Debug: Show segment size
+                                    if offset == 0:  # First segment of chunk
+                                        total_chunk_ms = (len(audio_chunk) / 2 / self.config.sample_rate) * 1000
+                                        print(f"🔊 TTS chunk: {len(audio_chunk)} bytes ({total_chunk_ms:.1f}ms), splitting into {segment_size} byte segments")
+                                    self.echo_cancellation_callback(audio_segment)
+                                except Exception as ec_error:
+                                    # Don't break playback if echo cancellation fails
+                                    if chunk_samples % 100 == 0:  # Log occasionally
+                                        print(f"⚠️ Echo cancellation callback error: {ec_error}")
                             
                             # Play the segment with error handling
                             try:
@@ -1326,15 +1363,6 @@ class AsyncTTSStreamer:
                                     # Track that we've played audio
                                     if offset == 0:  # First segment of this chunk
                                         self._chunks_played += 1
-                                    
-                                    # Send to echo cancellation if callback is set
-                                    if self.echo_cancellation_callback:
-                                        try:
-                                            self.echo_cancellation_callback(audio_segment)
-                                        except Exception as ec_error:
-                                            # Don't break playback if echo cancellation fails
-                                            if chunk_samples % 100 == 0:  # Log occasionally
-                                                print(f"⚠️ Echo cancellation callback error: {ec_error}")
                             except Exception as e:
                                 # Stream was closed or error occurred
                                 if "Stream not open" not in str(e) and "-9986" not in str(e):

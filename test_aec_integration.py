@@ -66,3 +66,4 @@ except Exception as e:
     print(f"\n❌ Error checking async_stt_module: {e}")
 
 print("\n✅ All tests completed!")
+ 

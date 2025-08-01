@@ -28,8 +28,8 @@ class AdaptiveEchoCancellationProcessor:
         # Adaptive delay parameters
         self.initial_delay_ms = initial_delay_ms
         self.current_delay_frames = int((initial_delay_ms / 1000.0) * sample_rate / frame_size)
-        self.min_delay_frames = 1
-        self.max_delay_frames = int((1000 / 1000.0) * sample_rate / frame_size)  # Max 1 second
+        self.min_delay_frames = max(3, int((50 / 1000.0) * sample_rate / frame_size))  # Min 50ms
+        self.max_delay_frames = int((500 / 1000.0) * sample_rate / frame_size)  # Max 500ms
         
         # Create echo canceller
         self.echo_canceller = EchoCanceller.create(frame_size, filter_length, sample_rate)
@@ -77,6 +77,14 @@ class AdaptiveEchoCancellationProcessor:
         with self.lock:
             self.stats['reference_calls'] += 1
             current_time = time.time()
+            
+            # Debug: Check for bursts and alignment
+            samples = len(audio_data) // 2
+            frames = samples / self.frame_size
+            if frames > 4:  # More than 4 frames at once
+                print(f"⚠️ BURST: Reference audio burst of {samples} samples ({frames:.1f} frames)")
+            if samples % self.frame_size != 0:
+                print(f"⚠️ MISALIGNED: Reference audio not frame-aligned: {samples} samples ({frames:.2f} frames)")
             
             # Add to buffer
             self.far_buffer.extend(audio_data)
@@ -194,14 +202,15 @@ class AdaptiveEchoCancellationProcessor:
                     delay_ms = self.current_delay_frames * self.frame_size * 1000 / self.sample_rate
                     print(f"📈 Increased delay to {self.current_delay_frames} frames ({delay_ms:.0f}ms) due to underruns")
         
-        # If buffer is consistently full, we might be able to reduce delay
-        elif avg_fill > self.current_delay_frames + 10 and self.stats['underrun_streak'] == 0:
-            if self.current_delay_frames > self.min_delay_frames:
+        # If buffer is consistently full AND we're well above minimum, we might reduce delay
+        # But be conservative - only reduce if we have a lot of headroom
+        elif avg_fill > self.current_delay_frames + 20 and self.stats['underrun_streak'] == 0:
+            if self.current_delay_frames > self.min_delay_frames + 2:  # Keep some margin
                 self.current_delay_frames -= 1
                 adapted = True
                 if self.debug_level >= 1:
                     delay_ms = self.current_delay_frames * self.frame_size * 1000 / self.sample_rate
-                    print(f"📉 Reduced delay to {self.current_delay_frames} frames ({delay_ms:.0f}ms) - buffer healthy")
+                    print(f"📉 Reduced delay to {self.current_delay_frames} frames ({delay_ms:.0f}ms) - buffer very healthy")
         
         if adapted:
             self.stats['delay_adjustments'] += 1
@@ -316,3 +325,4 @@ if __name__ == "__main__":
         processor.print_stats()
     
     print("\n✅ Test completed!")
+ 
