@@ -136,22 +136,6 @@ class DevelopmentConfig:
     mock_apis: bool = False
 
 @dataclass
-class ContextConfig:
-    """Configuration for a single conversation context."""
-    name: str
-    description: str = ""
-    history_file: Optional[str] = None  # Path to markdown history file
-    metadata: Dict[str, Any] = field(default_factory=dict)
-
-@dataclass
-class ContextManagerConfig:
-    """Configuration for the context management system."""
-    contexts: List[ContextConfig] = field(default_factory=list)
-    default_context: Optional[str] = None
-    auto_save_interval: int = 30  # seconds
-    storage_dir: str = "contexts"
-
-@dataclass
 class OSCConfig:
     """OSC (Open Sound Control) configuration."""
     enabled: bool = False
@@ -160,6 +144,25 @@ class OSCConfig:
     speaking_start_address: str = "/character/speaking/start"
     speaking_stop_address: str = "/character/speaking/stop"
     color_change_address: str = "/character/color/change"
+
+
+@dataclass
+class ContextConfig:
+    """Configuration for a conversation context."""
+    name: str
+    history_file: str
+    description: Optional[str] = None
+    metadata: Optional[Dict[str, Any]] = None
+
+
+@dataclass
+class ContextsConfig:
+    """Configuration for conversation contexts."""
+    enabled: bool = True
+    contexts: List[ContextConfig] = field(default_factory=list)
+    state_dir: str = "./context_states"
+    auto_save_enabled: bool = True
+    auto_save_interval: int = 30  # seconds
 
 @dataclass
 class VoiceAIConfig:
@@ -174,7 +177,7 @@ class VoiceAIConfig:
     camera: Optional[CameraConfig] = None
     echo_filter: Optional[EchoFilterConfig] = None
     osc: Optional[OSCConfig] = None
-    context_manager: Optional[ContextManagerConfig] = None
+    contexts: Optional[ContextsConfig] = None
 
 def deep_merge(base: Dict[str, Any], override: Dict[str, Any]) -> Dict[str, Any]:
     """
@@ -498,26 +501,26 @@ class ConfigLoader:
                 color_change_address=osc_data.get('color_change_address', '/character/color/change')
             )
         
-        # Create context manager configuration
-        context_manager_data = config_data.get('context_manager', {})
-        context_manager_config = None
-        if 'contexts' in context_manager_data:
-            # Parse contexts
-            contexts = []
-            for ctx_data in context_manager_data['contexts']:
+        # Create contexts configuration
+        contexts_data = config_data.get('contexts', {})
+        contexts_config = None
+        if contexts_data.get('enabled', True):
+            context_list = []
+            for ctx_data in contexts_data.get('contexts', []):
                 context = ContextConfig(
                     name=ctx_data['name'],
-                    description=ctx_data.get('description', ''),
-                    history_file=ctx_data.get('history_file'),
+                    history_file=ctx_data['history_file'],
+                    description=ctx_data.get('description'),
                     metadata=ctx_data.get('metadata', {})
                 )
-                contexts.append(context)
+                context_list.append(context)
             
-            context_manager_config = ContextManagerConfig(
-                contexts=contexts,
-                default_context=context_manager_data.get('default_context'),
-                auto_save_interval=context_manager_data.get('auto_save_interval', 30),
-                storage_dir=context_manager_data.get('storage_dir', 'contexts')
+            contexts_config = ContextsConfig(
+                enabled=True,
+                contexts=context_list,
+                state_dir=contexts_data.get('state_dir', './context_states'),
+                auto_save_enabled=contexts_data.get('auto_save_enabled', True),
+                auto_save_interval=contexts_data.get('auto_save_interval', 30)
             )
         
         return VoiceAIConfig(
@@ -531,7 +534,7 @@ class ConfigLoader:
             camera=camera_config,
             echo_filter=echo_filter_config,
             osc=osc_config,
-            context_manager=context_manager_config
+            contexts=contexts_config
         )
     
     @classmethod
@@ -567,11 +570,6 @@ class ConfigLoader:
             yaml.dump(example_config, f, default_flow_style=False, indent=2)
         
         print(f"✅ Example config created: {output_path}")
-
-# Convenience functions
-def load_config(config_path: Optional[str] = None, preset: Optional[str] = None) -> VoiceAIConfig:
-    """Load configuration from YAML file with optional preset overrides."""
-    return ConfigLoader.load(config_path, preset)
 
 # Convenience functions
 def load_config(config_path: Optional[str] = None, preset: Optional[str] = None) -> VoiceAIConfig:

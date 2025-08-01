@@ -23,11 +23,11 @@ from async_tts_module import AsyncTTSStreamer
 from config_loader import load_config, VoiceAIConfig
 from tools import create_tool_registry
 from character_system import create_character_manager, CharacterManager
-from context_manager import ContextManager
 from camera_capture import CameraCapture, CameraConfig as CameraCaptureConfig
 from thinking_sound import ThinkingSoundPlayer
 from websocket_ui_server import VoiceUIServer
 from echo_filter import EchoFilter
+from context_manager import ContextManager
 
 @dataclass
 class ConversationTurn:
@@ -185,29 +185,24 @@ class UnifiedVoiceConversation:
         
         self.character_manager: CharacterManager = create_character_manager(characters_config)
         
-        # Initialize context manager
-        self.context_manager: Optional[ContextManager] = None
-        if config.context_manager:
-            # Convert dataclass config to dict for ContextManager
-            context_manager_config = {
-                'contexts': [
-                    {
-                        'name': ctx.name,
-                        'description': ctx.description,
-                        'history_file': ctx.history_file,
-                        'metadata': ctx.metadata
-                    }
-                    for ctx in config.context_manager.contexts
-                ],
-                'default_context': config.context_manager.default_context,
-                'auto_save_interval': config.context_manager.auto_save_interval
-            }
+        # Initialize context manager if enabled
+        self.context_manager = None
+        if config.contexts and config.contexts.enabled:
+            contexts_list = [
+                {
+                    'name': ctx.name,
+                    'history_file': ctx.history_file,
+                    'description': ctx.description,
+                    'metadata': ctx.metadata
+                }
+                for ctx in config.contexts.contexts
+            ]
             self.context_manager = ContextManager(
-                context_manager_config,
-                storage_dir=config.context_manager.storage_dir,
-                history_parser=self._parse_history_file  # Pass the existing history parser
+                contexts_config=contexts_list,
+                state_dir=config.contexts.state_dir
             )
-            print(f"📚 Context Manager: Initialized with {len(config.context_manager.contexts)} contexts")
+            self.context_manager.auto_save_enabled = config.contexts.auto_save_enabled
+            self.context_manager.auto_save_interval = config.contexts.auto_save_interval
         
         # Initialize thinking sound player
         self.thinking_sound = ThinkingSoundPlayer(sample_rate=22050)
@@ -252,16 +247,16 @@ class UnifiedVoiceConversation:
         # Initialize conversation log file
         self._init_conversation_log()
         
-        # Load conversation history from context manager or file
+        # Load conversation history
         if self.context_manager:
-            # Use context manager's history
-            self.state.conversation_history = self.context_manager.get_current_history()
-            print(f"📚 Loaded history from context '{self.context_manager.current_context_name}' with {len(self.state.conversation_history)} turns")
-            
-            # Start auto-save
-            asyncio.create_task(self.context_manager.start_auto_save())
+            # Load original histories for all contexts
+            self.context_manager.load_original_histories(self._parse_history_file)
+            # Load saved states for all contexts
+            self.context_manager.load_all_states()
+            # Sync history from active context
+            self._sync_history_from_context()
         else:
-            # Load conversation history from file if specified
+            # Legacy: Load history directly if no context manager
             self._load_history_file()
         
         # Log any loaded history to the conversation log
@@ -400,6 +395,38 @@ class UnifiedVoiceConversation:
             self.logger.error(f"Failed to add image: {e}")
             return False
     
+    def _sync_history_from_context(self):
+        """Sync conversation history from active context."""
+        if not self.context_manager:
+            return
+        
+        context = self.context_manager.get_active_context()
+        if context:
+            # Clear current history and load from context
+            self.state.conversation_history = context.current_history.copy()
+            print(f"📋 Synced history from context '{context.config.name}': {len(self.state.conversation_history)} turns")
+    
+    def _sync_history_to_context(self):
+        """Sync conversation history to active context."""
+        if not self.context_manager:
+            return
+        
+        context = self.context_manager.get_active_context()
+        if context:
+            # Update context with current history
+            context.current_history = self.state.conversation_history.copy()
+            context.is_modified = True
+    
+    def _add_turn_to_history(self, turn: ConversationTurn):
+        """Add a turn to conversation history and sync with context."""
+        self.state.conversation_history.append(turn)
+        
+        # Sync with context if available
+        if self.context_manager:
+            context = self.context_manager.get_active_context()
+            if context:
+                context.add_turn(turn)
+    
     def _log_loaded_history(self):
         """Log any existing conversation history to the conversation log."""
         if not self.state.conversation_history:
@@ -472,62 +499,6 @@ class UnifiedVoiceConversation:
         
         if config.stt.keywords:
             print(f"🔤 Added {len(config.stt.keywords)} keywords to STT including: {list(keyword_dict.keys())[:5]}")
-    
-    def _add_turn_to_history(self, turn: ConversationTurn):
-        """Add a turn to conversation history and update context manager."""
-        self.state.conversation_history.append(turn)
-        
-        # Update context manager
-        if self.context_manager:
-            self.context_manager.add_turn_to_current(turn)
-    
-    def switch_context(self, context_name: str) -> bool:
-        """Switch to a different conversation context."""
-        if not self.context_manager:
-            print("❌ Context manager not available")
-            return False
-        
-        # Stop current conversation
-        asyncio.create_task(self.stop_conversation())
-        
-        # Switch context
-        if self.context_manager.switch_context(context_name):
-            # Load new context history
-            self.state.conversation_history = self.context_manager.get_current_history()
-            print(f"✅ Switched to context '{context_name}' with {len(self.state.conversation_history)} turns")
-            
-            # Log the switch
-            self._log_conversation_turn("system", f"[Context switched to: {context_name}]")
-            
-            return True
-        else:
-            print(f"❌ Failed to switch to context '{context_name}'")
-            return False
-    
-    def reset_current_context(self):
-        """Reset the current context to its base history."""
-        if not self.context_manager:
-            print("❌ Context manager not available")
-            return
-        
-        # Stop current conversation
-        asyncio.create_task(self.stop_conversation())
-        
-        # Reset context
-        self.context_manager.reset_current_context()
-        
-        # Reload history
-        self.state.conversation_history = self.context_manager.get_current_history()
-        print(f"✅ Reset context to base history with {len(self.state.conversation_history)} turns")
-        
-        # Log the reset
-        self._log_conversation_turn("system", f"[Context reset to base history]")
-    
-    def get_available_contexts(self) -> List[Dict[str, str]]:
-        """Get list of available contexts."""
-        if not self.context_manager:
-            return []
-        return self.context_manager.get_context_list()
     
     def _setup_logging(self):
         """Configure logging based on configuration."""
@@ -1028,6 +999,10 @@ class UnifiedVoiceConversation:
             # Start UI server
             asyncio.create_task(self.ui_server.start())
             
+            # Start context auto-save if enabled
+            if self.context_manager:
+                await self.context_manager.start_auto_save()
+            
             print("✅ Conversation system active!")
             print("💡 Tips:")
             print("   - Speak naturally and pause when done")
@@ -1080,6 +1055,11 @@ class UnifiedVoiceConversation:
         
         # Stop STT
         await self.stt.stop_listening()
+        
+        # Stop context auto-save and save final state
+        if self.context_manager:
+            await self.context_manager.stop_auto_save()
+            self.context_manager.save_all_states()
         
         print("✅ Conversation stopped")
     
@@ -1830,8 +1810,6 @@ class UnifiedVoiceConversation:
         except Exception as e:
             print(f"❌ Character LLM error: {e}")
             self.logger.error(f"Character LLM error: {e}")
-            import traceback
-            traceback.print_exc()
         finally:
             # Always stop thinking sound (no generation means force stop)
             await self.thinking_sound.stop()
@@ -2549,6 +2527,56 @@ class UnifiedVoiceConversation:
             import traceback
             traceback.print_exc()
     
+    async def switch_context(self, context_name: str) -> bool:
+        """Switch to a different conversation context."""
+        if not self.context_manager:
+            print("❌ Context manager not available")
+            return False
+        
+        # Switch context
+        if self.context_manager.switch_context(context_name):
+            # Sync history from new context
+            self._sync_history_from_context()
+            
+            # Log the context switch
+            switch_turn = ConversationTurn(
+                role="system",
+                content=f"[Switched to context: {context_name}]",
+                timestamp=datetime.now(),
+                status="completed"
+            )
+            self._log_conversation_turn("system", switch_turn.content)
+            
+            return True
+        return False
+    
+    async def reset_context(self):
+        """Reset current context to original history."""
+        if not self.context_manager:
+            print("❌ Context manager not available")
+            return
+        
+        # Reset the context
+        self.context_manager.reset_active_context()
+        
+        # Sync history from reset context
+        self._sync_history_from_context()
+        
+        # Log the reset
+        reset_turn = ConversationTurn(
+            role="system",
+            content="[Context reset to original history]",
+            timestamp=datetime.now(),
+            status="completed"
+        )
+        self._log_conversation_turn("system", reset_turn.content)
+    
+    def get_context_list(self) -> List[Dict[str, Any]]:
+        """Get list of available contexts."""
+        if not self.context_manager:
+            return []
+        return self.context_manager.get_context_list()
+    
     async def cleanup(self):
         """Clean up all resources."""
         # First stop the conversation to prevent new operations
@@ -2590,13 +2618,6 @@ class UnifiedVoiceConversation:
         except Exception as e:
             print(f"Error cleaning up UI server: {e}")
             
-        # Clean up context manager
-        if self.context_manager:
-            try:
-                await self.context_manager.stop_auto_save()
-            except Exception as e:
-                print(f"Error cleaning up context manager: {e}")
-        
         # Finally clean up thinking sound resources
         try:
             self.thinking_sound.cleanup()

@@ -130,86 +130,6 @@
             transform: none;
         }
         
-        /* Context management styles */
-        .context-section {
-            background: white;
-            border-radius: 12px;
-            padding: 20px;
-            margin-bottom: 20px;
-            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
-        }
-        
-        .context-header {
-            display: flex;
-            align-items: center;
-            justify-content: space-between;
-            margin-bottom: 15px;
-        }
-        
-        .context-info {
-            display: flex;
-            align-items: center;
-            gap: 15px;
-        }
-        
-        .context-selector {
-            display: flex;
-            gap: 10px;
-            align-items: center;
-        }
-        
-        .context-selector select {
-            padding: 8px 12px;
-            border: 1px solid #ddd;
-            border-radius: 4px;
-            font-size: 14px;
-            background: white;
-            cursor: pointer;
-        }
-        
-        .context-label {
-            font-weight: 600;
-            color: #666;
-        }
-        
-        .context-name {
-            font-size: 18px;
-            font-weight: 600;
-            color: #333;
-        }
-        
-        .context-description {
-            font-size: 14px;
-            color: #666;
-        }
-        
-        .context-actions {
-            display: flex;
-            gap: 10px;
-        }
-        
-        .context-stats {
-            display: flex;
-            gap: 20px;
-            font-size: 14px;
-            color: #666;
-        }
-        
-        .context-stat {
-            display: flex;
-            align-items: center;
-            gap: 5px;
-        }
-        
-        button.context-reset {
-            background: #FF5722;
-            color: white;
-        }
-        
-        button.context-reset:hover {
-            background: #F44336;
-        }
-        
         button.trigger-model {
             background: #9C27B0;
         }
@@ -466,39 +386,6 @@
 <body>
     <h1>🎙️ Voice Conversation Control Panel</h1>
     
-    <!-- Context Management Section -->
-    <div class="context-section" id="context-section">
-        <div class="context-header">
-            <div class="context-info">
-                <div>
-                    <div class="context-name" id="current-context-name">Loading...</div>
-                    <div class="context-description" id="current-context-desc"></div>
-                </div>
-            </div>
-            <div class="context-actions">
-                <div class="context-selector">
-                    <span class="context-label">Switch Context:</span>
-                    <select id="context-select" onchange="switchContext(this.value)">
-                        <option value="">Select context...</option>
-                    </select>
-                </div>
-                <button class="context-reset" onclick="resetContext()">
-                    <span>🔄</span> Reset to Base
-                </button>
-            </div>
-        </div>
-        <div class="context-stats">
-            <div class="context-stat">
-                <span>📝</span>
-                <span id="context-turn-count">0 turns</span>
-            </div>
-            <div class="context-stat">
-                <span>💾</span>
-                <span id="context-last-saved">Not saved</span>
-            </div>
-        </div>
-    </div>
-    
     <div class="status-bar">
         <div class="connection-status">
             <div class="connection-dot" id="connection-dot"></div>
@@ -542,6 +429,16 @@
     
     <div class="controls" style="margin-top: 10px;" id="trigger-buttons">
         <!-- Trigger buttons will be dynamically added here -->
+    </div>
+    
+    <div class="controls" style="margin-top: 10px;">
+        <label style="font-weight: 600; margin-right: 10px;">Context:</label>
+        <select id="context-selector" style="padding: 8px; border: 1px solid #ddd; border-radius: 4px; margin-right: 10px;">
+            <!-- Context options will be dynamically added here -->
+        </select>
+        <button onclick="resetContext()" style="padding: 8px 16px; margin-right: 10px;">
+            <span>🔄</span> Reset to Original
+        </button>
     </div>
     
     <div class="controls" style="margin-top: 10px;">
@@ -671,10 +568,10 @@
                     updateContextsList(msg.data);
                     break;
                 case 'context_switched':
-                    handleContextSwitch(msg.data);
+                    updateActiveContext(msg.data);
                     break;
                 case 'context_reset':
-                    handleContextReset(msg.data);
+                    showContextReset();
                     break;
             }
         }
@@ -1015,15 +912,6 @@
                 directorEnabled = data.director_enabled;
                 updateDirectorButton();
             }
-            
-            // Update context information
-            if (data.current_context !== undefined) {
-                updateContextDisplay(data.current_context);
-            }
-            
-            if (data.available_contexts !== undefined) {
-                populateContextSelector(data.available_contexts);
-            }
         }
         
         function editMessage(msgId) {
@@ -1075,13 +963,15 @@
         };
         
         window.deleteMessage = function(msgId) {
-            if (ws && ws.readyState === WebSocket.OPEN) {
-                ws.send(JSON.stringify({
-                    type: 'delete_message',
-                    data: {
-                        message_id: msgId
-                    }
-                }));
+            if (confirm('Are you sure you want to delete this message?')) {
+                if (ws && ws.readyState === WebSocket.OPEN) {
+                    ws.send(JSON.stringify({
+                        type: 'delete_message',
+                        data: {
+                            message_id: msgId
+                        }
+                    }));
+                }
             }
         };
         
@@ -1219,135 +1109,71 @@
             transcript.scrollTop = transcript.scrollHeight;
         }
         
-        // Add enter key handler for text input
-        // Context Management Functions
-        function updateContextDisplay(contextName) {
-            const nameEl = document.getElementById('current-context-name');
-            const descEl = document.getElementById('current-context-desc');
+        function updateContextsList(data) {
+            const selector = document.getElementById('context-selector');
+            selector.innerHTML = '';
             
-            if (nameEl) {
-                nameEl.textContent = contextName || 'No context';
-            }
-            
-            // Update description from available contexts if we have them
-            const select = document.getElementById('context-select');
-            if (select) {
-                const option = Array.from(select.options).find(opt => opt.value === contextName);
-                if (option && option.dataset.description && descEl) {
-                    descEl.textContent = option.dataset.description;
-                }
-            }
-        }
-        
-        function populateContextSelector(contexts) {
-            const select = document.getElementById('context-select');
-            if (!select) return;
-            
-            // Clear existing options except the first one
-            while (select.options.length > 1) {
-                select.remove(1);
-            }
-            
-            // Add context options
-            contexts.forEach(context => {
+            data.contexts.forEach(context => {
                 const option = document.createElement('option');
                 option.value = context.name;
-                option.textContent = context.name;
-                option.dataset.description = context.description;
-                
-                if (context.is_current) {
+                option.textContent = `${context.name}${context.description ? ` - ${context.description}` : ''}`;
+                if (context.is_active) {
                     option.selected = true;
-                    updateContextDisplay(context.name);
-                    updateContextStats(context.turn_count);
                 }
-                
-                select.appendChild(option);
+                selector.appendChild(option);
             });
-        }
-        
-        function updateContextStats(turnCount) {
-            const turnEl = document.getElementById('context-turn-count');
-            if (turnEl) {
-                turnEl.textContent = `${turnCount || 0} turns`;
-            }
-        }
-        
-        function updateContextsList(data) {
-            if (data.contexts) {
-                populateContextSelector(data.contexts);
-            }
-        }
-        
-        function handleContextSwitch(data) {
-            if (data.context_name) {
-                updateContextDisplay(data.context_name);
-                showSuccess(`Switched to context: ${data.context_name}`);
-            }
-        }
-        
-        function handleContextReset(data) {
-            showSuccess('Context reset to base history');
-            // Request updated history
-            requestConversationHistory();
+            
+            // Add event listener for context switching
+            selector.onchange = (e) => {
+                switchContext(e.target.value);
+            };
         }
         
         function switchContext(contextName) {
-            if (!contextName || !ws || ws.readyState !== WebSocket.OPEN) return;
-            
-            ws.send(JSON.stringify({
-                type: 'switch_context',
-                data: { context_name: contextName }
-            }));
+            if (ws && ws.readyState === WebSocket.OPEN) {
+                ws.send(JSON.stringify({
+                    type: 'switch_context',
+                    context_name: contextName
+                }));
+            }
         }
         
         function resetContext() {
-            if (!ws || ws.readyState !== WebSocket.OPEN) return;
-            
-            ws.send(JSON.stringify({
-                type: 'reset_context'
-            }));
-        }
-        
-        function requestContextList() {
-            if (ws && ws.readyState === WebSocket.OPEN) {
-                ws.send(JSON.stringify({ type: 'get_contexts' }));
+            if (confirm('Reset context to original history? This will clear all current conversation.')) {
+                if (ws && ws.readyState === WebSocket.OPEN) {
+                    ws.send(JSON.stringify({
+                        type: 'reset_context'
+                    }));
+                }
             }
         }
         
-        function requestConversationHistory() {
-            if (ws && ws.readyState === WebSocket.OPEN) {
-                ws.send(JSON.stringify({ type: 'sync_request' }));
-            }
+        function updateActiveContext(data) {
+            // Update selector if needed
+            const selector = document.getElementById('context-selector');
+            selector.value = data.context_name;
+            
+            // Show feedback
+            showSystemMessage(`Switched to context: ${data.context_name}`);
         }
         
-        function showSuccess(message) {
-            // You can implement a toast notification here
-            console.log('✅', message);
-            
-            // Simple notification
-            const notification = document.createElement('div');
-            notification.className = 'notification success';
-            notification.textContent = message;
-            notification.style.cssText = `
-                position: fixed;
-                top: 20px;
-                right: 20px;
-                background: #4CAF50;
-                color: white;
-                padding: 12px 20px;
-                border-radius: 4px;
-                box-shadow: 0 2px 5px rgba(0,0,0,0.2);
-                z-index: 1000;
-                animation: slideIn 0.3s ease;
-            `;
-            document.body.appendChild(notification);
-            
-            setTimeout(() => {
-                notification.style.animation = 'fadeOut 0.3s ease';
-                setTimeout(() => notification.remove(), 300);
-            }, 3000);
+        function showContextReset() {
+            showSystemMessage('Context reset to original history');
         }
         
+        function showSystemMessage(message) {
+            const transcript = document.getElementById('transcript');
+            const msgDiv = document.createElement('div');
+            msgDiv.className = 'message system';
+            msgDiv.style.background = '#E1F5FE';
+            msgDiv.style.textAlign = 'center';
+            msgDiv.style.fontStyle = 'italic';
+            msgDiv.innerHTML = `<div class="message-content">${message}</div>`;
+            transcript.appendChild(msgDiv);
+            transcript.scrollTop = transcript.scrollHeight;
+        }
+        
+        // Add enter key handler for text input
         window.addEventListener('load', () => {
             const textInput = document.getElementById('text-input');
             if (textInput) {
@@ -1358,13 +1184,6 @@
                     }
                 });
             }
-            
-            // Request context list on load
-            setTimeout(() => {
-                if (ws && ws.readyState === WebSocket.OPEN) {
-                    requestContextList();
-                }
-            }, 1000);
         });
     </script>
 </body>
