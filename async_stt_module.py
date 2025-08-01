@@ -25,6 +25,16 @@ except ImportError:
     print("❌ TitaNet voice fingerprinting not available (requires nemo_toolkit)")
     print("💡 Install with: pip install 'nemo_toolkit[asr]'")
 
+try:
+    from improved_echo_cancellation import SimpleEchoCancellationProcessor
+    from debug_echo_cancellation import DebugEchoCancellationProcessor
+    ECHO_CANCELLATION_AVAILABLE = True
+    print("✅ Echo cancellation available")
+except ImportError:
+    ECHO_CANCELLATION_AVAILABLE = False
+    print("❌ Echo cancellation not available")
+    print("💡 Install with: pip install speexdsp")
+
 class STTEventType(Enum):
     """Types of STT events."""
     UTTERANCE_COMPLETE = "utterance_complete"
@@ -127,6 +137,28 @@ class AsyncSTTStreamer:
         # Keepalive settings
         self.keepalive_task = None
         self.keepalive_interval = 10.0  # seconds
+        
+        # Echo cancellation (optional)
+        self.echo_canceller = None
+        if ECHO_CANCELLATION_AVAILABLE and hasattr(config, 'enable_echo_cancellation') and config.enable_echo_cancellation:
+            try:
+                # Get AEC parameters from config or use defaults
+                frame_size = getattr(config, 'aec_frame_size', 256)
+                filter_length = getattr(config, 'aec_filter_length', 2048)
+                delay_ms = getattr(config, 'aec_delay_ms', 100)
+                
+                # Use debug version for now to understand timing issues
+                self.echo_canceller = DebugEchoCancellationProcessor(
+                    frame_size=frame_size,
+                    filter_length=filter_length,
+                    sample_rate=config.sample_rate,
+                    reference_delay_ms=delay_ms,
+                    debug_level=1  # Basic debug info
+                )
+                print(f"🔊 Echo cancellation enabled")
+            except Exception as e:
+                print(f"⚠️  Echo cancellation failed to initialize: {e}")
+                self.echo_canceller = None
     
     def on(self, event_type: STTEventType, callback: Callable):
         """Register a callback for an event type."""
@@ -496,6 +528,7 @@ class AsyncSTTStreamer:
         """Main audio streaming loop with proper async handling."""
         print("🎵 Starting audio streaming loop...")
         chunk_count = 0
+        last_stats_time = time.time()
         
         # Track stream start time for voice fingerprinting synchronization
         self.stream_start_time = time.time()
@@ -532,11 +565,22 @@ class AsyncSTTStreamer:
                         print(f"❌ Failed to read audio data: {read_error}")
                         break
                     
+                    # Apply echo cancellation if enabled
+                    processed_data = data
+                    if self.echo_canceller:
+                        try:
+                            processed_data = self.echo_canceller.process(data)
+                        except Exception as aec_error:
+                            # Don't break streaming if AEC fails
+                            if chunk_count % 1000 == 0:  # Only log occasionally
+                                print(f"⚠️  Echo cancellation error: {aec_error}")
+                            processed_data = data  # Fall back to original
+                    
                     # Convert audio data to numpy array for voice fingerprinting
                     if self.voice_fingerprinter:
                         try:
                             # Convert bytes to int16 numpy array, then to float32
-                            audio_np = np.frombuffer(data, dtype=np.int16).astype(np.float32) / 32768.0
+                            audio_np = np.frombuffer(processed_data, dtype=np.int16).astype(np.float32) / 32768.0
                             # Feed to voice fingerprinter with stream-relative timestamp
                             stream_relative_time = time.time() - self.stream_start_time
                             self.voice_fingerprinter.add_audio_chunk(audio_np, stream_relative_time)
@@ -547,12 +591,19 @@ class AsyncSTTStreamer:
                     
                     # Try to send data to Deepgram
                     try:
-                        self.connection.send(data)
+                        self.connection.send(processed_data)
                         chunk_count += 1
                         
                         # Less frequent debug output
                         if chunk_count % 100 == 0:
                             print(f"📊 Sent {chunk_count} audio chunks")
+                            
+                        # Print echo cancellation stats every 10 seconds
+                        if self.echo_canceller and hasattr(self.echo_canceller, 'print_stats'):
+                            current_time = time.time()
+                            if current_time - last_stats_time > 10:
+                                self.echo_canceller.print_stats()
+                                last_stats_time = current_time
                             
                     except Exception as send_error:
                         print(f"❌ Failed to send audio data to Deepgram: {send_error}")
@@ -767,6 +818,11 @@ class AsyncSTTStreamer:
             self._schedule_event(STTEventType.CONNECTION_CLOSED, {
                 "message": "Deepgram connection closed by server"
             })
+    
+    def add_reference_audio(self, audio_data: bytes):
+        """Add reference audio for echo cancellation (TTS output)."""
+        if self.echo_canceller:
+            self.echo_canceller.add_reference_audio(audio_data)
     
     def _setup_speaker_identification(self):
         """Setup speaker identification if enabled."""

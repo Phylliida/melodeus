@@ -70,6 +70,12 @@ class ConversationConfig:
     director_config: Optional[Dict[str, Any]] = None
     director_enabled: bool = False  # Default to disabled director
     
+    # Echo cancellation settings
+    enable_echo_cancellation: bool = False
+    aec_frame_size: int = 256  # Must be power of 2
+    aec_filter_length: int = 2048
+    aec_delay_ms: int = 100  # Reference delay in milliseconds
+    
     def __post_init__(self):
         if self.prefill_participants is None:
             self.prefill_participants = ['H', 'Claude']
@@ -417,6 +423,10 @@ class ConfigLoader:
             characters_config=characters_config,
             director_config=director_config,
             director_enabled=conversation_config_data.get('director_enabled', False),
+            enable_echo_cancellation=conversation_config_data.get('enable_echo_cancellation', False),
+            aec_frame_size=conversation_config_data.get('aec_frame_size', 256),
+            aec_filter_length=conversation_config_data.get('aec_filter_length', 2048),
+            aec_delay_ms=conversation_config_data.get('aec_delay_ms', 100),
         )
         
         # Create other configurations

@@ -20,6 +20,9 @@ class ThinkingSoundPlayer:
         self._current_generation = 0
         self._lock = threading.Lock()
         
+        # Echo cancellation callback
+        self.echo_cancellation_callback = None
+        
         # Generate a soft, pleasant thinking sound
         self.thinking_sound = self._generate_thinking_sound()
         

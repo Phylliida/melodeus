@@ -92,10 +92,28 @@ class UnifiedVoiceConversation:
         
         # Initialize STT system with participant names as keywords
         self._setup_stt_keywords(config)
+        
+        # Add echo cancellation settings to STT config if enabled
+        if config.conversation.enable_echo_cancellation:
+            config.stt.enable_echo_cancellation = True
+            config.stt.aec_frame_size = config.conversation.aec_frame_size
+            config.stt.aec_filter_length = config.conversation.aec_filter_length
+            config.stt.aec_delay_ms = config.conversation.aec_delay_ms
+        
         self.stt = AsyncSTTStreamer(config.stt, config.speakers)
         
         # Initialize TTS system
         self.tts = AsyncTTSStreamer(config.tts)
+        
+        # Connect TTS to STT for echo cancellation if enabled
+        if config.conversation.enable_echo_cancellation:
+            # Check if echo cancellation is actually available in STT
+            if hasattr(self.stt, 'echo_canceller') and self.stt.echo_canceller is not None:
+                # Set callback for TTS to send reference audio to STT
+                self.tts.set_echo_cancellation_callback(self.stt.add_reference_audio)
+                print("🔊 Echo cancellation connected: TTS -> STT")
+            else:
+                print("⚠️  Echo cancellation requested but not available - please install speexdsp")
         
         # Initialize tool registry
         self.tool_registry = create_tool_registry(config.conversation.tools_config)

@@ -14,3 +14,4 @@ openai
 anthropic
 scipy
 python-osc>=1.8.0
+speexdsp>=0.1.2

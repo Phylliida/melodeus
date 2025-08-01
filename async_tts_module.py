@@ -127,6 +127,9 @@ class AsyncTTSStreamer:
         self._current_voice_key = None  # Key of current voice
         self._current_voice_task = None  # Task handling current connection
         
+        # Echo cancellation reference callback
+        self.echo_cancellation_callback = None  # Callback: def(audio_data: bytes)
+        
         # Whisper will be initialized per session
     
     def _fuzzy_find_position(self, whisper_text: str, tts_text: str) -> int:
@@ -971,6 +974,16 @@ class AsyncTTSStreamer:
         finally:
             await self._cleanup_stream()
     
+    def set_echo_cancellation_callback(self, callback):
+        """Set callback to receive audio data for echo cancellation.
+        
+        Args:
+            callback: Function that takes audio_data (bytes) as parameter
+        """
+        self.echo_cancellation_callback = callback
+        if callback:
+            print("🔊 Echo cancellation reference callback registered")
+    
     async def stop(self):
         """Stop current TTS playback immediately and wait for complete shutdown."""
         print("🛑 TTS stop requested")
@@ -1313,6 +1326,15 @@ class AsyncTTSStreamer:
                                     # Track that we've played audio
                                     if offset == 0:  # First segment of this chunk
                                         self._chunks_played += 1
+                                    
+                                    # Send to echo cancellation if callback is set
+                                    if self.echo_cancellation_callback:
+                                        try:
+                                            self.echo_cancellation_callback(audio_segment)
+                                        except Exception as ec_error:
+                                            # Don't break playback if echo cancellation fails
+                                            if chunk_samples % 100 == 0:  # Log occasionally
+                                                print(f"⚠️ Echo cancellation callback error: {ec_error}")
                             except Exception as e:
                                 # Stream was closed or error occurred
                                 if "Stream not open" not in str(e) and "-9986" not in str(e):
