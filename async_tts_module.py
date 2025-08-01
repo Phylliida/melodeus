@@ -47,6 +47,8 @@ class TTSConfig:
     emotive_speed: float = 1.0
     emotive_stability: float = 0.5
     emotive_similarity_boost: float = 0.8
+    # Audio output device
+    output_device_index: Optional[int] = None  # None = default device, or specify device index
 
 @dataclass
 class ToolCall:
@@ -1184,13 +1186,20 @@ class AsyncTTSStreamer:
             
             # Open new stream
             try:
-                self.stream = self.p.open(
-                    format=pyaudio.paInt16,
-                    channels=1,
-                    rate=self.config.sample_rate,
-                    output=True,
-                    frames_per_buffer=self.config.buffer_size
-                )
+                stream_kwargs = {
+                    'format': pyaudio.paInt16,
+                    'channels': 1,
+                    'rate': self.config.sample_rate,
+                    'output': True,
+                    'frames_per_buffer': self.config.buffer_size
+                }
+                
+                # Add output device index if specified
+                if self.config.output_device_index is not None:
+                    stream_kwargs['output_device_index'] = self.config.output_device_index
+                    print(f"🔊 Using output device index: {self.config.output_device_index}")
+                
+                self.stream = self.p.open(**stream_kwargs)
                 
                 self.is_playing = True
                 self.playback_thread = threading.Thread(target=self._audio_playback_worker)
@@ -1615,6 +1624,27 @@ async def main():
         print("\n👋 Interrupted by user")
     finally:
         await tts.cleanup()
+
+def list_audio_output_devices():
+    """List all available audio output devices with their indices."""
+    p = pyaudio.PyAudio()
+    print("\n🔊 Available Audio Output Devices:")
+    print("=" * 50)
+    
+    output_devices = []
+    for i in range(p.get_device_count()):
+        info = p.get_device_info_by_index(i)
+        if info['maxOutputChannels'] > 0:  # Only show output devices
+            output_devices.append((i, info))
+            default_marker = " (DEFAULT)" if i == p.get_default_output_device_info()['index'] else ""
+            print(f"Index {i}: {info['name']}{default_marker}")
+            print(f"   Channels: {info['maxOutputChannels']}")
+            print(f"   Sample Rate: {info['defaultSampleRate']}")
+            print()
+    
+    p.terminate()
+    print(f"Total output devices found: {len(output_devices)}")
+    return output_devices
 
 if __name__ == "__main__":
     asyncio.run(main()) 

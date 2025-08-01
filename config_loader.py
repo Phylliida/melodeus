@@ -136,6 +136,15 @@ class DevelopmentConfig:
     mock_apis: bool = False
 
 @dataclass
+class OSCConfig:
+    """OSC (Open Sound Control) configuration."""
+    enabled: bool = False
+    host: str = "127.0.0.1"
+    port: int = 7000
+    speaking_start_address: str = "/character/speaking/start"
+    speaking_stop_address: str = "/character/speaking/stop"
+
+@dataclass
 class VoiceAIConfig:
     """Complete voice AI system configuration."""
     conversation: ConversationConfig
@@ -147,6 +156,7 @@ class VoiceAIConfig:
     speakers: SpeakersConfig = field(default_factory=SpeakersConfig)
     camera: Optional[CameraConfig] = None
     echo_filter: Optional[EchoFilterConfig] = None
+    osc: Optional[OSCConfig] = None
 
 def deep_merge(base: Dict[str, Any], override: Dict[str, Any]) -> Dict[str, Any]:
     """
@@ -347,7 +357,9 @@ class ConfigLoader:
             emotive_voice_id=voice_config.get('emotive_id'),
             emotive_speed=tts_config_data.get('emotive_speed', 1.0),
             emotive_stability=tts_config_data.get('emotive_stability', 0.5),
-            emotive_similarity_boost=tts_config_data.get('emotive_similarity_boost', 0.8)
+            emotive_similarity_boost=tts_config_data.get('emotive_similarity_boost', 0.8),
+            # Audio output device
+            output_device_index=tts_config_data.get('output_device_index')
         )
         
         # Create conversation configuration
@@ -455,6 +467,18 @@ class ConfigLoader:
             recognition=recognition_config
         )
         
+        # Create OSC configuration
+        osc_data = config_data.get('osc', {})
+        osc_config = None
+        if osc_data.get('enabled', False):
+            osc_config = OSCConfig(
+                enabled=True,
+                host=osc_data.get('host', '127.0.0.1'),
+                port=osc_data.get('port', 7000),
+                speaking_start_address=osc_data.get('speaking_start_address', '/character/speaking/start'),
+                speaking_stop_address=osc_data.get('speaking_stop_address', '/character/speaking/stop')
+            )
+        
         return VoiceAIConfig(
             conversation=conversation_config,
             stt=stt_config,
@@ -464,7 +488,8 @@ class ConfigLoader:
             development=development_config,
             speakers=speakers_config,
             camera=camera_config,
-            echo_filter=echo_filter_config
+            echo_filter=echo_filter_config,
+            osc=osc_config
         )
     
     @classmethod

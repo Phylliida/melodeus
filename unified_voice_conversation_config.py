@@ -99,6 +99,17 @@ class UnifiedVoiceConversation:
         # Initialize tool registry
         self.tool_registry = create_tool_registry(config.conversation.tools_config)
         
+        # Initialize OSC client if enabled
+        self.osc_client = None
+        if config.osc and config.osc.enabled:
+            try:
+                from pythonosc import udp_client
+                self.osc_client = udp_client.SimpleUDPClient(config.osc.host, config.osc.port)
+                print(f"📡 OSC client initialized: {config.osc.host}:{config.osc.port}")
+            except Exception as e:
+                print(f"❌ Failed to initialize OSC client: {e}")
+                self.osc_client = None
+        
         # Initialize camera if enabled
         self.camera: Optional[CameraCapture] = None
         if config.camera and config.camera.enabled:
@@ -1453,6 +1464,9 @@ class UnifiedVoiceConversation:
             
             print(f"🎭 {next_speaker} is responding...")
             
+            # Send OSC message for character speaking start
+            self._send_osc_speaking_start(next_speaker)
+            
             # Broadcast current speaker
             if hasattr(self, 'ui_server'):
                 await self.ui_server.broadcast_speaker_status(
@@ -1714,6 +1728,9 @@ class UnifiedVoiceConversation:
             
             # Clear current speaker when done
             async with self.state.speaker_lock:
+                # Send OSC stop message before clearing current speaker
+                if self.state.current_speaker:
+                    self._send_osc_speaking_stop(self.state.current_speaker)
                 self.state.current_speaker = None
             
             # Broadcast that speaking/processing has ended
@@ -2339,6 +2356,30 @@ class UnifiedVoiceConversation:
                 print("🛑 Speech was interrupted")
         finally:
             self.state.is_speaking = False
+    
+    def _send_osc_speaking_start(self, character_name: str):
+        """Send OSC message when character starts speaking."""
+        if self.osc_client and self.config.osc:
+            try:
+                self.osc_client.send_message(
+                    self.config.osc.speaking_start_address, 
+                    character_name
+                )
+                print(f"📡 OSC: {character_name} started speaking")
+            except Exception as e:
+                print(f"❌ OSC send error: {e}")
+    
+    def _send_osc_speaking_stop(self, character_name: str):
+        """Send OSC message when character stops speaking."""
+        if self.osc_client and self.config.osc:
+            try:
+                self.osc_client.send_message(
+                    self.config.osc.speaking_stop_address, 
+                    character_name
+                )
+                print(f"📡 OSC: {character_name} stopped speaking")
+            except Exception as e:
+                print(f"❌ OSC send error: {e}")
     
     async def cleanup(self):
         """Clean up all resources."""

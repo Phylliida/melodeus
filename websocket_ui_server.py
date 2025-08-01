@@ -650,9 +650,7 @@ class VoiceUIServer:
         await self.broadcast_transcription(
             speaker=speaker_name,
             text=text,
-            is_final=True,
-            is_complete=True,
-            session_id=f"text_input_{int(time.time() * 1000)}"
+            is_final=True
         )
     
     async def handle_toggle_interruptions(self, enabled: bool):
