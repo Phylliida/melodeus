@@ -258,10 +258,33 @@ class CustomTool(Tool):
             )
 
 class LightColorTool(Tool):
-    """Wave tool for generating audio."""
+    """Tool for changing light colors via OSC."""
     
     async def execute(self, content: str, context: Dict[str, Any] = None) -> ToolResult:
-        """Generate audio."""
+        """Change light color and send OSC message."""
+        # Parse the color from content
+        color = content.strip()
+        
+        # Get current speaker from context
+        current_speaker = context.get('current_speaker') if context else None
+        send_osc_color_change = context.get('send_osc_color_change') if context else None
+        
+        if not current_speaker:
+            print("⚠️ LightColorTool: No current speaker available")
+            return ToolResult(should_interrupt=False, content=None)
+        
+        if not send_osc_color_change:
+            print("⚠️ LightColorTool: OSC color change function not available")
+            return ToolResult(should_interrupt=False, content=None)
+        
+        # Send OSC message with character name and color
+        try:
+            send_osc_color_change(current_speaker, color)
+            print(f"🎨 LightColorTool: Sent color change for {current_speaker} to {color}")
+        except Exception as e:
+            print(f"❌ LightColorTool: Error sending OSC message: {e}")
+        
+        # Don't interrupt the conversation
         return ToolResult(should_interrupt=False, content=None)
     
 

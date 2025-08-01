@@ -32,9 +32,18 @@ class VoiceUIServer:
         # Track current state for new clients
         interruptions_enabled = False
         director_enabled = False
-        if conversation and hasattr(conversation, 'config'):
-            interruptions_enabled = conversation.config.conversation.interruptions_enabled
-            director_enabled = conversation.config.conversation.director_enabled
+        current_context = None
+        available_contexts = []
+        
+        if conversation:
+            if hasattr(conversation, 'config'):
+                interruptions_enabled = conversation.config.conversation.interruptions_enabled
+                director_enabled = conversation.config.conversation.director_enabled
+            
+            # Get context information
+            if hasattr(conversation, 'context_manager') and conversation.context_manager:
+                current_context = conversation.context_manager.current_context_name
+                available_contexts = conversation.get_available_contexts()
             
         self.current_state = {
             "current_speaker": None,
@@ -45,7 +54,9 @@ class VoiceUIServer:
             "stt_active": True,
             "conversation_active": False,
             "interruptions_enabled": interruptions_enabled,
-            "director_enabled": director_enabled
+            "director_enabled": director_enabled,
+            "current_context": current_context,
+            "available_contexts": available_contexts
         }
         
     async def start(self):
@@ -151,6 +162,19 @@ class VoiceUIServer:
                 # Toggle director on/off
                 enabled = data.get("enabled", False)
                 await self.handle_toggle_director(enabled)
+                
+            elif msg_type == "get_contexts":
+                # Get list of available contexts
+                await self.handle_get_contexts(websocket)
+                
+            elif msg_type == "switch_context":
+                # Switch to a different context
+                context_name = data.get("context_name")
+                await self.handle_switch_context(websocket, context_name)
+                
+            elif msg_type == "reset_context":
+                # Reset current context to base history
+                await self.handle_reset_context(websocket)
                 
             else:
                 await self.send_error(websocket, f"Unknown message type: {msg_type}")
@@ -698,6 +722,171 @@ class VoiceUIServer:
             type="state_sync",
             data=self.current_state
         ))
+    
+    async def handle_get_contexts(self, websocket):
+        """Handle request for list of available contexts."""
+        contexts = []
+        
+        if self.conversation and hasattr(self.conversation, 'get_available_contexts'):
+            contexts = self.conversation.get_available_contexts()
+        
+        # Send contexts list to requesting client
+        await self.send_to_client(websocket, UIMessage(
+            type="contexts_list",
+            data={"contexts": contexts}
+        ))
+        
+        print(f"📚 Sent {len(contexts)} contexts to client")
+    
+    async def handle_switch_context(self, websocket, context_name: str):
+        """Handle context switch request."""
+        if not context_name:
+            await self.send_error(websocket, "Context name required")
+            return
+        
+        if not self.conversation or not hasattr(self.conversation, 'switch_context'):
+            await self.send_error(websocket, "Context management not available")
+            return
+        
+        print(f"🔄 Switching to context: {context_name}")
+        
+        # Perform the switch
+        success = self.conversation.switch_context(context_name)
+        
+        if success:
+            # Update our state
+            self.current_state["current_context"] = context_name
+            
+            # Send updated conversation history to all clients
+            for client in self.clients:
+                await self.send_conversation_history(client)
+            
+            # Broadcast context switch notification
+            await self.broadcast(UIMessage(
+                type="context_switched",
+                data={"context_name": context_name}
+            ))
+            
+            # Send state sync to update UI
+            await self.broadcast(UIMessage(
+                type="state_sync",
+                data=self.current_state
+            ))
+            
+            print(f"✅ Successfully switched to context: {context_name}")
+        else:
+            await self.send_error(websocket, f"Failed to switch to context: {context_name}")
+    
+    async def handle_reset_context(self, websocket):
+        """Handle context reset request."""
+        if not self.conversation or not hasattr(self.conversation, 'reset_current_context'):
+            await self.send_error(websocket, "Context management not available")
+            return
+        
+        print("🔄 Resetting current context to base history")
+        
+        # Perform the reset
+        self.conversation.reset_current_context()
+        
+        # Send updated conversation history to all clients
+        for client in self.clients:
+            await self.send_conversation_history(client)
+        
+        # Broadcast context reset notification
+        await self.broadcast(UIMessage(
+            type="context_reset",
+            data={}
+        ))
+        
+        print("✅ Context reset to base history")
+
+
+            type="director_toggled",
+            data={"enabled": enabled}
+        ))
+        
+        # Also send a state sync to update UI
+        await self.broadcast(UIMessage(
+            type="state_sync",
+            data=self.current_state
+        ))
+    
+    async def handle_get_contexts(self, websocket):
+        """Handle request for list of available contexts."""
+        contexts = []
+        
+        if self.conversation and hasattr(self.conversation, 'get_available_contexts'):
+            contexts = self.conversation.get_available_contexts()
+        
+        # Send contexts list to requesting client
+        await self.send_to_client(websocket, UIMessage(
+            type="contexts_list",
+            data={"contexts": contexts}
+        ))
+        
+        print(f"📚 Sent {len(contexts)} contexts to client")
+    
+    async def handle_switch_context(self, websocket, context_name: str):
+        """Handle context switch request."""
+        if not context_name:
+            await self.send_error(websocket, "Context name required")
+            return
+        
+        if not self.conversation or not hasattr(self.conversation, 'switch_context'):
+            await self.send_error(websocket, "Context management not available")
+            return
+        
+        print(f"🔄 Switching to context: {context_name}")
+        
+        # Perform the switch
+        success = self.conversation.switch_context(context_name)
+        
+        if success:
+            # Update our state
+            self.current_state["current_context"] = context_name
+            
+            # Send updated conversation history to all clients
+            for client in self.clients:
+                await self.send_conversation_history(client)
+            
+            # Broadcast context switch notification
+            await self.broadcast(UIMessage(
+                type="context_switched",
+                data={"context_name": context_name}
+            ))
+            
+            # Send state sync to update UI
+            await self.broadcast(UIMessage(
+                type="state_sync",
+                data=self.current_state
+            ))
+            
+            print(f"✅ Successfully switched to context: {context_name}")
+        else:
+            await self.send_error(websocket, f"Failed to switch to context: {context_name}")
+    
+    async def handle_reset_context(self, websocket):
+        """Handle context reset request."""
+        if not self.conversation or not hasattr(self.conversation, 'reset_current_context'):
+            await self.send_error(websocket, "Context management not available")
+            return
+        
+        print("🔄 Resetting current context to base history")
+        
+        # Perform the reset
+        self.conversation.reset_current_context()
+        
+        # Send updated conversation history to all clients
+        for client in self.clients:
+            await self.send_conversation_history(client)
+        
+        # Broadcast context reset notification
+        await self.broadcast(UIMessage(
+            type="context_reset",
+            data={}
+        ))
+        
+        print("✅ Context reset to base history")
 
 
 # Example usage

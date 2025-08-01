@@ -23,6 +23,7 @@ from async_tts_module import AsyncTTSStreamer
 from config_loader import load_config, VoiceAIConfig
 from tools import create_tool_registry
 from character_system import create_character_manager, CharacterManager
+from context_manager import ContextManager
 from camera_capture import CameraCapture, CameraConfig as CameraCaptureConfig
 from thinking_sound import ThinkingSoundPlayer
 from websocket_ui_server import VoiceUIServer
@@ -101,14 +102,30 @@ class UnifiedVoiceConversation:
         
         # Initialize OSC client if enabled
         self.osc_client = None
-        if config.osc and config.osc.enabled:
-            try:
-                from pythonosc import udp_client
-                self.osc_client = udp_client.SimpleUDPClient(config.osc.host, config.osc.port)
-                print(f"📡 OSC client initialized: {config.osc.host}:{config.osc.port}")
-            except Exception as e:
-                print(f"❌ Failed to initialize OSC client: {e}")
-                self.osc_client = None
+        if config.osc:
+            print(f"📡 OSC config found - enabled: {config.osc.enabled}")
+            if config.osc.enabled:
+                try:
+                    from pythonosc import udp_client
+                    self.osc_client = udp_client.SimpleUDPClient(config.osc.host, config.osc.port)
+                    print(f"✅ OSC client initialized successfully!")
+                    print(f"   Host: {config.osc.host}")
+                    print(f"   Port: {config.osc.port}")
+                    print(f"   Start address: {config.osc.speaking_start_address}")
+                    print(f"   Stop address: {config.osc.speaking_stop_address}")
+                except ImportError as e:
+                    print(f"❌ OSC library not installed: {e}")
+                    print("   Run: pip install python-osc")
+                    self.osc_client = None
+                except Exception as e:
+                    print(f"❌ Failed to initialize OSC client: {type(e).__name__}: {e}")
+                    import traceback
+                    traceback.print_exc()
+                    self.osc_client = None
+            else:
+                print("🔇 OSC is disabled in config")
+        else:
+            print("🔇 No OSC configuration found")
         
         # Initialize camera if enabled
         self.camera: Optional[CameraCapture] = None
@@ -168,6 +185,30 @@ class UnifiedVoiceConversation:
         
         self.character_manager: CharacterManager = create_character_manager(characters_config)
         
+        # Initialize context manager
+        self.context_manager: Optional[ContextManager] = None
+        if config.context_manager:
+            # Convert dataclass config to dict for ContextManager
+            context_manager_config = {
+                'contexts': [
+                    {
+                        'name': ctx.name,
+                        'description': ctx.description,
+                        'history_file': ctx.history_file,
+                        'metadata': ctx.metadata
+                    }
+                    for ctx in config.context_manager.contexts
+                ],
+                'default_context': config.context_manager.default_context,
+                'auto_save_interval': config.context_manager.auto_save_interval
+            }
+            self.context_manager = ContextManager(
+                context_manager_config,
+                storage_dir=config.context_manager.storage_dir,
+                history_parser=self._parse_history_file  # Pass the existing history parser
+            )
+            print(f"📚 Context Manager: Initialized with {len(config.context_manager.contexts)} contexts")
+        
         # Initialize thinking sound player
         self.thinking_sound = ThinkingSoundPlayer(sample_rate=22050)
         
@@ -211,8 +252,17 @@ class UnifiedVoiceConversation:
         # Initialize conversation log file
         self._init_conversation_log()
         
-        # Load conversation history if specified
-        self._load_history_file()
+        # Load conversation history from context manager or file
+        if self.context_manager:
+            # Use context manager's history
+            self.state.conversation_history = self.context_manager.get_current_history()
+            print(f"📚 Loaded history from context '{self.context_manager.current_context_name}' with {len(self.state.conversation_history)} turns")
+            
+            # Start auto-save
+            asyncio.create_task(self.context_manager.start_auto_save())
+        else:
+            # Load conversation history from file if specified
+            self._load_history_file()
         
         # Log any loaded history to the conversation log
         self._log_loaded_history()
@@ -333,7 +383,7 @@ class UnifiedVoiceConversation:
                 timestamp=datetime.now(),
                 status="completed"
             )
-            self.state.conversation_history.append(image_turn)
+            self._add_turn_to_history(image_turn)
             
             # Log the image
             self._log_conversation_turn("user", content)
@@ -422,6 +472,62 @@ class UnifiedVoiceConversation:
         
         if config.stt.keywords:
             print(f"🔤 Added {len(config.stt.keywords)} keywords to STT including: {list(keyword_dict.keys())[:5]}")
+    
+    def _add_turn_to_history(self, turn: ConversationTurn):
+        """Add a turn to conversation history and update context manager."""
+        self.state.conversation_history.append(turn)
+        
+        # Update context manager
+        if self.context_manager:
+            self.context_manager.add_turn_to_current(turn)
+    
+    def switch_context(self, context_name: str) -> bool:
+        """Switch to a different conversation context."""
+        if not self.context_manager:
+            print("❌ Context manager not available")
+            return False
+        
+        # Stop current conversation
+        asyncio.create_task(self.stop_conversation())
+        
+        # Switch context
+        if self.context_manager.switch_context(context_name):
+            # Load new context history
+            self.state.conversation_history = self.context_manager.get_current_history()
+            print(f"✅ Switched to context '{context_name}' with {len(self.state.conversation_history)} turns")
+            
+            # Log the switch
+            self._log_conversation_turn("system", f"[Context switched to: {context_name}]")
+            
+            return True
+        else:
+            print(f"❌ Failed to switch to context '{context_name}'")
+            return False
+    
+    def reset_current_context(self):
+        """Reset the current context to its base history."""
+        if not self.context_manager:
+            print("❌ Context manager not available")
+            return
+        
+        # Stop current conversation
+        asyncio.create_task(self.stop_conversation())
+        
+        # Reset context
+        self.context_manager.reset_current_context()
+        
+        # Reload history
+        self.state.conversation_history = self.context_manager.get_current_history()
+        print(f"✅ Reset context to base history with {len(self.state.conversation_history)} turns")
+        
+        # Log the reset
+        self._log_conversation_turn("system", f"[Context reset to base history]")
+    
+    def get_available_contexts(self) -> List[Dict[str, str]]:
+        """Get list of available contexts."""
+        if not self.context_manager:
+            return []
+        return self.context_manager.get_context_list()
     
     def _setup_logging(self):
         """Configure logging based on configuration."""
@@ -869,7 +975,7 @@ class UnifiedVoiceConversation:
                     status="completed",  # Historical messages are completed
                     character=character_name
                 )
-                self.state.conversation_history.append(turn)
+                self._add_turn_to_history(turn)
                 
                 # Debug logging for character resolution
                 if msg["role"] == "assistant" and msg.get("_speaker_name"):
@@ -1149,7 +1255,7 @@ class UnifiedVoiceConversation:
             speaker_id=result.speaker_id,
             speaker_name=result.speaker_name
         )
-        self.state.conversation_history.append(user_turn)
+        self._add_turn_to_history(user_turn)
         self._log_conversation_turn("user", content, speaker_name=result.speaker_name)
         print(f"💬 Added user utterance: '{result.text}'" + (" with image" if captured_image else ""))
         
@@ -1256,7 +1362,10 @@ class UnifiedVoiceConversation:
             context = {
                 'conversation_history': self.state.conversation_history,
                 'current_session': self.tts.current_session,
-                'config': self.config
+                'config': self.config,
+                'current_speaker': self.state.current_speaker,
+                'osc_client': self.osc_client if hasattr(self, 'osc_client') else None,
+                'send_osc_color_change': self._send_osc_color_change
             }
             
             # Execute tool using registry
@@ -1270,7 +1379,7 @@ class UnifiedVoiceConversation:
                     timestamp=datetime.now(),
                     status="completed"
                 )
-                self.state.conversation_history.append(tool_turn)
+                self._add_turn_to_history(tool_turn)
                 self._log_conversation_turn("tool", tool_turn.content)
             
             # If tool wants to interrupt and has content, we may need to speak it
@@ -1656,7 +1765,7 @@ class UnifiedVoiceConversation:
                     status=status,
                     character=next_speaker
                 )
-                self.state.conversation_history.append(assistant_turn)
+                self._add_turn_to_history(assistant_turn)
                 # For multi-character mode, log with character name prefix (no brackets)
                 self._log_conversation_turn("assistant", f"{next_speaker}: {assistant_response}")
                 print(f"✅ Added assistant response to conversation history")
@@ -1676,7 +1785,7 @@ class UnifiedVoiceConversation:
                             timestamp=datetime.now(),
                             status="completed"
                         )
-                        self.state.conversation_history.append(system_turn)
+                        self._add_turn_to_history(system_turn)
                         self._log_conversation_turn("system", system_message)
                         print(f"📝 Added interruption notice to conversation history")
                 
@@ -1721,6 +1830,8 @@ class UnifiedVoiceConversation:
         except Exception as e:
             print(f"❌ Character LLM error: {e}")
             self.logger.error(f"Character LLM error: {e}")
+            import traceback
+            traceback.print_exc()
         finally:
             # Always stop thinking sound (no generation means force stop)
             await self.thinking_sound.stop()
@@ -2359,27 +2470,84 @@ class UnifiedVoiceConversation:
     
     def _send_osc_speaking_start(self, character_name: str):
         """Send OSC message when character starts speaking."""
-        if self.osc_client and self.config.osc:
-            try:
-                self.osc_client.send_message(
-                    self.config.osc.speaking_start_address, 
-                    character_name
-                )
-                print(f"📡 OSC: {character_name} started speaking")
-            except Exception as e:
-                print(f"❌ OSC send error: {e}")
+        if not self.config.osc:
+            print("🔇 OSC: Config not available")
+            return
+            
+        if not self.config.osc.enabled:
+            print("🔇 OSC: Disabled in config")
+            return
+            
+        if not self.osc_client:
+            print("❌ OSC: Client not initialized")
+            return
+            
+        try:
+            address = self.config.osc.speaking_start_address
+            print(f"📡 OSC: Sending to {self.config.osc.host}:{self.config.osc.port}")
+            print(f"📡 OSC: Address: {address}, Data: '{character_name}'")
+            
+            self.osc_client.send_message(address, character_name)
+            
+            print(f"✅ OSC: {character_name} started speaking - message sent successfully")
+        except Exception as e:
+            print(f"❌ OSC send error: {type(e).__name__}: {e}")
+            import traceback
+            traceback.print_exc()
     
     def _send_osc_speaking_stop(self, character_name: str):
         """Send OSC message when character stops speaking."""
-        if self.osc_client and self.config.osc:
-            try:
-                self.osc_client.send_message(
-                    self.config.osc.speaking_stop_address, 
-                    character_name
-                )
-                print(f"📡 OSC: {character_name} stopped speaking")
-            except Exception as e:
-                print(f"❌ OSC send error: {e}")
+        if not self.config.osc:
+            print("🔇 OSC: Config not available")
+            return
+            
+        if not self.config.osc.enabled:
+            print("🔇 OSC: Disabled in config")
+            return
+            
+        if not self.osc_client:
+            print("❌ OSC: Client not initialized")
+            return
+            
+        try:
+            address = self.config.osc.speaking_stop_address
+            print(f"📡 OSC: Sending to {self.config.osc.host}:{self.config.osc.port}")
+            print(f"📡 OSC: Address: {address}, Data: '{character_name}'")
+            
+            self.osc_client.send_message(address, character_name)
+            
+            print(f"✅ OSC: {character_name} stopped speaking - message sent successfully")
+        except Exception as e:
+            print(f"❌ OSC send error: {type(e).__name__}: {e}")
+            import traceback
+            traceback.print_exc()
+    
+    def _send_osc_color_change(self, character_name: str, color: str):
+        """Send OSC message when character changes color."""
+        if not self.config.osc:
+            print("🔇 OSC: Config not available")
+            return
+            
+        if not self.config.osc.enabled:
+            print("🔇 OSC: Disabled in config")
+            return
+            
+        if not self.osc_client:
+            print("❌ OSC: Client not initialized")
+            return
+            
+        try:
+            address = self.config.osc.color_change_address
+            print(f"📡 OSC: Sending to {self.config.osc.host}:{self.config.osc.port}")
+            print(f"📡 OSC: Address: {address}, Data: ['{character_name}', '{color}']")
+            
+            self.osc_client.send_message(address, [character_name, color])
+            
+            print(f"✅ OSC: {character_name} color change to {color} - message sent successfully")
+        except Exception as e:
+            print(f"❌ OSC send error: {type(e).__name__}: {e}")
+            import traceback
+            traceback.print_exc()
     
     async def cleanup(self):
         """Clean up all resources."""
@@ -2422,6 +2590,13 @@ class UnifiedVoiceConversation:
         except Exception as e:
             print(f"Error cleaning up UI server: {e}")
             
+        # Clean up context manager
+        if self.context_manager:
+            try:
+                await self.context_manager.stop_auto_save()
+            except Exception as e:
+                print(f"Error cleaning up context manager: {e}")
+        
         # Finally clean up thinking sound resources
         try:
             self.thinking_sound.cleanup()

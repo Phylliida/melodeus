@@ -13,3 +13,4 @@ groq
 openai
 anthropic
 scipy
+python-osc>=1.8.0
