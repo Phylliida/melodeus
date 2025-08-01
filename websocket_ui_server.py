@@ -164,7 +164,7 @@ class VoiceUIServer:
                 
             elif msg_type == "switch_context":
                 # Switch to a different context
-                context_name = data.get("context_name")
+                context_name = message.get("context_name")
                 print(f"🔄 Received switch_context request: {context_name}")
                 if context_name:
                     await self.handle_switch_context(context_name)
