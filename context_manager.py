@@ -205,6 +205,9 @@ class ContextManager:
     
     def switch_context(self, context_name: str) -> bool:
         """Switch to a different context."""
+        print(f"🔄 ContextManager.switch_context called with: '{context_name}'")
+        print(f"📋 Available contexts: {list(self.contexts.keys())}")
+                
         if context_name not in self.contexts:
             print(f"❌ Context '{context_name}' not found")
             return False
@@ -212,6 +215,7 @@ class ContextManager:
         # Save current context if modified
         current_context = self.get_active_context()
         if current_context and current_context.is_modified:
+            print(f"💾 Saving current context '{self.active_context_name}' before switch")
             current_context.save_state()
         
         self.active_context_name = context_name

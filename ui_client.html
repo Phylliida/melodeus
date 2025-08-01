@@ -1130,11 +1130,16 @@
         }
         
         function switchContext(contextName) {
+            console.log('Switching context to:', contextName);
             if (ws && ws.readyState === WebSocket.OPEN) {
-                ws.send(JSON.stringify({
+                const message = {
                     type: 'switch_context',
                     context_name: contextName
-                }));
+                };
+                console.log('Sending message:', message);
+                ws.send(JSON.stringify(message));
+            } else {
+                console.error('WebSocket not ready. State:', ws ? ws.readyState : 'null');
             }
         }
         

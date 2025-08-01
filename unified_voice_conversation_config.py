@@ -2529,12 +2529,18 @@ class UnifiedVoiceConversation:
     
     async def switch_context(self, context_name: str) -> bool:
         """Switch to a different conversation context."""
+        print(f"🔄 UnifiedVoiceConversation.switch_context called with: {context_name}")
+        
         if not self.context_manager:
             print("❌ Context manager not available")
             return False
         
+        print(f"📋 Current active context: {self.context_manager.active_context_name}")
+        
         # Switch context
         if self.context_manager.switch_context(context_name):
+            print(f"✅ Context manager switched to: {context_name}")
+            
             # Sync history from new context
             self._sync_history_from_context()
             
@@ -2548,6 +2554,8 @@ class UnifiedVoiceConversation:
             self._log_conversation_turn("system", switch_turn.content)
             
             return True
+        
+        print(f"❌ Context manager failed to switch to: {context_name}")
         return False
     
     async def reset_context(self):
