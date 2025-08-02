@@ -27,8 +27,34 @@ stt:
   diarize: true
   utterance_end_ms: 1000
   vad_events: true
-  enable_speaker_id: false
-  speaker_profiles_path: null
+  enable_speaker_id: true
+  speaker_profiles_path: "speaker_profiles"
+  debug_speaker_data: true  # Show detailed word-level timing and speaker info
+
+# Speaker Configuration
+speakers:
+  # Configure known speakers you want the system to recognize
+  # Provide 30+ second reference audio samples for each person
+  profiles:
+    "user_primary":
+      name: "Alice"
+      description: "Primary user"
+      reference_audio: "speaker_profiles/alice_reference.wav"  # 30+ seconds of clean speech
+    "user_secondary": 
+      name: "Bob"
+      description: "Secondary user or colleague"
+      reference_audio: "speaker_profiles/bob_reference.wav"    # 30+ seconds of clean speech
+    "user_guest":
+      name: "Guest"
+      description: "Occasional participant"
+      reference_audio: null  # No reference - will be learned automatically
+  
+  # Speaker recognition settings
+  recognition:
+    confidence_threshold: 0.7  # Minimum confidence for speaker identification
+    learning_mode: true        # Whether to learn new speakers automatically
+    max_speakers: 4           # Maximum number of speakers to track
+    voice_fingerprint_length: 128  # Size of voice fingerprint vector
 
 # Text-to-Speech Settings
 tts:
@@ -49,7 +75,17 @@ conversation:
   max_wait_time: 10.0         # maximum time to wait before force submission
   
   # Interruption settings
+  interruptions_enabled: false  # whether voice interruptions are allowed (default: false)
   interruption_confidence: 0.8 # minimum confidence for interruption
+  
+  # Director settings
+  director_enabled: false       # whether director is enabled to select speakers (default: false)
+  
+  # Echo cancellation settings
+  enable_echo_cancellation: false  # enable acoustic echo cancellation (requires speexdsp)
+  aec_frame_size: 256             # frame size for echo cancellation (must be power of 2)
+  aec_filter_length: 2048         # length of the echo cancellation filter
+  aec_delay_ms: 100               # reference delay in milliseconds to compensate for audio latency
   
   # LLM settings
   llm_model: "chatgpt-4o-latest"
@@ -58,8 +94,8 @@ conversation:
 
 # Audio Device Settings (optional)
 audio:
-  input_device_index: null   # null for default microphone
-  output_device_index: null  # null for default speakers
+  input_device_name: null   # null for default microphone, or specify device name like "Scarlett 18i20"
+  output_device_name: null  # null for default speakers, or specify device name like "Loopback Audio"
   
 # Logging Settings
 logging:
