@@ -1597,7 +1597,7 @@ class UnifiedVoiceConversation:
             
             # Check if we should use prefill format
             use_prefill = (self.config.conversation.conversation_mode == "prefill" and 
-                          character_config.llm_provider == "anthropic")
+                          character_config.llm_provider in ["anthropic", "bedrock"])
             
             if use_prefill:
                 # For prefill mode, convert directly from raw history
@@ -2147,15 +2147,24 @@ class UnifiedVoiceConversation:
             if not model_name.startswith("anthropic."):
                 model_name = f"anthropic.{model_name}"
             
-            response = await client.messages.create(
-                model=model_name,
-                messages=anthropic_messages,
-                system=system_content,
-                stream=True,
-                max_tokens=character_config.max_tokens,
-                temperature=character_config.temperature,
-                stop_sequences=stop_sequences if stop_sequences else None
-            )
+            # Prepare parameters for Bedrock - remove None values as Bedrock doesn't like them
+            bedrock_params = {
+                "model": model_name,
+                "messages": anthropic_messages,
+                "stream": True,
+                "max_tokens": character_config.max_tokens,
+                "temperature": character_config.temperature,
+                "stop_sequences": stop_sequences or []  # Use empty list instead of None
+            }
+            
+            # Add system prompt if provided
+            if system_content:
+                bedrock_params["system"] = system_content
+            
+            # Remove any None values that might cause issues
+            bedrock_params = {k: v for k, v in bedrock_params.items() if v is not None}
+            
+            response = await client.messages.create(**bedrock_params)
             
             # Track if we need to skip the prefill prefix
             skip_prefix = is_prefill_format
