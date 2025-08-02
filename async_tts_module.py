@@ -119,6 +119,9 @@ class AsyncTTSStreamer:
         self._session_counter = 0  # For generating unique session IDs
         self._chunks_played = 0  # Track how many audio chunks have been played
         
+        # Store last session's generated text for recovery
+        self.last_session_generated_text = ""
+        
         # Tool execution callback
         self.on_tool_execution = None  # Callback: async def(tool_call: ToolCall) -> ToolResult
         
@@ -250,6 +253,8 @@ class AsyncTTSStreamer:
             # Create a new session for this speaking operation
             self.current_session = self._create_session()
             self.current_session.generated_text = text
+            # Store for recovery in case of error
+            self.last_session_generated_text = text
             
             if self.current_session.whisper_tracker and self.track_spoken_content:
                 self.current_session.whisper_tracker.start_tracking()
@@ -407,6 +412,8 @@ class AsyncTTSStreamer:
                 # Add to generated text regardless
                 if self.current_session:
                     self.current_session.generated_text += chunk
+                    # Also update recovery text
+                    self.last_session_generated_text = self.current_session.generated_text
                 
                 # Process each character to detect XML tags
                 for i, char in enumerate(chunk):

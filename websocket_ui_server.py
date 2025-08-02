@@ -3,6 +3,7 @@ import asyncio
 import websockets
 import json
 import time
+import uuid
 from datetime import datetime
 from typing import Set, Dict, Any, Optional
 from dataclasses import dataclass, asdict

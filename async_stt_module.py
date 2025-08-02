@@ -46,13 +46,11 @@ def find_input_device_by_name(device_name: str) -> Optional[int]:
     try:
         device_name_lower = device_name.lower()
         
-        print(f"🔍 [DEVICE LOOKUP] Searching for device containing: '{device_name}'")
-        
         for i in range(p.get_device_count()):
             info = p.get_device_info_by_index(i)
             if info['maxInputChannels'] > 0:  # Only check input devices
                 if device_name_lower in info['name'].lower():
-                    print(f"🎯 Found input device: '{info['name']}' (index {i}, channels: {info['maxInputChannels']}) for name '{device_name}'")
+                    print(f"🎯 Found input device: '{info['name']}' (index {i}) for name '{device_name}'")
                     return i
         
         print(f"⚠️ No input device found matching '{device_name}'")
@@ -239,21 +237,10 @@ class AsyncSTTStreamer:
             if input_device_index is not None:
                 stream_kwargs['input_device_index'] = input_device_index
             
-            # Debug: Show what device we're about to open
-            print(f"🎯 [AUDIO DEBUG] Opening audio stream with kwargs: {stream_kwargs}")
-            
             self.microphone = await loop.run_in_executor(
                 None,
                 lambda: self.p.open(**stream_kwargs)
             )
-            
-            # Debug: Verify which device was actually opened
-            if hasattr(self.microphone, '_stream') and hasattr(self.microphone._stream, 'inputDevice'):
-                actual_device_index = self.microphone._stream.inputDevice
-                actual_device_info = self.p.get_device_info_by_index(actual_device_index)
-                print(f"🎤 [AUDIO DEBUG] Actually opened device: '{actual_device_info['name']}' (index {actual_device_index})")
-            else:
-                print(f"🎤 [AUDIO DEBUG] Unable to determine actual device (stream opened successfully)")
             
             # Verify the actual sample rate being used
             actual_rate = self.microphone._rate
@@ -311,7 +298,6 @@ class AsyncSTTStreamer:
                         print(f"   Full keyword string: {keyword_string[:100]}...")
             
             options = LiveOptions(**options_dict)
-            print(f"🔧 [DEEPGRAM] Connection options: {options_dict}")
             
             # Set up event handlers
             self.connection.on(LiveTranscriptionEvents.Open, self._on_open)
@@ -623,26 +609,6 @@ class AsyncSTTStreamer:
                         print(f"❌ Failed to read audio data: {read_error}")
                         break
                     
-                    # Debug: Check audio levels
-                    if chunk_count % 10 == 0:  # Every 10 chunks (~0.5 seconds)
-                        import numpy as np
-                        audio_array = np.frombuffer(data, dtype=np.int16)
-                        audio_level = np.abs(audio_array).mean()
-                        max_level = np.abs(audio_array).max()
-                        rms = np.sqrt(np.mean(audio_array.astype(float)**2))
-                        
-                        # Check percentage of samples above noise floor
-                        noise_floor = 50
-                        speech_threshold = 500
-                        samples_above_noise = np.sum(np.abs(audio_array) > noise_floor)
-                        samples_above_speech = np.sum(np.abs(audio_array) > speech_threshold)
-                        percent_active = (samples_above_noise / len(audio_array)) * 100
-                        percent_speech = (samples_above_speech / len(audio_array)) * 100
-                        
-                        print(f"🎤 [AUDIO DEBUG] Chunk {chunk_count}:")
-                        print(f"   Levels: avg={audio_level:.1f}, max={max_level}, RMS={rms:.1f}")
-                        print(f"   Activity: {percent_active:.1f}% above noise floor, {percent_speech:.1f}% speech-like")
-                        print(f"   Signal: {'🔇 Too quiet' if max_level < 1000 else '🔊 Good level' if max_level > 3000 else '🔉 Low but audible'}")
                     
                     # Apply echo cancellation if enabled
                     processed_data = data
@@ -673,12 +639,6 @@ class AsyncSTTStreamer:
                     
                     # Try to send data to Deepgram
                     try:
-                        # Debug: Check if we have non-silent audio before sending
-                        if chunk_count % 20 == 0:  # Every second
-                            audio_array = np.frombuffer(processed_data, dtype=np.int16)
-                            is_silent = np.abs(audio_array).max() < 100
-                            print(f"📡 [DEEPGRAM] Sending chunk {chunk_count}, silent={is_silent}")
-                        
                         self.connection.send(processed_data)
                         chunk_count += 1
                         
@@ -731,10 +691,8 @@ class AsyncSTTStreamer:
     
     def _on_transcript(self, *args, **kwargs):
         """Handle incoming transcripts."""
-        print(f"🎯 [DEEPGRAM] Transcript event received!")
         result = kwargs.get('result')
         if not result or not hasattr(result, 'channel'):
-            print(f"⚠️ [DEEPGRAM] Invalid result format: {result}")
             return
         
         try:
@@ -742,7 +700,6 @@ class AsyncSTTStreamer:
             alternative = channel.alternatives[0]
             transcript = alternative.transcript.strip()
             confidence = alternative.confidence
-            print(f"📝 [DEEPGRAM] Transcript: '{transcript}' (confidence: {confidence:.2f})")
             is_final = result.is_final
             
             # # Debug: Print raw response structure for final results
@@ -887,7 +844,6 @@ class AsyncSTTStreamer:
     def _on_error(self, *args, **kwargs):
         """Handle STT errors."""
         error = kwargs.get('error', 'Unknown error')
-        print(f"❌ [DEEPGRAM] Error event: {error}")
         self._schedule_event(STTEventType.ERROR, {
             "error": f"Deepgram error: {error}"
         })

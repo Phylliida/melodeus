@@ -651,6 +651,12 @@
                 msg.innerHTML = `
                     <div class="speaker-name">${escapeHtml(data.speaker || 'USER')}</div>
                     <div class="message-content">${escapeHtml(data.text)}</div>
+                    ${data.message_id ? `
+                        <div class="message-actions">
+                            <button class="edit-button" onclick="editMessage('${data.message_id}')">Edit</button>
+                            <button class="delete-button" onclick="deleteMessage('${data.message_id}')">Delete</button>
+                        </div>
+                    ` : ''}
                 `;
                 transcript.appendChild(msg);
                 
@@ -700,6 +706,17 @@
             // Clean up if complete
             if (data.is_complete) {
                 delete currentMessages[data.session_id];
+                
+                // Add edit/delete buttons for completed messages
+                if (data.message_id && !msg.querySelector('.message-actions')) {
+                    const actionsDiv = document.createElement('div');
+                    actionsDiv.className = 'message-actions';
+                    actionsDiv.innerHTML = `
+                        <button class="edit-button" onclick="editMessage('${data.message_id}')">Edit</button>
+                        <button class="delete-button" onclick="deleteMessage('${data.message_id}')">Delete</button>
+                    `;
+                    msg.appendChild(actionsDiv);
+                }
             }
             
             transcript.scrollTop = transcript.scrollHeight;
