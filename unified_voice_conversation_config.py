@@ -210,7 +210,8 @@ class UnifiedVoiceConversation:
                     'name': ctx.name,
                     'history_file': ctx.history_file,
                     'description': ctx.description,
-                    'metadata': ctx.metadata
+                    'metadata': ctx.metadata,
+                    'character_histories': ctx.character_histories
                 }
                 for ctx in config.contexts.contexts
             ]
@@ -1646,12 +1647,26 @@ class UnifiedVoiceConversation:
                 prefill_name = character_config.prefill_name or character_config.name
                 raw_history = self._get_conversation_history_for_character()
                 
+                # Get character histories from current context if available
+                context_char_histories = None
+                if self.context_manager:
+                    active_context = self.context_manager.get_active_context()
+                    if active_context:
+                        context_char_histories = active_context.character_histories
+                        print(f"🔍 DEBUG: Active context '{active_context.config.name}' has character_histories: {list(context_char_histories.keys()) if context_char_histories else None}")
+                
+                print(f"🔍 DEBUG: Creating prefill messages for character '{next_speaker}' (prefill_name: '{prefill_name}')")
+                print(f"🔍 DEBUG: Context has character histories: {context_char_histories is not None}")
+                if context_char_histories:
+                    print(f"🔍 DEBUG: Character histories available for: {list(context_char_histories.keys())}")
+                
                 # Create messages in prefill format directly
                 messages = self._create_character_prefill_messages(
                     raw_history, 
                     next_speaker, 
                     prefill_name,
-                    character_config.system_prompt
+                    character_config.system_prompt,
+                    context_char_histories
                 )
             else:
                 # Standard chat format
@@ -2374,7 +2389,8 @@ class UnifiedVoiceConversation:
             self.tts.config.similarity_boost = original_config["similarity_boost"]
     
     def _create_character_prefill_messages(self, raw_history: List[Dict[str, Any]], character_name: str, 
-                                          prefill_name: str, system_prompt: str) -> List[Dict[str, Any]]:
+                                          prefill_name: str, system_prompt: str, 
+                                          context_char_histories: Optional[Dict[str, List[Any]]] = None) -> List[Dict[str, Any]]:
         """Create prefill format messages directly from raw conversation history for a character.
         
         This creates the proper prefill structure with images:
@@ -2383,6 +2399,11 @@ class UnifiedVoiceConversation:
         3. User messages with images
         4. Assistant message with post-image history and character's prefill
         """
+        print(f"🔍 DEBUG: _create_character_prefill_messages called with:")
+        print(f"  - character_name: '{character_name}'")
+        print(f"  - prefill_name: '{prefill_name}'")
+        print(f"  - context_char_histories keys: {list(context_char_histories.keys()) if context_char_histories else None}")
+        
         # Find last image in history
         last_image_index = -1
         for i, turn in enumerate(raw_history):
@@ -2393,10 +2414,39 @@ class UnifiedVoiceConversation:
                         break
         
         # Build prefill messages
+        
+        # Add character-specific history if available
+        char_history_parts = []
+        if context_char_histories and character_name in context_char_histories:
+            char_history = context_char_histories[character_name]
+            print(f"📚 Prepending {len(char_history)} messages from {character_name}'s context-specific history")
+            
+            # Format character history turns for prefill
+            for turn in char_history:
+                # In prefill format, we need to format these as conversation turns
+                formatted_text = self._format_turn_for_prefill(
+                    turn.role,
+                    turn.content,
+                    character_name if turn.role == "assistant" else None,
+                    character_name,
+                    prefill_name,
+                    speaker_name=turn.speaker_name if hasattr(turn, 'speaker_name') else None
+                )
+                if formatted_text:
+                    char_history_parts.append(formatted_text)
+        else:
+            print(f"🔍 DEBUG: No character history found for '{character_name}'")
+            if context_char_histories:
+                print(f"🔍 DEBUG: Available keys are: {list(context_char_histories.keys())}")
+        
         if last_image_index >= 0:
             # Has images - use image-aware format
             user_messages = []
             text_blocks = []
+            
+            # Start with character history if available
+            if char_history_parts:
+                text_blocks.extend(char_history_parts)
             
             # Process messages up to and including last image
             for i, turn in enumerate(raw_history[:last_image_index + 1]):
@@ -2450,6 +2500,10 @@ class UnifiedVoiceConversation:
         else:
             # No images - simpler format
             conversation_parts = []
+            
+            # Start with character history if available
+            if char_history_parts:
+                conversation_parts.extend(char_history_parts)
             
             for turn in raw_history:
                 formatted_text = self._format_turn_for_prefill(

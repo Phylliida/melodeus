@@ -64,6 +64,9 @@ class ConversationContext:
         
     def load_state(self) -> bool:
         """Load persistent state from file."""
+        # Preserve character histories that were loaded
+        preserved_char_histories = self.character_histories.copy()
+        
         try:
             if self.state_file.exists():
                 with open(self.state_file, 'r', encoding='utf-8') as f:
@@ -86,17 +89,26 @@ class ConversationContext:
                 self.metadata = state_data.get('metadata', {})
                 self.last_save_time = datetime.fromisoformat(state_data['last_save'])
                 
+                # Restore preserved character histories
+                self.character_histories = preserved_char_histories
+                
                 print(f"✅ Loaded state for context '{self.config.name}': {len(self.current_history)} turns")
+                if self.character_histories:
+                    print(f"   📚 Preserved character histories for: {list(self.character_histories.keys())}")
                 return True
             else:
                 # No saved state, use original history
                 self.current_history = self.original_history.copy()
+                # Restore preserved character histories
+                self.character_histories = preserved_char_histories
                 print(f"📋 No saved state for context '{self.config.name}', using original history")
                 return False
                 
         except Exception as e:
             print(f"❌ Error loading state for context '{self.config.name}': {e}")
             self.current_history = self.original_history.copy()
+            # Restore preserved character histories
+            self.character_histories = preserved_char_histories
             return False
     
     def save_state(self) -> bool:
@@ -323,6 +335,8 @@ class ContextManager:
                 print(f"   ✅ Loaded {len(context.original_history)} turns")
             else:
                 print(f"   ⚠️ No history file for context '{context.config.name}'")
+            
+            print(f"🔍 DEBUG: Checking character_histories for context '{context.config.name}': {context.config.character_histories}")
             
             # Load character-specific histories for this context
             if context.config.character_histories:

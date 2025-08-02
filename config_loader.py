@@ -164,6 +164,7 @@ class ContextConfig:
     history_file: str
     description: Optional[str] = None
     metadata: Optional[Dict[str, Any]] = None
+    character_histories: Optional[Dict[str, str]] = None
 
 
 @dataclass
@@ -538,7 +539,8 @@ class ConfigLoader:
                     name=ctx_data['name'],
                     history_file=ctx_data['history_file'],
                     description=ctx_data.get('description'),
-                    metadata=ctx_data.get('metadata', {})
+                    metadata=ctx_data.get('metadata', {}),
+                    character_histories=ctx_data.get('character_histories')
                 )
                 context_list.append(context)
             
