@@ -538,14 +538,20 @@ class VoiceUIServer:
             
     async def send_error(self, client, error_message: str, severity="error"):
         """Send error message to client."""
-        await self.send_to_client(client, UIMessage(
+        error_msg = UIMessage(
             type="error",
             data={
                 "severity": severity,
                 "message": error_message,
                 "timestamp": time.time()
             }
-        ))
+        )
+        
+        if client is None:
+            # Broadcast to all clients if no specific client
+            await self.broadcast(error_msg)
+        else:
+            await self.send_to_client(client, error_msg)
         
     # Convenience methods for common broadcasts
     
@@ -714,9 +720,18 @@ class VoiceUIServer:
             
         try:
             # Extract index from msg_id
-            index = int(msg_id.split('_')[1])
+            parts = msg_id.split('_')
+            if len(parts) != 2 or parts[0] != 'msg':
+                print(f"⚠️ Invalid message ID format: {msg_id}")
+                await self.send_error(None, f"Invalid message ID format: {msg_id}")
+                return
+                
+            index = int(parts[1])
+            history_length = len(self.conversation.state.conversation_history)
             
-            if 0 <= index < len(self.conversation.state.conversation_history):
+            print(f"🔍 Attempting to delete message {msg_id}: index={index}, history_length={history_length}")
+            
+            if 0 <= index < history_length:
                 # Mark as deleted but don't remove (to preserve indices)
                 turn = self.conversation.state.conversation_history[index]
                 turn.status = "deleted"
@@ -725,7 +740,8 @@ class VoiceUIServer:
                 # Broadcast deletion to all clients
                 await self.broadcast(UIMessage("message_deleted", {"id": msg_id}))
             else:
-                await self.send_error(None, f"Invalid message ID: {msg_id}")
+                print(f"⚠️ Index {index} out of range for history length {history_length}")
+                await self.send_error(None, f"Invalid message index: {index} (history has {history_length} messages)")
                 
         except Exception as e:
             self.logger.error(f"Error deleting message: {e}")
