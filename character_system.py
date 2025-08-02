@@ -469,11 +469,15 @@ class CharacterManager:
             print(f"📚 Prepending {len(char_history)} messages from {character_name}'s context-specific history")
             
             # Convert ConversationTurn objects to message dicts
-            for turn in char_history:
+            for i, turn in enumerate(char_history):
                 messages.append({
                     "role": turn.role,
                     "content": turn.content
                 })
+                # Debug: show first few messages
+                if i < 3:
+                    preview = turn.content[:100] + '...' if len(turn.content) > 100 else turn.content
+                    print(f"      Message {i+1} ({turn.role}): {preview}")
         
         
         # First pass: count images in the conversation

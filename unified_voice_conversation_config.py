@@ -630,7 +630,7 @@ class UnifiedVoiceConversation:
         
         return sanitized
     
-    def _log_llm_request(self, messages: List[Dict[str, str]], model: str, timestamp: float, provider: str = None) -> str:
+    def _log_llm_request(self, messages: List[Dict[str, str]], model: str, timestamp: float, provider: str = None, stop_sequences: List[str] = None) -> str:
         """Log LLM request to a file and return the filename."""
         filename = self._generate_log_filename("request", timestamp)
         filepath = self.llm_logs_dir / filename
@@ -649,6 +649,10 @@ class UnifiedVoiceConversation:
             "conversation_mode": self.config.conversation.conversation_mode,
             "request_type": "llm_completion"
         }
+        
+        # Add stop sequences if provided
+        if stop_sequences:
+            request_data["stop_sequences"] = stop_sequences
         
         try:
             with open(filepath, 'w', encoding='utf-8') as f:
@@ -859,11 +863,10 @@ class UnifiedVoiceConversation:
                         
                         # Check if this is the same speaker continuing
                         if speaker_name == current_speaker:
-                            # Same speaker - just add the line as continuation
+                            # Same speaker - just add the message content (not the speaker name again)
                             if message_content:
-                                current_content.append(f"{speaker_name}: {message_content}")
-                            else:
-                                current_content.append(f"{speaker_name}:")
+                                current_content.append(message_content)
+                            # Skip empty continuations from same speaker
                         else:
                             # Different speaker - save previous and start new
                             if current_speaker and current_content:
@@ -1683,12 +1686,44 @@ class UnifiedVoiceConversation:
                     context_char_histories
                 )
             
+            # Check if we're in prefill format to generate stop sequences
+            stop_sequences = None
+            if self.config.conversation.conversation_mode == "prefill":
+                stop_sequences = []
+                # Add all character names as stop sequences
+                for char_name in self.character_manager.characters.keys():
+                    stop_sequences.append(f"\n\n{char_name}:")
+                    # Also add prefill names if different
+                    char_config_temp = self.character_manager.get_character_config(char_name)
+                    if char_config_temp and char_config_temp.prefill_name and char_config_temp.prefill_name != char_name:
+                        stop_sequences.append(f"\n\n{char_config_temp.prefill_name}:")
+                
+                # Add human names
+                if hasattr(self.config.conversation, 'prefill_participants'):
+                    human_name = self.config.conversation.prefill_participants[0]
+                    stop_sequences.append(f"\n\n{human_name}:")
+                
+                # Add any detected speakers
+                if hasattr(self, 'detected_speakers') and self.detected_speakers:
+                    for speaker in self.detected_speakers:
+                        speaker_stop = f"\n\n{speaker}:"
+                        if speaker_stop not in stop_sequences:
+                            stop_sequences.append(speaker_stop)
+                
+                # Add System: to stop sequences
+                stop_sequences.append("\n\nSystem:")
+                stop_sequences.append("\n\nA:")
+                
+                # Remove duplicates while preserving order
+                stop_sequences = list(dict.fromkeys(stop_sequences))
+            
             # Log the request
             request_filename = self._log_llm_request(
                 messages, 
                 character_config.llm_model, 
                 request_timestamp,
-                character_config.llm_provider
+                character_config.llm_provider,
+                stop_sequences
             )
             
             # Check both generations before starting LLM

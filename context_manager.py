@@ -244,6 +244,21 @@ class ContextManager:
                 if ': ' in line:
                     speaker, message = line.split(': ', 1)
                     
+                    # Validate that this is actually a speaker name (not just any text with a colon)
+                    # Speaker names should be relatively short and not contain certain patterns
+                    is_valid_speaker = (
+                        len(speaker) <= 50 and  # Not too long
+                        not speaker.lower().startswith(('most', 'but ', 'and ', 'the ', 'this ', 'that ',
+                                                      'when ', 'where ', 'what ', 'why ', 'how ',
+                                                      'read ', 'edit ', 'note ', 'warning ')) and
+                        not any(char in speaker for char in ['(', ')', '[', ']', '{', '}', '"', "'"])
+                    )
+                    
+                    if not is_valid_speaker:
+                        # Not a speaker line, treat as content
+                        i += 1
+                        continue
+                    
                     # Collect multi-line messages
                     full_message = [message]
                     i += 1
@@ -251,8 +266,10 @@ class ContextManager:
                     # Continue collecting lines until we hit another speaker or end
                     while i < len(lines):
                         next_line = lines[i].strip()
-                        if not next_line or (': ' in next_line and any(next_line.startswith(s + ': ') 
-                                                                       for s in ['User', 'Human', 'H', character_name])):
+                        # Check if this line starts with a speaker pattern (any word followed by colon)
+                        if not next_line or (': ' in next_line and 
+                                           next_line.split(': ', 1)[0].strip() and
+                                           not next_line.startswith((' ', '\t'))):  # Not indented
                             break
                         full_message.append(next_line)
                         i += 1
@@ -263,10 +280,15 @@ class ContextManager:
                     else:
                         role = 'assistant'
                     
+                    content = '\n'.join(full_message).strip()
                     messages.append({
                         'role': role,
-                        'content': '\n'.join(full_message).strip()
+                        'content': content
                     })
+                    
+                    # Debug logging
+                    preview = content[:100] + '...' if len(content) > 100 else content
+                    print(f"   📝 Parsed {role} message from {speaker}: {preview}")
                 else:
                     i += 1
             
