@@ -122,6 +122,11 @@ class VoiceUIServer:
                 speaker = data.get("speaker")
                 await self.handle_trigger_speaker(speaker)
                 
+            elif msg_type == "trigger_prepared_statement":
+                speaker = data.get("speaker")
+                statement_name = data.get("statement_name")
+                await self.handle_trigger_prepared_statement(speaker, statement_name)
+                
             elif msg_type == "sync_request":
                 await self.send_state_sync(websocket)
                 
@@ -394,6 +399,82 @@ class VoiceUIServer:
             is_processing=True,
             pending_speaker=speaker
         )
+    
+    async def handle_trigger_prepared_statement(self, speaker: str, statement_name: str):
+        """Handle triggering a prepared statement for a specific speaker."""
+        if not self.conversation:
+            return
+            
+        print(f"📜 UI triggered prepared statement '{statement_name}' for speaker: {speaker}")
+        
+        # Check if we need to interrupt ongoing processes (similar to regular trigger)
+        interrupted = False
+        
+        # Check if TTS is currently playing
+        if hasattr(self.conversation, 'tts') and self.conversation.tts.is_currently_playing():
+            print("🚫 Cancelling previous TTS playback")
+            await self.conversation.tts.stop()
+            interrupted = True
+            
+        # Check if LLM is processing
+        if hasattr(self.conversation.state, 'is_processing_llm') and self.conversation.state.is_processing_llm:
+            print("🚫 Cancelling previous LLM generation")
+            if hasattr(self.conversation.state, 'current_processing_turn') and self.conversation.state.current_processing_turn:
+                self.conversation.state.current_processing_turn.status = "interrupted"
+            interrupted = True
+            
+        # Cancel any ongoing LLM task
+        if hasattr(self.conversation.state, 'current_llm_task') and self.conversation.state.current_llm_task and not self.conversation.state.current_llm_task.done():
+            print("🚫 Cancelling previous processing task")
+            self.conversation.state.current_llm_task.cancel()
+            try:
+                await asyncio.wait_for(self.conversation.state.current_llm_task, timeout=0.5)
+            except (asyncio.CancelledError, asyncio.TimeoutError):
+                pass
+            self.conversation.state.current_llm_task = None
+            
+        # Clear state if we interrupted
+        if interrupted:
+            self.conversation.state.is_speaking = False
+            self.conversation.state.is_processing_llm = False
+            self.conversation.state.current_processing_turn = None
+            print(f"🔄 All AI processing interrupted and state cleared")
+        
+        # Set the next speaker globally
+        async with self.conversation.state.speaker_lock:
+            self.conversation.state.next_speaker = speaker
+            print(f"📢 Set global next speaker: {speaker} (for prepared statement)")
+        
+        # If we interrupted, wait a bit for state to clear
+        if interrupted:
+            await asyncio.sleep(0.1)
+        
+        # Create a reference turn for metadata
+        from unified_voice_conversation_config import ConversationTurn
+        from datetime import datetime
+        
+        reference_turn = ConversationTurn(
+            role="system",
+            content="",
+            timestamp=datetime.now(),
+            status="completed",
+            metadata={
+                "is_prepared_statement": True,
+                "statement_name": statement_name,
+                "triggered_speaker": speaker
+            }
+        )
+        
+        # Process with character LLM, passing the prepared statement name
+        task = asyncio.create_task(
+            self.conversation._process_with_character_llm("", reference_turn, prepared_statement_name=statement_name)
+        )
+        
+        # Broadcast status update
+        await self.broadcast_speaker_status(
+            is_processing=True,
+            pending_speaker=speaker
+        )
         
     async def send_state_sync(self, websocket):
         """Send current state to a client."""
@@ -420,11 +501,18 @@ class VoiceUIServer:
             characters = []
             for char_name in self.conversation.character_manager.characters.keys():
                 char_config = self.conversation.character_manager.get_character_config(char_name)
-                characters.append({
+                char_data = {
                     "name": char_name,
                     "model": char_config.llm_model if char_config else "unknown",
                     "active": self.conversation.character_manager.active_character == char_name
-                })
+                }
+                
+                # Add prepared statements if available
+                if char_config and hasattr(char_config, 'prepared_statements') and char_config.prepared_statements:
+                    char_data["prepared_statements"] = list(char_config.prepared_statements.keys())
+                    print(f"   📜 {char_name} has prepared statements: {char_data['prepared_statements']}")
+                
+                characters.append(char_data)
             
             await self.send_to_client(websocket, UIMessage(
                 type="available_characters",

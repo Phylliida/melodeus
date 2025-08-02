@@ -1521,7 +1521,7 @@ class UnifiedVoiceConversation:
             import traceback
             traceback.print_exc()
     
-    async def _process_with_character_llm(self, user_input: str, reference_turn: ConversationTurn, generation: int = None):
+    async def _process_with_character_llm(self, user_input: str, reference_turn: ConversationTurn, generation: int = None, prepared_statement_name: str = None):
         """Process user input with multi-character system."""
         try:
             self.state.is_processing_llm = True
@@ -1720,7 +1720,61 @@ class UnifiedVoiceConversation:
             # Stream response based on provider
             assistant_response = ""
             
-            if character_config.llm_provider == "openai":
+            # Check if this is a prepared statement request
+            if prepared_statement_name and prepared_statement_name in character_config.prepared_statements:
+                print(f"📜 Using prepared statement '{prepared_statement_name}' for {next_speaker}")
+                prepared_text = character_config.prepared_statements[prepared_statement_name]
+                
+                # Temporarily set character voice
+                original_config = self._set_character_voice(character_config)
+                try:
+                    # Create a simple async generator that yields the prepared text
+                    async def prepared_text_generator():
+                        # Yield the text in chunks for natural streaming
+                        chunk_size = 50  # Characters per chunk
+                        for i in range(0, len(prepared_text), chunk_size):
+                            chunk = prepared_text[i:i + chunk_size]
+                            yield chunk
+                            # Small delay to simulate natural streaming
+                            await asyncio.sleep(0.02)
+                    
+                    # Create TTS task for the prepared statement
+                    self.state.current_llm_task = asyncio.create_task(
+                        self.tts.speak_stream_multi_voice(prepared_text_generator())
+                    )
+                    
+                    # Wait for completion
+                    try:
+                        completed = await self.state.current_llm_task
+                    except asyncio.CancelledError:
+                        print("⚠️ Prepared statement playback was interrupted")
+                        completed = False
+                    
+                    # Update echo filter
+                    session_id = f"prepared_{character_config.name}_{request_timestamp}"
+                    if self.echo_filter:
+                        if completed:
+                            self.echo_filter.on_tts_complete(session_id)
+                        else:
+                            spoken_text = self.tts.get_spoken_text_heuristic() if hasattr(self.tts, 'get_spoken_text_heuristic') else None
+                            self.echo_filter.on_tts_interrupted(session_id, spoken_text)
+                    
+                    # Capture the response
+                    assistant_response = prepared_text if completed else self.tts.get_spoken_text_heuristic().strip()
+                    
+                    # Send to UI
+                    if hasattr(self, 'ui_server'):
+                        await self.ui_server.broadcast_ai_stream(
+                            speaker=next_speaker,
+                            text=prepared_text,
+                            session_id=f"session_{request_timestamp}",
+                            is_complete=True
+                        )
+                finally:
+                    # Restore original voice config
+                    self._restore_voice_config(original_config)
+                    
+            elif character_config.llm_provider == "openai":
                 # Temporarily set character voice
                 original_config = self._set_character_voice(character_config)
                 try:

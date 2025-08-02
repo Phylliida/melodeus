@@ -32,7 +32,8 @@
             background: white;
             box-shadow: 0 2px 4px rgba(0,0,0,0.1);
             position: relative;
-            overflow: hidden;
+            overflow: visible;
+            min-height: 100px;
         }
         
         .speaker-card.active {
@@ -137,6 +138,39 @@
         button.trigger-model:hover {
             background: #7B1FA2;
             box-shadow: 0 2px 8px rgba(156, 39, 176, 0.3);
+        }
+        
+        .prepared-statements {
+            margin-top: 10px;
+            padding-top: 10px;
+            border-top: 1px solid #eee;
+        }
+        
+        .prepared-statement-btn {
+            padding: 6px 12px;
+            margin: 2px;
+            border: none;
+            border-radius: 6px;
+            background: #9C27B0;
+            color: white;
+            cursor: pointer;
+            font-size: 14px;
+            transition: all 0.2s;
+        }
+        
+        .prepared-statement-btn:hover {
+            background: #7B1FA2;
+            transform: translateY(-1px);
+        }
+        
+        .prepared-statement-btn:active {
+            transform: scale(0.95);
+        }
+        
+        .prepared-statements-label {
+            font-size: 12px;
+            color: #666;
+            margin-bottom: 4px;
         }
         
         #interruptions-toggle {
@@ -776,6 +810,35 @@
             }
         }
         
+        function triggerPreparedStatement(speakerName, statementName) {
+            if (ws && ws.readyState === WebSocket.OPEN) {
+                ws.send(JSON.stringify({ 
+                    type: 'trigger_prepared_statement', 
+                    data: { 
+                        speaker: speakerName,
+                        statement_name: statementName
+                    }
+                }));
+                
+                // Visual feedback
+                if (event && event.target) {
+                    event.target.style.transform = 'scale(0.95)';
+                    setTimeout(() => event.target.style.transform = '', 100);
+                }
+                
+                // Show in transcript
+                const transcript = document.getElementById('transcript');
+                const msg = document.createElement('div');
+                msg.className = 'message system';
+                msg.style.background = '#E1F5FE';
+                msg.style.textAlign = 'center';
+                msg.style.fontStyle = 'italic';
+                msg.innerHTML = `<div class="message-content">📜 Playing prepared statement "${statementName}" for ${speakerName}...</div>`;
+                transcript.appendChild(msg);
+                transcript.scrollTop = transcript.scrollHeight;
+            }
+        }
+        
         function toggleSTT() {
             if (ws && ws.readyState === WebSocket.OPEN) {
                 ws.send(JSON.stringify({ 
@@ -833,11 +896,32 @@
                 const card = document.createElement('div');
                 card.id = `${char.name.toLowerCase()}-card`;
                 card.className = 'speaker-card idle';
-                card.innerHTML = `
+                
+                // Base card content
+                let cardContent = `
                     <h3>${getCharacterEmoji(char.name)} ${char.name}</h3>
                     <span class="status-indicator"></span>
                     <span class="status-text">Idle</span>
                 `;
+                
+                // Add prepared statements if available
+                if (char.prepared_statements && char.prepared_statements.length > 0) {
+                    cardContent += `
+                        <div class="prepared-statements">
+                            <div class="prepared-statements-label">Prepared Statements:</div>
+                    `;
+                    char.prepared_statements.forEach(stmt => {
+                        cardContent += `
+                            <button class="prepared-statement-btn" 
+                                    onclick="triggerPreparedStatement('${char.name}', '${stmt}')">
+                                📜 ${stmt}
+                            </button>
+                        `;
+                    });
+                    cardContent += '</div>';
+                }
+                
+                card.innerHTML = cardContent;
                 statusPanel.appendChild(card);
             });
             

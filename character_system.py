@@ -45,6 +45,9 @@ class CharacterConfig:
     
     # API key (can be character-specific)
     api_key: Optional[str] = None
+    
+    # Prepared statements - pre-written responses that can be triggered
+    prepared_statements: Dict[str, str] = field(default_factory=dict)
 
 
 @dataclass
@@ -597,6 +600,21 @@ def create_character_manager(config: Dict[str, Any]) -> CharacterManager:
                 char_data["api_key"] = api_keys.get("openai")
             elif provider == "anthropic":
                 char_data["api_key"] = api_keys.get("anthropic")
+        
+        # Handle prepared statements - convert list format to dict format if needed
+        if "prepared_statements" in char_data:
+            print(f"🔍 DEBUG: Found prepared_statements for {char_name}: {char_data['prepared_statements']}")
+            if isinstance(char_data["prepared_statements"], list):
+                # Convert list format to dict format
+                statements_dict = {}
+                for stmt in char_data["prepared_statements"]:
+                    if isinstance(stmt, dict) and "name" in stmt and "statement" in stmt:
+                        statements_dict[stmt["name"]] = stmt["statement"]
+                        print(f"   📜 Added statement '{stmt['name']}' for {char_name}")
+                char_data["prepared_statements"] = statements_dict
+                print(f"   ✅ Converted {len(statements_dict)} statements to dict format")
+            else:
+                print(f"   📋 Statements already in dict format: {list(char_data['prepared_statements'].keys()) if isinstance(char_data['prepared_statements'], dict) else 'unknown format'}")
         
         characters[char_name] = CharacterConfig(
             name=char_name,
