@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 List all available audio devices on the system.
-This helps configure the output_device_index in config.yaml
+This helps configure the output_device_name in config.yaml
 """
 
 import pyaudio
@@ -64,12 +64,14 @@ def list_all_audio_devices():
     print("💡 HOW TO USE:")
     print("="*60)
     print("1. Find your desired OUTPUT device from the list above")
-    print("2. Note its index number")
+    print("2. Note part of its name (device names are matched using partial matching)")
     print("3. In config.yaml, under 'tts:', add:")
-    print("   output_device_index: <your_device_index>")
+    print("   output_device_name: \"<partial_device_name>\"")
     print("\nExample:")
     print("   tts:")
-    print("     output_device_index: 2  # Use device at index 2")
+    print("     output_device_name: \"Loopback Audio\"  # Matches 'Loopback Audio' device")
+    print("     # or")
+    print("     output_device_name: \"Speakers\"        # Matches any device with 'Speakers' in name")
     print("\n")
 
 if __name__ == "__main__":

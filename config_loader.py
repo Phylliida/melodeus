@@ -109,7 +109,7 @@ class SpeakersConfig:
 class AudioConfig:
     """Audio device configuration."""
     input_device_index: Optional[int] = None
-    output_device_index: Optional[int] = None
+    output_device_name: Optional[str] = None
 
 @dataclass
 class LoggingConfig:
@@ -396,7 +396,7 @@ class ConfigLoader:
             emotive_stability=tts_config_data.get('emotive_stability', 0.5),
             emotive_similarity_boost=tts_config_data.get('emotive_similarity_boost', 0.8),
             # Audio output device
-            output_device_index=tts_config_data.get('output_device_index')
+            output_device_name=tts_config_data.get('output_device_name')
         )
         
         # Create conversation configuration
@@ -446,7 +446,7 @@ class ConfigLoader:
         # Create other configurations
         audio_config = AudioConfig(
             input_device_index=audio_config_data.get('input_device_index'),
-            output_device_index=audio_config_data.get('output_device_index')
+            output_device_name=audio_config_data.get('output_device_name')
         )
         
         logging_config = LoggingConfig(

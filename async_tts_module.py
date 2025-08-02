@@ -48,7 +48,7 @@ class TTSConfig:
     emotive_stability: float = 0.5
     emotive_similarity_boost: float = 0.8
     # Audio output device
-    output_device_index: Optional[int] = None  # None = default device, or specify device index
+    output_device_name: Optional[str] = None  # None = default device, or specify device name
 
 @dataclass
 class ToolCall:
@@ -1196,10 +1196,13 @@ class AsyncTTSStreamer:
                     'frames_per_buffer': self.config.buffer_size
                 }
                 
-                # Add output device index if specified
-                if self.config.output_device_index is not None:
-                    stream_kwargs['output_device_index'] = self.config.output_device_index
-                    print(f"🔊 Using output device index: {self.config.output_device_index}")
+                # Add output device index if specified (resolve from name if needed)
+                output_device_index = None
+                if self.config.output_device_name is not None:
+                    output_device_index = find_audio_device_by_name(self.config.output_device_name)
+                    if output_device_index is not None:
+                        stream_kwargs['output_device_index'] = output_device_index
+                        print(f"🔊 Using output device: '{self.config.output_device_name}' (index {output_device_index})")
                 
                 self.stream = self.p.open(**stream_kwargs)
                 
@@ -1624,6 +1627,33 @@ async def main():
         print("\n👋 Interrupted by user")
     finally:
         await tts.cleanup()
+
+def find_audio_device_by_name(device_name: str) -> Optional[int]:
+    """Find audio output device index by name (partial match)."""
+    if not device_name:
+        return None
+        
+    p = pyaudio.PyAudio()
+    try:
+        device_name_lower = device_name.lower()
+        
+        for i in range(p.get_device_count()):
+            info = p.get_device_info_by_index(i)
+            if info['maxOutputChannels'] > 0:  # Only check output devices
+                if device_name_lower in info['name'].lower():
+                    print(f"🎯 Found audio device: '{info['name']}' (index {i}) for name '{device_name}'")
+                    return i
+        
+        print(f"⚠️ No audio device found matching '{device_name}'")
+        print("Available output devices:")
+        for i in range(p.get_device_count()):
+            info = p.get_device_info_by_index(i)
+            if info['maxOutputChannels'] > 0:
+                print(f"  - {info['name']}")
+        return None
+        
+    finally:
+        p.terminate()
 
 def list_audio_output_devices():
     """List all available audio output devices with their indices."""

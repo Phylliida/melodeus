@@ -445,8 +445,8 @@ class UnifiedVoiceConversation:
             # Also extract speakers from the current conversation state (where Unknown Speakers would be)
             additional_speakers = set()
             for turn in self.state.conversation_history:
-                if hasattr(turn, 'speaker') and turn.speaker:
-                    additional_speakers.add(turn.speaker)
+                if hasattr(turn, 'speaker_name') and turn.speaker_name:
+                    additional_speakers.add(turn.speaker_name)
                 # Also check for speaker names in content for turns that might have embedded speaker info
                 if hasattr(turn, 'content') and turn.content:
                     # Look for patterns like "Unknown Speaker 1:" in the content
