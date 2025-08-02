@@ -106,7 +106,7 @@ class UnifiedVoiceConversation:
             # Check if echo cancellation is actually available in STT
             if hasattr(self.stt, 'echo_canceller') and self.stt.echo_canceller is not None:
                 # Set callback for TTS to send reference audio to STT
-                self.tts.set_echo_cancellation_callback(self.stt.add_reference_audio)
+        
                 print("🔊 Echo cancellation connected: TTS -> STT")
             else:
                 print("⚠️  Echo cancellation requested but not available - please install speexdsp")
@@ -227,7 +227,7 @@ class UnifiedVoiceConversation:
         # Connect thinking sound to echo cancellation if enabled
         if config.conversation.enable_echo_cancellation:
             if hasattr(self.stt, 'echo_canceller') and self.stt.echo_canceller is not None:
-                self.thinking_sound.set_echo_cancellation_callback(self.stt.add_reference_audio)
+        
                 print("🔊 Echo cancellation connected: Thinking sound -> STT")
         
         # Initialize echo filter
@@ -428,6 +428,39 @@ class UnifiedVoiceConversation:
             # Clear current history and load from context
             self.state.conversation_history = context.current_history.copy()
             print(f"📋 Synced history from context '{context.config.name}': {len(self.state.conversation_history)} turns")
+            
+            # Rebuild detected_speakers from both original history and current conversation state
+            if not hasattr(self, 'detected_speakers'):
+                self.detected_speakers = set()
+            
+            # First, get speakers from original history file
+            if context.config.history_file:
+                try:
+                    # Re-parse to rebuild detected_speakers (but don't use the messages)
+                    _ = self._parse_history_file(context.config.history_file)
+                    print(f"🔄 Rebuilt detected speakers from '{context.config.history_file}': {sorted(self.detected_speakers)}")
+                except Exception as e:
+                    print(f"⚠️ Failed to rebuild detected speakers from history file: {e}")
+            
+            # Also extract speakers from the current conversation state (where Unknown Speakers would be)
+            additional_speakers = set()
+            for turn in self.state.conversation_history:
+                if hasattr(turn, 'speaker') and turn.speaker:
+                    additional_speakers.add(turn.speaker)
+                # Also check for speaker names in content for turns that might have embedded speaker info
+                if hasattr(turn, 'content') and turn.content:
+                    # Look for patterns like "Unknown Speaker 1:" in the content
+                    import re
+                    speaker_matches = re.findall(r'^([A-Za-z0-9_\s\.]+):', turn.content, re.MULTILINE)
+                    for match in speaker_matches:
+                        speaker_name = match.strip()
+                        if self._is_valid_speaker_name(speaker_name):
+                            additional_speakers.add(speaker_name)
+            
+            if additional_speakers:
+                self.detected_speakers.update(additional_speakers)
+                print(f"🔄 Added speakers from conversation state: {sorted(additional_speakers)}")
+                print(f"🔄 Total detected speakers: {sorted(self.detected_speakers)}")
     
     def _sync_history_to_context(self):
         """Sync conversation history to active context."""
@@ -857,6 +890,15 @@ class UnifiedVoiceConversation:
                             current_speaker = speaker_name
                             current_content = [message_content] if message_content else []
                     else:
+                        # Debug: log filtered speakers
+                        if "Unknown Speaker" in speaker_name:
+                            print(f"🚫 Filtered out speaker: '{speaker_name}' (validation failed)")
+                            # Additional debug for Unknown Speaker cases
+                            print(f"   Length: {len(speaker_name)} chars, Words: {len(speaker_name.split())}")
+                            invalid_chars = ['*', '[', ']', '(', ')', '"', "'"]
+                            has_invalid = any(char in speaker_name for char in invalid_chars)
+                            print(f"   Contains invalid chars: {has_invalid}")
+                        
                         # Invalid speaker - treat as continuation of current message or skip
                         if current_speaker:
                             # Add the full line including the colon as continuation
