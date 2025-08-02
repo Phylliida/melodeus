@@ -108,7 +108,7 @@ class SpeakersConfig:
 @dataclass
 class AudioConfig:
     """Audio device configuration."""
-    input_device_index: Optional[int] = None
+    input_device_name: Optional[str] = None
     output_device_name: Optional[str] = None
 
 @dataclass
@@ -372,6 +372,8 @@ class ConfigLoader:
             diarize=stt_config_data.get('diarize', True),
             utterance_end_ms=stt_config_data.get('utterance_end_ms', 1000),
             vad_events=stt_config_data.get('vad_events', True),
+            # Audio input device - check both stt and audio sections for backward compatibility
+            input_device_name=stt_config_data.get('input_device_name') or audio_config_data.get('input_device_name'),
             enable_speaker_id=stt_config_data.get('enable_speaker_id', False),
             speaker_profiles_path=stt_config_data.get('speaker_profiles_path'),
             keywords=keywords,
@@ -445,7 +447,7 @@ class ConfigLoader:
         
         # Create other configurations
         audio_config = AudioConfig(
-            input_device_index=audio_config_data.get('input_device_index'),
+            input_device_name=audio_config_data.get('input_device_name'),
             output_device_name=audio_config_data.get('output_device_name')
         )
         

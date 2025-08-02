@@ -1979,6 +1979,15 @@ class UnifiedVoiceConversation:
         except Exception as e:
             print(f"❌ OpenAI streaming error for {character_config.name}: {e}")
             raise
+        finally:
+            # Send completion signal to UI
+            if hasattr(self, 'ui_server'):
+                await self.ui_server.broadcast_ai_stream(
+                    speaker=character_config.name,
+                    text="",
+                    session_id=f"session_{request_timestamp}",
+                    is_complete=True
+                )
     
     async def _stream_character_anthropic_response(self, messages, character_config, request_timestamp):
         """Stream response from Anthropic for a specific character."""
@@ -2108,6 +2117,15 @@ class UnifiedVoiceConversation:
         except Exception as e:
             print(f"❌ Anthropic streaming error for {character_config.name}: {e}")
             raise
+        finally:
+            # Send completion signal to UI
+            if hasattr(self, 'ui_server'):
+                await self.ui_server.broadcast_ai_stream(
+                    speaker=character_config.name,
+                    text="",
+                    session_id=f"session_{request_timestamp}",
+                    is_complete=True
+                )
     
     async def _stream_character_bedrock_response(self, messages, character_config, request_timestamp):
         """Stream response from Bedrock for a specific character."""
@@ -2269,6 +2287,15 @@ class UnifiedVoiceConversation:
         except Exception as e:
             print(f"❌ Bedrock streaming error for {character_config.name}: {e}")
             raise
+        finally:
+            # Send completion signal to UI
+            if hasattr(self, 'ui_server'):
+                await self.ui_server.broadcast_ai_stream(
+                    speaker=character_config.name,
+                    text="",
+                    session_id=f"session_{request_timestamp}",
+                    is_complete=True
+                )
     
     def _get_conversation_history_for_director(self):
         """Get conversation history formatted for director.

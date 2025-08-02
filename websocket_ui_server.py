@@ -484,29 +484,41 @@ class VoiceUIServer:
     async def broadcast_transcription(self, speaker: str, text: str, 
                                     is_final: bool = False, is_interim: bool = False):
         """Broadcast transcription update."""
+        message_data = {
+            "speaker": speaker,
+            "text": text,
+            "is_final": is_final,
+            "is_interim": is_interim,
+            "timestamp": time.time()
+        }
+        
+        # Add message ID for final messages so they can be edited/deleted
+        if is_final and not is_interim:
+            message_data["message_id"] = str(uuid.uuid4())
+            
         await self.broadcast(UIMessage(
             type="transcription",
-            data={
-                "speaker": speaker,
-                "text": text,
-                "is_final": is_final,
-                "is_interim": is_interim,
-                "timestamp": time.time()
-            }
+            data=message_data
         ))
         
     async def broadcast_ai_stream(self, speaker: str, text: str, 
                                  is_complete: bool = False, session_id: str = ""):
         """Broadcast AI response stream."""
+        message_data = {
+            "speaker": speaker,
+            "text": text,
+            "is_complete": is_complete,
+            "session_id": session_id,
+            "timestamp": time.time()
+        }
+        
+        # Add message ID for completed messages so they can be edited/deleted
+        if is_complete:
+            message_data["message_id"] = str(uuid.uuid4())
+            
         await self.broadcast(UIMessage(
             type="ai_stream",
-            data={
-                "speaker": speaker,
-                "text": text,
-                "is_complete": is_complete,
-                "session_id": session_id,
-                "timestamp": time.time()
-            }
+            data=message_data
         ))
         
     async def broadcast_system_status(self):
