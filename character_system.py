@@ -440,14 +440,15 @@ class CharacterManager:
             "similarity_boost": config.voice_settings.get("similarity_boost", 0.8)
         }
     
-    def format_messages_for_character(self, character_name: str, conversation_history: List[Dict[str, str]]) -> List[Dict[str, str]]:
+    def format_messages_for_character(self, character_name: str, conversation_history: List[Dict[str, str]], 
+                                      context_character_histories: Optional[Dict[str, List[Any]]] = None) -> List[Dict[str, str]]:
         """
         Format conversation history for a specific character's perspective.
         
         Args:
             character_name: The character who will respond
             conversation_history: Full conversation history
-            prefill_format: If True, return in Anthropic prefill format
+            context_character_histories: Character-specific histories from the current context
             
         Returns:
             Formatted messages for the character's LLM
@@ -458,6 +459,19 @@ class CharacterManager:
         
         # Start with character's system prompt
         messages = [{"role": "system", "content": config.system_prompt}]
+        
+        # Add character-specific history from the current context if available
+        if context_character_histories and character_name in context_character_histories:
+            char_history = context_character_histories[character_name]
+            print(f"📚 Prepending {len(char_history)} messages from {character_name}'s context-specific history")
+            
+            # Convert ConversationTurn objects to message dicts
+            for turn in char_history:
+                messages.append({
+                    "role": turn.role,
+                    "content": turn.content
+                })
+        
         
         # First pass: count images in the conversation
         image_indices = []  # Store indices of messages containing images

@@ -37,6 +37,7 @@ class ContextConfig:
     history_file: str
     description: Optional[str] = None
     metadata: Optional[Dict[str, Any]] = None
+    character_histories: Optional[Dict[str, str]] = None  # Maps character name to their history file
     
 
 class ConversationContext:
@@ -49,6 +50,9 @@ class ConversationContext:
         
         # Original history loaded from file (immutable)
         self.original_history: List[ConversationTurn] = []
+        
+        # Character-specific histories for this context (immutable)
+        self.character_histories: Dict[str, List[ConversationTurn]] = {}
         
         # Current conversation state (mutable)
         self.current_history: List[ConversationTurn] = []
@@ -197,7 +201,8 @@ class ContextManager:
                 name=ctx_config['name'],
                 history_file=ctx_config['history_file'],
                 description=ctx_config.get('description'),
-                metadata=ctx_config.get('metadata', {})
+                metadata=ctx_config.get('metadata', {}),
+                character_histories=ctx_config.get('character_histories')
             )
             context = ConversationContext(config, self.state_dir)
             self.contexts[config.name] = context
@@ -206,6 +211,58 @@ class ContextManager:
         if self.contexts:
             self.active_context_name = list(self.contexts.keys())[0]
             print(f"🎯 Active context: '{self.active_context_name}'")
+    
+    def _parse_character_history_file(self, file_path: str, character_name: str) -> List[Dict[str, str]]:
+        """Parse a character-specific history file."""
+        try:
+            with open(file_path, 'r', encoding='utf-8') as f:
+                content = f.read().strip()
+            
+            messages = []
+            lines = content.split('\n')
+            i = 0
+            
+            while i < len(lines):
+                line = lines[i].strip()
+                if not line:
+                    i += 1
+                    continue
+                
+                # Simple parsing: look for "Speaker: content" pattern
+                if ': ' in line:
+                    speaker, message = line.split(': ', 1)
+                    
+                    # Collect multi-line messages
+                    full_message = [message]
+                    i += 1
+                    
+                    # Continue collecting lines until we hit another speaker or end
+                    while i < len(lines):
+                        next_line = lines[i].strip()
+                        if not next_line or (': ' in next_line and any(next_line.startswith(s + ': ') 
+                                                                       for s in ['User', 'Human', 'H', character_name])):
+                            break
+                        full_message.append(next_line)
+                        i += 1
+                    
+                    # Determine role
+                    if speaker.lower() in ['user', 'human', 'h']:
+                        role = 'user'
+                    else:
+                        role = 'assistant'
+                    
+                    messages.append({
+                        'role': role,
+                        'content': '\n'.join(full_message).strip()
+                    })
+                else:
+                    i += 1
+            
+            return messages
+            
+        except Exception as e:
+            print(f"❌ Error parsing character history file {file_path}: {e}")
+            return []
     
     def get_active_context(self) -> Optional[ConversationContext]:
         """Get the currently active context."""
@@ -266,6 +323,33 @@ class ContextManager:
                 print(f"   ✅ Loaded {len(context.original_history)} turns")
             else:
                 print(f"   ⚠️ No history file for context '{context.config.name}'")
+            
+            # Load character-specific histories for this context
+            if context.config.character_histories:
+                print(f"📚 Loading character histories for context '{context.config.name}'")
+                for char_name, char_history_file in context.config.character_histories.items():
+                    if Path(char_history_file).exists():
+                        print(f"   📖 Loading {char_name}'s history from {char_history_file}")
+                        
+                        # Parse character history file
+                        char_messages = self._parse_character_history_file(char_history_file, char_name)
+                        
+                        # Convert to ConversationTurn objects
+                        char_turns = []
+                        for msg in char_messages:
+                            turn = ConversationTurn(
+                                role=msg["role"],
+                                content=msg["content"],
+                                timestamp=datetime.now(),
+                                status="completed",
+                                character=char_name if msg["role"] == "assistant" else None
+                            )
+                            char_turns.append(turn)
+                        
+                        context.character_histories[char_name] = char_turns
+                        print(f"      ✅ Loaded {len(char_turns)} turns for {char_name}")
+                    else:
+                        print(f"      ⚠️ Character history file not found: {char_history_file}")
     
     def load_all_states(self):
         """Load saved states for all contexts."""

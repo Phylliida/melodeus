@@ -1655,9 +1655,17 @@ class UnifiedVoiceConversation:
                 )
             else:
                 # Standard chat format
+                # Get character histories from current context if available
+                context_char_histories = None
+                if self.context_manager:
+                    active_context = self.context_manager.get_active_context()
+                    if active_context:
+                        context_char_histories = active_context.character_histories
+                
                 messages = self.character_manager.format_messages_for_character(
                     next_speaker,
-                    self._get_conversation_history_for_character()
+                    self._get_conversation_history_for_character(),
+                    context_char_histories
                 )
             
             # Log the request
