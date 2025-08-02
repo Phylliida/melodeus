@@ -11,7 +11,7 @@ pyyaml>=6.0.0
 opencv-python>=4.12.0
 groq
 openai
-anthropic
+anthropic[bedrock]>=0.18.0
 scipy
 python-osc>=1.8.0
 speexdsp>=0.1.2

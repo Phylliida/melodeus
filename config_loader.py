@@ -23,6 +23,10 @@ class ConversationConfig:
     elevenlabs_api_key: str
     openai_api_key: str
     anthropic_api_key: str = ""
+    # AWS credentials for Bedrock
+    aws_access_key_id: str = ""
+    aws_secret_access_key: str = ""
+    aws_region: str = "us-west-2"
     
     # Voice settings
     voice_id: str = "T2KZm9rWPG5TgXTyjt7E"
@@ -48,7 +52,7 @@ class ConversationConfig:
     tts_similarity_boost: float = 0.8
     
     # LLM settings
-    llm_provider: str = "openai"  # openai or anthropic
+    llm_provider: str = "openai"  # openai, anthropic, or bedrock
     llm_model: str = "chatgpt-4o-latest"
     conversation_mode: str = "chat"  # chat or prefill
     max_tokens: int = 300
@@ -150,6 +154,7 @@ class OSCConfig:
     speaking_start_address: str = "/character/speaking/start"
     speaking_stop_address: str = "/character/speaking/stop"
     color_change_address: str = "/character/color/change"
+    blank_output_address: str = "/character/blank"
 
 
 @dataclass
@@ -323,6 +328,11 @@ class ConfigLoader:
         if conversation_config_data.get('llm_provider') == 'anthropic' and not api_keys.get('anthropic'):
             raise ValueError("Anthropic API key is required when using Anthropic as LLM provider")
         
+        # Check for AWS credentials if Bedrock provider is selected
+        if conversation_config_data.get('llm_provider') == 'bedrock':
+            if not api_keys.get('aws_access_key_id') or not api_keys.get('aws_secret_access_key'):
+                raise ValueError("AWS credentials (aws_access_key_id and aws_secret_access_key) are required when using Bedrock as LLM provider")
+        
         # Extract configuration sections
         voice_config = config_data.get('voice', {})
         stt_config_data = config_data.get('stt', {})
@@ -395,6 +405,10 @@ class ConfigLoader:
             elevenlabs_api_key=api_keys['elevenlabs'],
             openai_api_key=api_keys['openai'],
             anthropic_api_key=api_keys.get('anthropic', ''),
+            # AWS credentials for Bedrock
+            aws_access_key_id=api_keys.get('aws_access_key_id', ''),
+            aws_secret_access_key=api_keys.get('aws_secret_access_key', ''),
+            aws_region=api_keys.get('aws_region', 'us-west-2'),
             voice_id=voice_config.get('id', 'T2KZm9rWPG5TgXTyjt7E'),
             pause_threshold=conversation_config_data.get('pause_threshold', 2.0),
             min_words_for_submission=conversation_config_data.get('min_words_for_submission', 3),
@@ -508,7 +522,8 @@ class ConfigLoader:
                 port=osc_data.get('port', 7000),
                 speaking_start_address=osc_data.get('speaking_start_address', '/character/speaking/start'),
                 speaking_stop_address=osc_data.get('speaking_stop_address', '/character/speaking/stop'),
-                color_change_address=osc_data.get('color_change_address', '/character/color/change')
+                color_change_address=osc_data.get('color_change_address', '/character/color/change'),
+                blank_output_address=osc_data.get('blank_output_address', '/character/blank')
             )
         
         # Create contexts configuration

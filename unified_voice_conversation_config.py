@@ -75,6 +75,8 @@ class UnifiedVoiceConversation:
         self.openai_client = None
         self.anthropic_client = None
         self.async_anthropic_client = None
+        self.bedrock_client = None
+        self.async_bedrock_client = None
         
         # Track processing tasks to prevent race conditions
         self._processing_task = None
@@ -82,13 +84,7 @@ class UnifiedVoiceConversation:
         # Track director requests separately
         self._director_generation = 0
         
-        if config.conversation.llm_provider == "openai":
-            self.openai_client = OpenAI(api_key=config.conversation.openai_api_key)
-        elif config.conversation.llm_provider == "anthropic":
-            if not config.conversation.anthropic_api_key:
-                raise ValueError("Anthropic API key is required when using Anthropic provider")
-            # Use async client for better responsiveness
-            self.async_anthropic_client = AsyncAnthropic(api_key=config.conversation.anthropic_api_key)
+        # LLM clients will be initialized after character manager is created
         
         # Initialize STT system with participant names as keywords
         self._setup_stt_keywords(config)
@@ -202,6 +198,9 @@ class UnifiedVoiceConversation:
                 }
         
         self.character_manager: CharacterManager = create_character_manager(characters_config)
+        
+        # Initialize LLM clients based on conversation default and actual character providers
+        self._initialize_llm_clients(config)
         
         # Initialize context manager if enabled
         self.context_manager = None
@@ -1732,6 +1731,46 @@ class UnifiedVoiceConversation:
                         if self.echo_filter:
                             self.echo_filter.on_tts_interrupted(session_id, spoken_text)
                     
+                    # Store assistant response
+                    assistant_response = getattr(self.tts, 'last_session_generated_text', '')
+                    if assistant_response:
+                        print(f"📝 Captured assistant response: {len(assistant_response)} chars")
+                    else:
+                        print("⚠️ No TTS session or generated text available")
+                finally:
+                    # Restore original voice config
+                    self._restore_voice_config(original_config)
+            elif character_config.llm_provider == "bedrock":
+                # Temporarily set character voice
+                original_config = self._set_character_voice(character_config)
+                try:
+                    # Create TTS task for this character
+                    self.state.current_llm_task = asyncio.create_task(
+                        self.tts.speak_stream_multi_voice(
+                            self._stream_character_bedrock_response(messages, character_config, request_timestamp)
+                        )
+                    )
+                    
+                    # Wait for completion
+                    try:
+                        completed = await self.state.current_llm_task
+                    except asyncio.CancelledError:
+                        print("⚠️ Character response was interrupted")
+                        completed = False
+                    
+                    # Update echo filter with completion status
+                    session_id = f"anthropic_{character_config.name}_{request_timestamp}"
+                    if completed:
+                        if self.echo_filter:
+                            self.echo_filter.on_tts_complete(session_id)
+                    else:
+                        # Get spoken text if interrupted
+                        spoken_text = None
+                        if hasattr(self.tts, 'get_spoken_text_heuristic'):
+                            spoken_text = self.tts.get_spoken_text_heuristic()
+                        if self.echo_filter:
+                            self.echo_filter.on_tts_interrupted(session_id, spoken_text)
+                    
                     # Get the appropriate text based on whether it was interrupted
                     if hasattr(self.tts, 'current_session') and self.tts.current_session:
                         if completed:
@@ -1849,6 +1888,8 @@ class UnifiedVoiceConversation:
                 # Send OSC stop message before clearing current speaker
                 if self.state.current_speaker:
                     self._send_osc_speaking_stop(self.state.current_speaker)
+                    # Send blank output message for TouchDesigner laser rendering
+                    self._send_osc_blank_output()
                 self.state.current_speaker = None
             
             # Broadcast that speaking/processing has ended
@@ -2024,6 +2065,158 @@ class UnifiedVoiceConversation:
                     
         except Exception as e:
             print(f"❌ Anthropic streaming error for {character_config.name}: {e}")
+            raise
+    
+    async def _stream_character_bedrock_response(self, messages, character_config, request_timestamp):
+        """Stream response from Bedrock for a specific character."""
+        # For Bedrock, we use the async bedrock client
+        client = self.async_bedrock_client
+        
+        # Create session ID for echo tracking
+        session_id = f"bedrock_{character_config.name}_{request_timestamp}"
+        if self.echo_filter:
+            self.echo_filter.on_tts_start(session_id, character_config.name)
+        
+        try:
+            # Check if messages are already in prefill format
+            is_prefill_format = False
+            prefill_name = None
+            
+            # Check if last message is assistant (typical prefill pattern)
+            if len(messages) > 0:
+                last_msg = messages[-1]
+                if last_msg.get("role") == "assistant":
+                    is_prefill_format = True
+                    # Extract prefill name from the assistant message content
+                    content = last_msg.get("content", "")
+                    if content.endswith(":"):
+                        # Extract the name before the final colon
+                        parts = content.rsplit("\n", 1)
+                        if len(parts) > 0:
+                            last_line = parts[-1].strip()
+                            if last_line.endswith(":"):
+                                prefill_name = last_line[:-1]
+            
+            messages_to_send = messages
+            
+            # Extract system content and prepare messages
+            system_content = ""
+            anthropic_messages = []
+            
+            for msg in messages_to_send:
+                if msg["role"] == "system":
+                    system_content = msg["content"]
+                else:
+                    # Create a clean copy without metadata
+                    clean_msg = {"role": msg["role"], "content": msg["content"]}
+                    anthropic_messages.append(clean_msg)
+            
+            # Generate stop sequences for multi-character conversations
+            stop_sequences = []
+            if is_prefill_format:
+                # Add all character names as stop sequences
+                for char_name in self.character_manager.characters.keys():
+                    stop_sequences.append(f"\n\n{char_name}:")
+                    # Also add prefill names if different
+                    char_config = self.character_manager.get_character_config(char_name)
+                    if char_config and char_config.prefill_name and char_config.prefill_name != char_name:
+                        stop_sequences.append(f"\n\n{char_config.prefill_name}:")
+                
+                # Add human names
+                if hasattr(self.config.conversation, 'prefill_participants'):
+                    human_name = self.config.conversation.prefill_participants[0]
+                    stop_sequences.append(f"\n\n{human_name}:")
+                
+                # Add any detected speakers
+                if hasattr(self, 'detected_speakers') and self.detected_speakers:
+                    for speaker in self.detected_speakers:
+                        speaker_stop = f"\n\n{speaker}:"
+                        if speaker_stop not in stop_sequences:
+                            stop_sequences.append(speaker_stop)
+                
+                # Add default system stop sequence
+                stop_sequences.append("\n\nSystem:")
+                stop_sequences.append("\n\nA:")
+                
+                # Remove duplicates while preserving order
+                stop_sequences = list(dict.fromkeys(stop_sequences))
+                print(f"🛑 Character using stop sequences: {stop_sequences}")
+            
+            # For Bedrock, model names start with "anthropic."
+            model_name = character_config.llm_model
+            if not model_name.startswith("anthropic."):
+                model_name = f"anthropic.{model_name}"
+            
+            response = await client.messages.create(
+                model=model_name,
+                messages=anthropic_messages,
+                system=system_content,
+                stream=True,
+                max_tokens=character_config.max_tokens,
+                temperature=character_config.temperature,
+                stop_sequences=stop_sequences if stop_sequences else None
+            )
+            
+            # Track if we need to skip the prefill prefix
+            skip_prefix = is_prefill_format
+            prefix_buffer = "" if skip_prefix else None
+            
+            async for chunk in response:
+                if chunk.type == "content_block_delta" and chunk.delta.text:
+                    text = chunk.delta.text
+                    
+                    # For prefill mode, skip the initial character name
+                    if prefix_buffer is not None:
+                        prefix_buffer += text
+                        # Check if we've collected enough to detect the prefix
+                        if "\n" in prefix_buffer or len(prefix_buffer) > 50:
+                            # Look for the character name prefix pattern
+                            if prefill_name:
+                                prefix_pattern = f"{prefill_name}: "
+                                if prefix_buffer.startswith(prefix_pattern):
+                                    # Skip the prefix and output the rest
+                                    remaining = prefix_buffer[len(prefix_pattern):]
+                                    if remaining:
+                                        # Track for echo filter
+                                        if self.echo_filter:
+                                            self.echo_filter.on_tts_chunk(session_id, remaining)
+                                        yield remaining
+                                        # Broadcast to UI
+                                        if hasattr(self, 'ui_server'):
+                                            await self.ui_server.broadcast_ai_stream(
+                                                speaker=character_config.name,
+                                                text=remaining,
+                                                session_id=f"session_{request_timestamp}"
+                                            )
+                                else:
+                                    # No prefix found, output everything
+                                    # Track for echo filter
+                                    if self.echo_filter:
+                                        self.echo_filter.on_tts_chunk(session_id, prefix_buffer)
+                                    yield prefix_buffer
+                                    # Broadcast to UI
+                                    if hasattr(self, 'ui_server'):
+                                        await self.ui_server.broadcast_ai_stream(
+                                            speaker=character_config.name,
+                                            text=prefix_buffer,
+                                            session_id=f"session_{request_timestamp}"
+                                        )
+                            prefix_buffer = None  # Done checking for prefix
+                    else:
+                        # Track for echo filter
+                        if self.echo_filter:
+                            self.echo_filter.on_tts_chunk(session_id, text)
+                        yield text
+                        # Broadcast to UI
+                        if hasattr(self, 'ui_server'):
+                            await self.ui_server.broadcast_ai_stream(
+                                speaker=character_config.name,
+                                text=text,
+                                session_id=f"session_{request_timestamp}"
+                            )
+                    
+        except Exception as e:
+            print(f"❌ Bedrock streaming error for {character_config.name}: {e}")
             raise
     
     def _get_conversation_history_for_director(self):
@@ -2555,6 +2748,74 @@ class UnifiedVoiceConversation:
             print(f"❌ OSC send error: {type(e).__name__}: {e}")
             import traceback
             traceback.print_exc()
+    
+    def _initialize_llm_clients(self, config):
+        """Initialize LLM clients based on conversation default and actual character providers."""
+        providers_needed = {config.conversation.llm_provider}
+        
+        # Check what providers are needed by the actual loaded characters
+        if hasattr(self, 'character_manager') and self.character_manager:
+            for char_name, char_config in self.character_manager.characters.items():
+                if hasattr(char_config, 'llm_provider'):
+                    providers_needed.add(char_config.llm_provider)
+        
+        print(f"🔧 LLM providers needed: {providers_needed}")
+        
+        # Initialize clients for all needed providers
+        if "openai" in providers_needed:
+            self.openai_client = OpenAI(api_key=config.conversation.openai_api_key)
+            print("✅ OpenAI client initialized")
+            
+        if "anthropic" in providers_needed:
+            if not config.conversation.anthropic_api_key:
+                raise ValueError("Anthropic API key is required when using Anthropic provider")
+            # Use async client for better responsiveness
+            self.async_anthropic_client = AsyncAnthropic(api_key=config.conversation.anthropic_api_key)
+            print("✅ Anthropic client initialized")
+            
+        if "bedrock" in providers_needed:
+            if not config.conversation.aws_access_key_id or not config.conversation.aws_secret_access_key:
+                raise ValueError("AWS credentials are required when using Bedrock provider")
+            # Import AnthropicBedrock
+            from anthropic import AnthropicBedrock, AsyncAnthropicBedrock
+            # Initialize Bedrock clients
+            self.bedrock_client = AnthropicBedrock(
+                aws_region=config.conversation.aws_region,
+                aws_access_key=config.conversation.aws_access_key_id,
+                aws_secret_key=config.conversation.aws_secret_access_key
+            )
+            self.async_bedrock_client = AsyncAnthropicBedrock(
+                aws_region=config.conversation.aws_region,
+                aws_access_key=config.conversation.aws_access_key_id,
+                aws_secret_key=config.conversation.aws_secret_access_key
+            )
+            print(f"✅ Bedrock client initialized for AWS region: {config.conversation.aws_region}")
+
+    def _send_osc_blank_output(self):
+        """Send OSC message to blank the output (empty string for laser rendering)."""
+        if not self.config.osc:
+            print("🔇 OSC: Config not available")
+            return
+            
+        if not self.config.osc.enabled:
+            print("🔇 OSC: Disabled in config")
+            return
+            
+        if not self.osc_client:
+            print("❌ OSC: Client not initialized")
+            return
+            
+        try:
+            address = self.config.osc.blank_output_address
+            print(f"📡 OSC: Sending to {self.config.osc.host}:{self.config.osc.port}")
+            print(f"📡 OSC: Address: {address}, Data: ''")
+            
+            self.osc_client.send_message(address, "")
+            
+            print(f"✅ OSC: Blank output message sent successfully")
+        except Exception as e:
+            print(f"❌ OSC send error: {type(e).__name__}: {e}")
+            return
     
     async def switch_context(self, context_name: str) -> bool:
         """Switch to a different conversation context."""

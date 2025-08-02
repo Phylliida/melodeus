@@ -122,6 +122,10 @@ class CharacterManager:
                     client = AsyncAnthropic(api_key=char_config.api_key)
                 elif char_config.llm_provider == "groq":
                     client = AsyncGroq(api_key=char_config.api_key)
+                elif char_config.llm_provider == "bedrock":
+                    # For bedrock, use the conversation's bedrock client
+                    # This will be set later by the conversation system
+                    client = None
                 else:
                     raise ValueError(f"Unknown LLM provider: {char_config.llm_provider}")
                 
