@@ -8,6 +8,7 @@ import asyncio
 import json
 import websockets
 import logging
+import subprocess
 from typing import Optional
 
 logging.basicConfig(level=logging.DEBUG)
@@ -25,14 +26,36 @@ class FlicBridge:
         self.button_map = {
             '90:88:a9:50:65:83': {'action': 'force_interrupt'},                    # Button 1
             '90:88:a9:50:68:2c': {'action': 'trigger_speaker', 'speaker': 'Opus'},         # Button 2
-            '90:88:a9:50:6b:32': {'action': 'trigger_speaker', 'speaker': 'Sonnet'},       # Button 3
-            '90:88:a9:50:67:2c': {'action': 'trigger_speaker', 'speaker': 'sonnet3'},      # Button 4
-            '90:88:a9:50:6b:3d': {'action': 'trigger_speaker', 'speaker': 'haiku'},        # Button 5
-            '90:88:a9:50:63:a0': {'action': 'trigger_speaker', 'speaker': 'gpt4'},         # Button 6
-            '90:88:a9:50:65:8c': {'action': 'trigger_speaker', 'speaker': 'claude'},       # Button 7
-            '90:88:a9:50:65:6b': {'action': 'trigger_speaker', 'speaker': 'gemini'},       # Button 8
-            '90:88:a9:50:6b:10': {'action': 'trigger_speaker', 'speaker': 'llama'}         # Button 9
+            '90:88:a9:50:6b:32': {'action': 'trigger_speaker', 'speaker': 'Sonnet36'},       # Button 3
+            '90:88:a9:50:67:2c': {'action': 'trigger_speaker', 'speaker': 'Sonnet37'},      # Button 4
+            '90:88:a9:50:6b:3d': {'action': 'trigger_speaker', 'speaker': 'Haiku'},        # Button 5
+            '90:88:a9:50:63:a0': {'action': 'trigger_speaker', 'speaker': 'Opus4'},         # Button 6
+            '90:88:a9:50:65:8c': {'action': 'trigger_speaker', 'speaker': 'Sonnet4'},       # Button 7
+            '90:88:a9:50:65:6b': {'action': 'trigger_speaker', 'speaker': 'Sonnet35'},       # Button 8
+            '90:88:a9:50:6b:10': {'action': 'trigger_speaker', 'speaker': '3Sonnet'}         # Button 9
         }
+        
+    def clear_port(self):
+        """Kill any existing process using the TCP port."""
+        try:
+            # Find process using the port
+            result = subprocess.run(['lsof', '-ti', f':{self.tcp_port}'], 
+                                  capture_output=True, text=True)
+            
+            if result.returncode == 0 and result.stdout.strip():
+                pid = result.stdout.strip()
+                logger.info(f"Found existing process {pid} using port {self.tcp_port}, killing it...")
+                
+                # Kill the process
+                subprocess.run(['kill', '-9', pid], check=True)
+                logger.info(f"Successfully killed process {pid}")
+            else:
+                logger.info(f"Port {self.tcp_port} is free")
+                
+        except subprocess.CalledProcessError as e:
+            logger.warning(f"Error clearing port {self.tcp_port}: {e}")
+        except Exception as e:
+            logger.error(f"Unexpected error clearing port {self.tcp_port}: {e}")
         
     async def connect_websocket(self):
         """Connect to WebSocket server with auto-reconnect."""
@@ -156,6 +179,9 @@ class FlicBridge:
             
     async def start(self):
         """Start the bridge server."""
+        # Clear any existing process on the port
+        self.clear_port()
+        
         # Start WebSocket connection task
         self.reconnect_task = asyncio.create_task(self.connect_websocket())
         
