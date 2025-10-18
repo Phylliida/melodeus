@@ -8,6 +8,7 @@ resampling for the STT (Deepgram) and TTS (ElevenLabs) pipelines.
 """
 
 import math
+import os
 import threading
 from dataclasses import dataclass
 from typing import Any, Optional
@@ -38,6 +39,55 @@ _stream_started = False
 _MISSING = object()
 
 
+@dataclass(frozen=True)
+class AutoGainSettings:
+    target_rms: float
+    smoothing: float
+    ratio_max: float
+    ratio_min: float
+    min_gain: float
+    max_gain: float
+
+
+def _env_float(name: str, default: float) -> float:
+    raw = os.getenv(name)
+    if raw is None:
+        return default
+    try:
+        value = float(raw.strip())
+    except (TypeError, ValueError, AttributeError):
+        return default
+    if not math.isfinite(value):
+        return default
+    return value
+
+
+def _load_auto_gain_settings() -> AutoGainSettings:
+    target = _env_float("AEC_TARGET_RMS", 0.2)
+    smoothing = float(np.clip(_env_float("AEC_GAIN_SMOOTHING", 0.1), 0.0, 1.0))
+    ratio_max = max(1.0, _env_float("AEC_GAIN_RATIO_MAX", 3.0))
+    ratio_min_raw = _env_float("AEC_GAIN_RATIO_MIN", 0.3333333333)
+    ratio_min = max(0.1, min(ratio_min_raw, 1.0)) if math.isfinite(ratio_min_raw) else 0.3333333333
+    min_gain = max(1e-6, _env_float("AEC_MIN_GAIN", 0.1))
+    max_gain_candidate = _env_float("AEC_MAX_GAIN", 20.0)
+    max_gain = max(min_gain, max_gain_candidate if math.isfinite(max_gain_candidate) else 20.0)
+    target = target if target > 0.0 and math.isfinite(target) else 0.2
+    return AutoGainSettings(
+        target_rms=target,
+        smoothing=smoothing,
+        ratio_max=ratio_max,
+        ratio_min=ratio_min,
+        min_gain=min_gain,
+        max_gain=max_gain,
+    )
+
+
+_AUTO_GAIN_SETTINGS = _load_auto_gain_settings()
+_auto_gain_lock = threading.Lock()
+_auto_gain_value = float(np.clip(1.0, _AUTO_GAIN_SETTINGS.min_gain, _AUTO_GAIN_SETTINGS.max_gain))
+_AUTO_GAIN_ENABLED = True
+
+
 def _normalize_device_name(name: Optional[Any]) -> Optional[str]:
     if name is None:
         return None
@@ -57,6 +107,50 @@ def _coerce_optional_bool(value: Optional[Any]) -> Optional[bool]:
         if lowered in {"false", "0", "no", "off"}:
             return False
     return bool(value)
+
+
+_auto_gain_enabled_env = _coerce_optional_bool(os.getenv("AEC_ENABLE_AUTO_GAIN"))
+if _auto_gain_enabled_env is not None:
+    _AUTO_GAIN_ENABLED = _auto_gain_enabled_env
+
+
+def _reset_auto_gain() -> None:
+    global _auto_gain_value
+    with _auto_gain_lock:
+        _auto_gain_value = float(
+            np.clip(1.0, _AUTO_GAIN_SETTINGS.min_gain, _AUTO_GAIN_SETTINGS.max_gain)
+        )
+
+
+def current_auto_gain() -> float:
+    with _auto_gain_lock:
+        return _auto_gain_value
+
+
+def _update_auto_gain(rms: float) -> float:
+    settings = _AUTO_GAIN_SETTINGS
+    if not _AUTO_GAIN_ENABLED or settings.target_rms <= 0.0:
+        with _auto_gain_lock:
+            clamped = float(np.clip(_auto_gain_value, settings.min_gain, settings.max_gain))
+            _auto_gain_value = clamped
+            return clamped
+    if not math.isfinite(rms) or rms < 0.0:
+        rms = 0.0
+    with _auto_gain_lock:
+        auto_gain = _auto_gain_value
+        if rms > 1e-6:
+            ratio = settings.target_rms / max(rms, 1e-6)
+            ratio = float(np.clip(ratio, settings.ratio_min, settings.ratio_max))
+            desired = float(np.clip(auto_gain * ratio, settings.min_gain, settings.max_gain))
+        else:
+            desired = min(settings.max_gain, auto_gain * settings.ratio_max)
+        smoothing = float(np.clip(settings.smoothing, 0.0, 1.0))
+        updated = auto_gain + (desired - auto_gain) * smoothing
+        if not math.isfinite(updated):
+            updated = settings.min_gain
+        updated = float(np.clip(updated, settings.min_gain, settings.max_gain))
+        _auto_gain_value = updated
+        return updated
 
 
 def configure_audio_stream(
@@ -153,6 +247,7 @@ def configure_audio_stream(
                 _stream_started = False
 
         _stream_settings = new_settings
+        _reset_auto_gain()
 
 
 def configure_audio_stream_from_config(config: Any) -> None:
@@ -252,6 +347,7 @@ def stop_stream():
         if _shared_stream and _stream_started:
             _shared_stream.stop()
             _stream_started = False
+            _reset_auto_gain()
 
 
 def shared_sample_rate() -> int:
@@ -322,6 +418,10 @@ def read_capture_chunk(target_samples: int, target_rate: int) -> bytes:
     float_audio = stream.read(samples_needed)
     if float_audio.size == 0:
         return b""
+    if not np.isfinite(float_audio).all():
+        float_audio = np.nan_to_num(float_audio, nan=0.0, posinf=0.0, neginf=0.0, copy=False)
+    rms = float(np.sqrt(np.mean(np.square(float_audio, dtype=np.float64)))) if float_audio.size else 0.0
+    active_gain = _update_auto_gain(rms)
     resampled = _resample(float_audio, settings.sample_rate, target_rate)
     # Guarantee we do not exceed the requested chunk size to avoid buffering drift.
     if resampled.size > target_samples:
@@ -329,4 +429,6 @@ def read_capture_chunk(target_samples: int, target_rate: int) -> bytes:
     elif resampled.size < target_samples:
         # Pad with silence if the buffer was short.
         resampled = np.pad(resampled, (0, target_samples - resampled.size), "constant")
+    if resampled.size:
+        resampled = resampled * active_gain
     return float_to_int16_bytes(resampled)
