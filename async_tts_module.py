@@ -9,7 +9,6 @@ import asyncio
 import websockets
 import json
 import base64
-import pyaudio
 import threading
 import queue
 import time
@@ -19,6 +18,25 @@ import difflib
 from typing import Optional, AsyncGenerator, Dict, Any, List, Tuple
 from dataclasses import dataclass, field
 from scipy import signal
+
+try:
+    from mel_aec_audio import (
+        ensure_stream_started,
+        shared_sample_rate,
+        write_playback_pcm,
+    )
+except ImportError:  # pragma: no cover - fallback when running from repo root
+    import os
+    import sys
+
+    CURRENT_DIR = os.path.dirname(__file__)
+    if CURRENT_DIR and CURRENT_DIR not in sys.path:
+        sys.path.insert(0, CURRENT_DIR)
+    from mel_aec_audio import (
+        ensure_stream_started,
+        shared_sample_rate,
+        write_playback_pcm,
+    )
 
 # Import Whisper TTS Tracker
 try:
@@ -90,9 +108,8 @@ class AsyncTTSStreamer:
         self.websocket = None
         self.audio_task = None
         
-        # Audio setup
-        self.p = pyaudio.PyAudio()
-        self.stream = None
+        # Audio setup (shared mel-aec duplex stream)
+        self.stream_sample_rate = shared_sample_rate()
         
         # Control flags
         self._stop_requested = False
@@ -370,15 +387,6 @@ class AsyncTTSStreamer:
                 # Force stop the previous playback
                 self.is_playing = False
                 self._clear_audio_queue()  # Clear any remaining audio
-                
-                # Close the stream to force the thread to exit
-                if self.stream:
-                    try:
-                        self.stream.stop_stream()
-                        self.stream.close()
-                        self.stream = None
-                    except Exception as e:
-                        print(f"Error closing previous stream: {e}")
                 
                 # Wait for thread to actually exit
                 max_wait = 1.0
@@ -1184,43 +1192,20 @@ class AsyncTTSStreamer:
     def _start_audio_playback(self):
         """Start the audio playback thread."""
         if not self.is_playing:
-            # Clean up any existing stream first
-            if self.stream:
-                try:
-                    self.stream.stop_stream()
-                    self.stream.close()
-                except Exception:
-                    pass
-                self.stream = None
-            
-            # Open new stream
             try:
-                stream_kwargs = {
-                    'format': pyaudio.paInt16,
-                    'channels': 1,
-                    'rate': self.config.sample_rate,
-                    'output': True,
-                    'frames_per_buffer': self.config.buffer_size
-                }
-                
-                # Add output device index if specified (resolve from name if needed)
-                output_device_index = None
-                if self.config.output_device_name is not None:
-                    output_device_index = find_audio_device_by_name(self.config.output_device_name)
-                    if output_device_index is not None:
-                        stream_kwargs['output_device_index'] = output_device_index
-                        print(f"🔊 Using output device: '{self.config.output_device_name}' (index {output_device_index})")
-                
-                self.stream = self.p.open(**stream_kwargs)
-                
-                self.is_playing = True
-                self.playback_thread = threading.Thread(target=self._audio_playback_worker)
-                self.playback_thread.daemon = True
-                self.playback_thread.start()
-                
+                ensure_stream_started()
             except Exception as e:
-                print(f"Failed to start audio playback: {e}")
+                print(f"Failed to start mel-aec playback stream: {e}")
                 self.is_playing = False
+                return
+            
+            if self.config.output_device_name:
+                print(f"🔊 Preferred output device: {self.config.output_device_name}")
+            
+            self.is_playing = True
+            self.playback_thread = threading.Thread(target=self._audio_playback_worker)
+            self.playback_thread.daemon = True
+            self.playback_thread.start()
     
     def _stop_audio_playback(self):
         """Stop the audio playback thread (sync version)."""
@@ -1229,14 +1214,7 @@ class AsyncTTSStreamer:
             
             if self.playback_thread:
                 self.playback_thread.join(timeout=2.0)
-                
-            if self.stream:
-                try:
-                    self.stream.stop_stream()
-                    self.stream.close()
-                except Exception as e:
-                    print(f"Error stopping audio stream: {e}")
-                self.stream = None
+                self.playback_thread = None
     
     async def _stop_audio_playback_async(self):
         """Stop the audio playback thread and wait for complete shutdown."""
@@ -1261,19 +1239,6 @@ class AsyncTTSStreamer:
                 # Thread should exit on its own when is_playing = False
         
         # Clean up audio stream if it still exists
-        if self.stream:
-            try:
-                # Check if stream is still active before trying to stop
-                if hasattr(self.stream, '_stream') and self.stream._stream:
-                    self.stream.stop_stream()
-                    self.stream.close()
-                    print("🔇 Audio stream closed")
-            except Exception as e:
-                # This is expected if stream was already closed in stop()
-                if "Stream not open" not in str(e):
-                    print(f"Error stopping audio stream: {e}")
-            self.stream = None
-        
         self.playback_thread = None
         print("✅ Audio playback fully stopped")
     
@@ -1290,7 +1255,7 @@ class AsyncTTSStreamer:
                 audio_chunk = self.audio_queue.get(timeout=0.05)  # 50ms timeout
                 
                 # Double-check stop status and session before writing
-                if audio_chunk and self.stream and not self._stop_requested and self.is_playing:
+                if audio_chunk and not self._stop_requested and self.is_playing:
                     # Also check if this worker's session is still the current one
                     if worker_session != self.current_session:
                         print(f"🛑 Audio worker detected session change, stopping playback")
@@ -1318,15 +1283,13 @@ class AsyncTTSStreamer:
                             
                             # Play the segment with error handling
                             try:
-                                if self.stream and self.stream._stream:
-                                    self.stream.write(audio_segment)
-                                    # Track that we've played audio
-                                    if offset == 0:  # First segment of this chunk
-                                        self._chunks_played += 1
+                                write_playback_pcm(audio_segment, self.config.sample_rate)
+                                # Track that we've played audio
+                                if offset == 0:  # First segment of this chunk
+                                    self._chunks_played += 1
                             except Exception as e:
                                 # Stream was closed or error occurred
-                                if "Stream not open" not in str(e) and "-9986" not in str(e):
-                                    print(f"Audio segment write error: {e}")
+                                print(f"Audio segment write error: {e}")
                                 break
                             offset += current_segment_size
                         
@@ -1565,20 +1528,10 @@ class AsyncTTSStreamer:
     async def cleanup(self):
         """Clean up all resources."""
         await self.stop()
-        
-        if self.p:
-            try:
-                self.p.terminate()
-            except Exception as e:
-                print(f"Error terminating PyAudio: {e}")
     
     def __del__(self):
         """Destructor to ensure cleanup."""
-        if hasattr(self, 'p') and self.p:
-            try:
-                self.p.terminate()
-            except Exception:
-                pass
+        pass
 
 # Convenience function for quick usage
 async def speak_text(text: str, api_key: str, voice_id: str = "T2KZm9rWPG5TgXTyjt7E") -> bool:
@@ -1635,53 +1588,5 @@ async def main():
     finally:
         await tts.cleanup()
 
-def find_audio_device_by_name(device_name: str) -> Optional[int]:
-    """Find audio output device index by name (partial match)."""
-    if not device_name:
-        return None
-        
-    p = pyaudio.PyAudio()
-    try:
-        device_name_lower = device_name.lower()
-        
-        for i in range(p.get_device_count()):
-            info = p.get_device_info_by_index(i)
-            if info['maxOutputChannels'] > 0:  # Only check output devices
-                if device_name_lower in info['name'].lower():
-                    print(f"🎯 Found audio device: '{info['name']}' (index {i}) for name '{device_name}'")
-                    return i
-        
-        print(f"⚠️ No audio device found matching '{device_name}'")
-        print("Available output devices:")
-        for i in range(p.get_device_count()):
-            info = p.get_device_info_by_index(i)
-            if info['maxOutputChannels'] > 0:
-                print(f"  - {info['name']}")
-        return None
-        
-    finally:
-        p.terminate()
-
-def list_audio_output_devices():
-    """List all available audio output devices with their indices."""
-    p = pyaudio.PyAudio()
-    print("\n🔊 Available Audio Output Devices:")
-    print("=" * 50)
-    
-    output_devices = []
-    for i in range(p.get_device_count()):
-        info = p.get_device_info_by_index(i)
-        if info['maxOutputChannels'] > 0:  # Only show output devices
-            output_devices.append((i, info))
-            default_marker = " (DEFAULT)" if i == p.get_default_output_device_info()['index'] else ""
-            print(f"Index {i}: {info['name']}{default_marker}")
-            print(f"   Channels: {info['maxOutputChannels']}")
-            print(f"   Sample Rate: {info['defaultSampleRate']}")
-            print()
-    
-    p.terminate()
-    print(f"Total output devices found: {len(output_devices)}")
-    return output_devices
-
 if __name__ == "__main__":
-    asyncio.run(main()) 
+    asyncio.run(main())

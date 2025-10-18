@@ -5,7 +5,6 @@ Provides callback-based speech recognition with speaker identification.
 """
 
 import asyncio
-import pyaudio
 import time
 import json
 import numpy as np
@@ -15,6 +14,25 @@ from datetime import datetime
 from enum import Enum
 
 from deepgram import DeepgramClient, LiveTranscriptionEvents, LiveOptions
+
+try:
+    from mel_aec_audio import (
+        ensure_stream_started,
+        read_capture_chunk,
+        shared_sample_rate,
+    )
+except ImportError:  # pragma: no cover - fallback when running from repo root
+    import os
+    import sys
+
+    CURRENT_DIR = os.path.dirname(__file__)
+    if CURRENT_DIR and CURRENT_DIR not in sys.path:
+        sys.path.insert(0, CURRENT_DIR)
+    from mel_aec_audio import (
+        ensure_stream_started,
+        read_capture_chunk,
+        shared_sample_rate,
+    )
 
 try:
     from titanet_voice_fingerprinting import TitaNetVoiceFingerprinter, create_word_timing_from_deepgram_word
@@ -36,33 +54,6 @@ except ImportError:
     ECHO_CANCELLATION_AVAILABLE = False
     print("❌ Echo cancellation not available")
     print("💡 Install with: pip install speexdsp")
-
-def find_input_device_by_name(device_name: str) -> Optional[int]:
-    """Find audio input device index by name (partial match)."""
-    if not device_name:
-        return None
-        
-    p = pyaudio.PyAudio()
-    try:
-        device_name_lower = device_name.lower()
-        
-        for i in range(p.get_device_count()):
-            info = p.get_device_info_by_index(i)
-            if info['maxInputChannels'] > 0:  # Only check input devices
-                if device_name_lower in info['name'].lower():
-                    print(f"🎯 Found input device: '{info['name']}' (index {i}) for name '{device_name}'")
-                    return i
-        
-        print(f"⚠️ No input device found matching '{device_name}'")
-        print("Available input devices:")
-        for i in range(p.get_device_count()):
-            info = p.get_device_info_by_index(i)
-            if info['maxInputChannels'] > 0:
-                print(f"  - {info['name']}")
-        return None
-        
-    finally:
-        p.terminate()
 
 class STTEventType(Enum):
     """Types of STT events."""
@@ -119,13 +110,12 @@ class AsyncSTTStreamer:
         self.speakers_config = speakers_config
         self.is_listening = False
         self.connection = None
-        self.microphone = None
         self.event_loop = None
         self.audio_task = None
         self.connection_alive = False
         
-        # Audio setup
-        self.p = pyaudio.PyAudio()
+        # Audio setup (shared mel-aec duplex stream)
+        self.stream_sample_rate = shared_sample_rate()
         
         # Deepgram client
         self.deepgram = DeepgramClient(config.api_key)
@@ -218,35 +208,24 @@ class AsyncSTTStreamer:
             print(f"🔧 [AUDIO DEBUG] Requested sample rate: {self.config.sample_rate}Hz")
             print(f"🔧 [AUDIO DEBUG] Chunk size: {self.config.chunk_size} samples")
             
-            # Resolve input device name to index if specified
-            input_device_index = None
-            if self.config.input_device_name is not None:
-                input_device_index = find_input_device_by_name(self.config.input_device_name)
-                if input_device_index is not None:
-                    print(f"🎤 Using input device: '{self.config.input_device_name}' (index {input_device_index})")
+            # Ensure shared mel-aec stream is available
+            try:
+                ensure_stream_started()
+            except Exception as e:
+                await self._emit_event(STTEventType.ERROR, {
+                    "error": f"Failed to start mel-aec audio stream: {e}"
+                })
+                return False
             
-            # Create microphone stream
-            stream_kwargs = {
-                'format': pyaudio.paInt16,
-                'channels': self.config.channels,
-                'rate': self.config.sample_rate,
-                'input': True,
-                'frames_per_buffer': self.config.chunk_size
-            }
+            if self.config.input_device_name:
+                print(f"🎧 Preferred input device: {self.config.input_device_name}")
             
-            if input_device_index is not None:
-                stream_kwargs['input_device_index'] = input_device_index
-            
-            self.microphone = await loop.run_in_executor(
-                None,
-                lambda: self.p.open(**stream_kwargs)
-            )
-            
-            # Verify the actual sample rate being used
-            actual_rate = self.microphone._rate
-            print(f"🔧 [AUDIO DEBUG] Actual microphone rate: {actual_rate}Hz")
+            # Log actual capture sample rate for diagnostics
+            actual_rate = self.stream_sample_rate
+            print(f"🔧 [AUDIO DEBUG] mel-aec capture rate: {actual_rate}Hz")
             if actual_rate != self.config.sample_rate:
-                print(f"⚠️ [AUDIO DEBUG] SAMPLE RATE MISMATCH! Expected {self.config.sample_rate}Hz, got {actual_rate}Hz")
+                print(f"⚠️ [AUDIO DEBUG] Sample rate mismatch – "
+                      f"capturing at {actual_rate}Hz and resampling to {self.config.sample_rate}Hz for Deepgram.")
             
             # Setup Deepgram connection
             self.connection = self.deepgram.listen.websocket.v("1")
@@ -509,22 +488,6 @@ class AsyncSTTStreamer:
                 print(f"Error cancelling audio task: {e}")
             self.audio_task = None
         
-        # Close microphone
-        if self.microphone:
-            try:
-                # Use executor to avoid blocking on microphone operations
-                loop = asyncio.get_event_loop()
-                await loop.run_in_executor(
-                    None,
-                    lambda: (
-                        self.microphone.stop_stream(),
-                        self.microphone.close()
-                    )
-                )
-            except Exception as e:
-                print(f"Error closing microphone: {e}")
-            self.microphone = None
-        
         # Close Deepgram connection
         if self.connection:
             try:
@@ -583,7 +546,7 @@ class AsyncSTTStreamer:
         await asyncio.sleep(0.001)
         
         try:
-            while self.is_listening and self.microphone and self.connection and self.connection_alive:
+            while self.is_listening and self.connection and self.connection_alive:
                 try:
                     # Check if we should still be running
                     if not self.connection_alive:
@@ -599,12 +562,15 @@ class AsyncSTTStreamer:
                     try:
                         loop = asyncio.get_event_loop()
                         data = await loop.run_in_executor(
-                            None, 
-                            lambda: self.microphone.read(
-                                self.config.chunk_size, 
-                                exception_on_overflow=False
-                            )
+                            None,
+                            lambda: read_capture_chunk(
+                                self.config.chunk_size,
+                                self.config.sample_rate,
+                            ),
                         )
+                        if not data:
+                            await asyncio.sleep(0.01)
+                            continue
                     except Exception as read_error:
                         print(f"❌ Failed to read audio data: {read_error}")
                         break
@@ -969,24 +935,6 @@ class AsyncSTTStreamer:
         # Clear event loop reference
         self.event_loop = None
         
-        # Clean up PyAudio in executor to avoid segfault
-        if self.p:
-            try:
-                loop = asyncio.get_event_loop()
-                await loop.run_in_executor(None, self._cleanup_pyaudio)
-            except Exception as e:
-                print(f"Error terminating PyAudio: {e}")
-            finally:
-                self.p = None
-    
-    def _cleanup_pyaudio(self):
-        """Clean up PyAudio in a separate thread context."""
-        try:
-            if self.p:
-                self.p.terminate()
-        except Exception as e:
-            print(f"PyAudio cleanup error: {e}")
-    
     def __del__(self):
         """Destructor to ensure cleanup."""
         # Don't call terminate in destructor - too risky for segfaults
