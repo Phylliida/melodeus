@@ -433,6 +433,18 @@ def write_playback_float(audio: np.ndarray, source_rate: int) -> int:
     return stream.write(resampled)
 
 
+def interrupt_playback() -> None:
+    """Interrupt the shared output stream immediately if it is running."""
+    with _stream_lock:
+        stream = _shared_stream
+        started = _stream_started
+    if stream and started:
+        try:
+            stream.interrupt()
+        except Exception as exc:
+            print(f"⚠️ Unable to interrupt mel-aec playback: {exc}")
+
+
 def read_capture_chunk(target_samples: int, target_rate: int) -> bytes:
     """
     Read microphone audio from the shared stream and return PCM16 bytes

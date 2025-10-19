@@ -192,8 +192,8 @@ class UnifiedVoiceConversation:
             # Simple director for single character
             if not characters_config["director"]:
                 characters_config["director"] = {
-                    "llm_provider": "groq",
-                    "llm_model": "llama-3.1-8b-instant",
+                    "llm_provider": config.conversation.llm_provider,
+                    "llm_model": config.conversation.llm_model,
                     "system_prompt": "You are directing a conversation. Since there is only one AI assistant, always respond with 'Assistant' when asked who should speak next."
                 }
         

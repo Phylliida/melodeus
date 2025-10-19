@@ -9,8 +9,6 @@ import asyncio
 import websockets
 import json
 import base64
-import threading
-import queue
 import time
 import numpy as np
 import re
@@ -24,6 +22,7 @@ try:
         ensure_stream_started,
         shared_sample_rate,
         write_playback_pcm,
+        interrupt_playback,
     )
 except ImportError:  # pragma: no cover - fallback when running from repo root
     import os
@@ -36,6 +35,7 @@ except ImportError:  # pragma: no cover - fallback when running from repo root
         ensure_stream_started,
         shared_sample_rate,
         write_playback_pcm,
+        interrupt_playback,
     )
 
 # Import Whisper TTS Tracker
@@ -101,13 +101,11 @@ class AsyncTTSStreamer:
     
     def __init__(self, config: TTSConfig):
         self.config = config
-        self.audio_queue = queue.Queue()
-        self.is_playing = False
         self.is_streaming = False
-        self.playback_thread = None
         self.websocket = None
         self.audio_task = None
-        
+        self.is_playing = False
+
         # Audio setup (shared mel-aec duplex stream)
         self.stream_sample_rate = shared_sample_rate()
         
@@ -122,11 +120,7 @@ class AsyncTTSStreamer:
         # Multi-voice completion tracking
         self._websockets_completed = 0
         self._total_websockets = 0
-        self._audio_completion_event = asyncio.Event()
-        self._final_audio_received = False
-        self._queue_monitoring_task = None
         self._all_text_sent = False  # Track when all text has been sent to websockets
-        self._actively_playing_chunk = False  # Track if audio thread is playing a chunk
         
         # Whisper tracking configuration
         self.track_spoken_content = WHISPER_AVAILABLE
@@ -265,6 +259,7 @@ class AsyncTTSStreamer:
             self._stop_requested = False
             self._interrupted = False
             self._first_audio_received = False
+            self._chunks_played = 0
             self._chunks_played = 0  # Reset chunks played counter
             
             # Create a new session for this speaking operation
@@ -369,42 +364,15 @@ class AsyncTTSStreamer:
             print(f"🆕 Created TTS session: {self.current_session.session_id}")
             self._websockets_completed = 0
             self._total_websockets = 0
-            self._audio_completion_event.clear()
-            self._final_audio_received = False
-            self._queue_monitoring_task = None
             self._all_text_sent = False
             self._speech_monitor_task = None
             
             if self.track_spoken_content and self.current_session.whisper_tracker:
                 self.current_session.whisper_tracker.start_tracking()
             
-            # Don't start monitoring here - wait until we know if we have tool calls
-            
-            # Ensure audio playback is ready
-            # But first, ensure any previous audio is completely stopped
-            if self.playback_thread and self.playback_thread.is_alive():
-                print("⏳ Stopping previous audio playback...")
-                # Force stop the previous playback
-                self.is_playing = False
-                self._clear_audio_queue()  # Clear any remaining audio
-                
-                # Wait for thread to actually exit
-                max_wait = 1.0
-                start_time = time.time()
-                while (self.playback_thread.is_alive() and 
-                       (time.time() - start_time) < max_wait):
-                    await asyncio.sleep(0.05)
-                
-                if self.playback_thread.is_alive():
-                    print("⚠️ Previous audio thread didn't stop, but proceeding anyway")
-                else:
-                    print("✅ Previous audio thread stopped")
-                    
-                self.playback_thread = None
-                    
-            # Now start fresh audio playback
-            if not self.is_playing:
-                self._start_audio_playback()
+            # Clear any lingering audio in the shared stream before we start
+            interrupt_playback()
+            self.is_playing = False
             self.is_streaming = True
             
             text_buffer = ""
@@ -620,7 +588,12 @@ class AsyncTTSStreamer:
                 if not tool_call.executed:
                     if fuzzy_position >= tool_call.start_position:
                         # Execute the tool
-                        progress = (fuzzy_position / tool_call.start_position) * 100
+                        if tool_call.start_position <= 0:
+                            progress = 100.0
+                        else:
+                            progress = (fuzzy_position / tool_call.start_position) * 100
+                            if progress > 100.0:
+                                progress = 100.0
                         print(f"📊 Tool '{tool_call.tag_name}' reached! Progress: {progress:.1f}%")
                         await self._execute_tool(tool_call)
                         tool_call.executed = True
@@ -683,7 +656,12 @@ class AsyncTTSStreamer:
                 # Execute remaining tools based on progress
                 for tool_call in unexecuted_tools:
                     if not tool_call.executed:
-                        progress = (final_fuzzy_position / tool_call.start_position) * 100 if tool_call.start_position > 0 else 0
+                        if tool_call.start_position <= 0:
+                            progress = 100.0
+                        else:
+                            progress = (final_fuzzy_position / tool_call.start_position) * 100
+                            if progress > 100.0:
+                                progress = 100.0
                         
                         # Execute tools that were close to being reached
                         # Use a more forgiving threshold (80%) for tools near the end
@@ -826,13 +804,32 @@ class AsyncTTSStreamer:
             
             # Now safe to close the connection
             await self._current_voice_connection.close()
-            # Track completion
-            self._websockets_completed += 1
             print(f"🔗 Closed voice connection: {self._current_voice_key} ({self._websockets_completed}/{self._total_websockets})")
         except Exception as e:
             print(f"Error closing voice connection {self._current_voice_key}: {e}")
         
         # Clear current connection
+        self._current_voice_connection = None
+        self._current_voice_key = None
+        self._current_voice_task = None
+
+    async def _force_close_voice_connection(self):
+        """Force-close the current voice connection without waiting for trailing audio."""
+        if self._current_voice_task and not self._current_voice_task.done():
+            self._current_voice_task.cancel()
+            try:
+                await self._current_voice_task
+            except asyncio.CancelledError:
+                pass
+            except Exception as e:
+                print(f"Error while cancelling voice audio task: {e}")
+        
+        if self._current_voice_connection:
+            try:
+                await self._current_voice_connection.close()
+            except Exception as e:
+                print(f"Error forcing voice connection close: {e}")
+        
         self._current_voice_connection = None
         self._current_voice_key = None
         self._current_voice_task = None
@@ -873,21 +870,17 @@ class AsyncTTSStreamer:
                 data = json.loads(message)
                 
                 if data.get("audio") and not self._stop_requested:
-                    # Decode and queue audio only if not stopped
+                    # Decode and play audio only if not stopped
                     audio_data = base64.b64decode(data["audio"])
-                    if not self._stop_requested:  # Double-check before queuing
-                        self.audio_queue.put(audio_data)
-                        
-                        # Call first audio callback if not already called
+                    if not self._stop_requested:
                         if not self._first_audio_received and self.first_audio_callback:
                             self._first_audio_received = True
                             asyncio.create_task(self.first_audio_callback())
+
+                        self._play_audio_chunk(audio_data)
                     
                     # Update last audio time for completion tracking
                     self._last_audio_time = time.time()
-                    
-                    # NOTE: For multi-voice, Whisper tracking is handled by the audio playback thread
-                    # to avoid double-tracking from multiple websocket connections
                 
                 elif data.get("isFinal"):
                     # This websocket connection has finished
@@ -920,15 +913,8 @@ class AsyncTTSStreamer:
             
             print(f"✅ All audio chunks generated ({self._websockets_completed} websockets)")
             
-            # Then wait for queue to drain AND no active playback
-            while ((self.audio_queue.qsize() > 0 or self._actively_playing_chunk) and 
-                   not self._stop_requested):
-                queue_size = self.audio_queue.qsize()
-                if queue_size > 0 and queue_size % 10 == 0:
-                    print(f"🔊 Audio queue: {queue_size} chunks remaining")
-                elif queue_size < 10 and queue_size > 0:
-                    print(f"🔊 Audio queue: {queue_size} chunks remaining")
-                await asyncio.sleep(0.2)
+            # Then wait for buffered playback to finish
+            await self._wait_for_playback_drain()
             
             if self._stop_requested:
                 print("🛑 Stopped during playback")
@@ -993,49 +979,50 @@ class AsyncTTSStreamer:
         print("🛑 TTS stop requested")
         self._stop_requested = True
         self._interrupted = True
+
+        # Interrupt hardware playback right away
+        interrupt_playback()
         
         # Mark current session as interrupted
         if self.current_session:
             self.current_session.was_interrupted = True
             self.current_session.end_time = time.time()
-        
-        # Clear audio queue immediately and repeatedly
-        for _ in range(3):  # Clear multiple times to ensure empty
-            self._clear_audio_queue()
-            await asyncio.sleep(0.01)  # Small delay between clears
-        
-        # Close WebSocket
+
+        # Ensure we force-close any multi-voice websocket connection
+        await self._force_close_voice_connection()
+
+        # Close primary websocket promptly to stop further streaming
         if self.websocket:
             try:
                 await self.websocket.close()
             except Exception as e:
                 print(f"Error closing TTS WebSocket: {e}")
             self.websocket = None
-        
-        # Cancel audio task and wait for it to finish
+
+        # Cancel audio response task if still running
         if self.audio_task and not self.audio_task.done():
             self.audio_task.cancel()
             try:
                 await self.audio_task
             except asyncio.CancelledError:
                 pass
-        
-        # Don't force close the stream here - let the worker do it gracefully
-        # This avoids the PortAudio errors
-        
-        # Stop audio playback and wait for thread to exit
-        await self._stop_audio_playback_async()
-        
+        self.audio_task = None
+
+        self.is_playing = False
+
         self.is_streaming = False
         print("✅ TTS stopped")
     
     def is_currently_playing(self) -> bool:
         """Check if TTS is currently playing (both streaming and audio output)."""
-        return (self.is_streaming and 
-                self.is_playing and 
-                self.playback_thread and 
-                self.playback_thread.is_alive() and
-                not self._stop_requested)
+        if self._stop_requested or not self.is_streaming or not self.is_playing:
+            return False
+
+        try:
+            stream = ensure_stream_started()
+            return stream.get_buffered_duration() > 0.0
+        except Exception:
+            return False
     
     def has_played_audio(self) -> bool:
         """Check if any audio chunks have been played in the current session."""
@@ -1106,10 +1093,8 @@ class AsyncTTSStreamer:
     async def _setup_websocket(self):
         """Setup WebSocket connection and audio playback."""
         # Clear any leftover audio
-        self._clear_audio_queue()
-        
-        # Start audio playback
-        self._start_audio_playback()
+        interrupt_playback()
+        self.is_playing = False
         
         # Connect to WebSocket
         uri = f"wss://api.elevenlabs.io/v1/text-to-speech/{self.config.voice_id}/stream-input"
@@ -1151,13 +1136,13 @@ class AsyncTTSStreamer:
                 if "audio" in data and data["audio"] and not self._stop_requested:
                     try:
                         audio_data = base64.b64decode(data["audio"])
-                        if len(audio_data) > 0 and not self._stop_requested:  # Double-check before queuing
-                            self.audio_queue.put(audio_data)
-                            
+                        if len(audio_data) > 0 and not self._stop_requested:
                             # Call first audio callback if not already called
                             if not self._first_audio_received and self.first_audio_callback:
                                 self._first_audio_received = True
                                 asyncio.create_task(self.first_audio_callback())
+
+                            self._play_audio_chunk(audio_data)
                     except Exception as e:
                         print(f"Failed to decode TTS audio: {e}")
                         continue
@@ -1171,6 +1156,75 @@ class AsyncTTSStreamer:
         except Exception as e:
             if not self._stop_requested:
                 print(f"TTS audio handling error: {e}")
+
+    def _play_audio_chunk(self, audio_chunk: bytes):
+        """Write an audio chunk to the shared output and feed Whisper tracking."""
+        if not audio_chunk or self._stop_requested:
+            return
+
+        session = self.current_session
+
+        try:
+            write_playback_pcm(audio_chunk, self.config.sample_rate)
+            self._chunks_played += 1
+            self.is_playing = True
+        except Exception as e:
+            if not self._stop_requested:
+                print(f"Audio playback error: {e}")
+            return
+
+        if (
+            self.track_spoken_content
+            and session
+            and session.whisper_tracker
+            and session == self.current_session
+        ):
+            try:
+                audio_np = np.frombuffer(audio_chunk, dtype=np.int16).astype(np.float32) / 32768.0
+                if audio_np.size:
+                    target_rate = 16000
+                    num_samples = int(len(audio_np) * target_rate / self.config.sample_rate)
+                    if num_samples > 0:
+                        audio_16k = signal.resample(audio_np, num_samples)
+                        session.whisper_tracker.add_audio_chunk(audio_16k.astype(np.float32))
+            except Exception as e:
+                print(f"Whisper audio capture error: {e}")
+
+    async def _wait_for_playback_drain(self):
+        """Wait until the shared stream output buffer is effectively empty."""
+        if self._stop_requested or not self.is_playing:
+            self.is_playing = False
+            return
+
+        try:
+            stream = ensure_stream_started()
+        except Exception:
+            self.is_playing = False
+            return
+
+        idle_checks = 0
+        start_time = time.time()
+        max_wait = 3.0  # seconds
+
+        while not self._stop_requested:
+            try:
+                buffered = stream.get_buffered_duration()
+            except Exception:
+                break
+
+            if buffered <= 0.02:  # ~20ms remaining
+                idle_checks += 1
+                if idle_checks >= 3:
+                    break
+            else:
+                idle_checks = 0
+
+            if (time.time() - start_time) > max_wait:
+                break
+
+            await asyncio.sleep(0.05)
+
+        self.is_playing = False
     
     async def _wait_for_completion(self):
         """Wait for audio processing to complete."""
@@ -1184,198 +1238,16 @@ class AsyncTTSStreamer:
             except asyncio.CancelledError:
                 pass
         
-        # Wait for queue to drain
+        # Wait for remaining buffered audio to play out
         if not self._stop_requested:
-            while not self.audio_queue.empty() and not self._stop_requested:
-                await asyncio.sleep(0.1)
+            await self._wait_for_playback_drain()
     
-    def _start_audio_playback(self):
-        """Start the audio playback thread."""
-        if not self.is_playing:
-            try:
-                ensure_stream_started()
-            except Exception as e:
-                print(f"Failed to start mel-aec playback stream: {e}")
-                self.is_playing = False
-                return
-            
-            if self.config.output_device_name:
-                print(f"🔊 Preferred output device: {self.config.output_device_name}")
-            
-            self.is_playing = True
-            self.playback_thread = threading.Thread(target=self._audio_playback_worker)
-            self.playback_thread.daemon = True
-            self.playback_thread.start()
-    
-    def _stop_audio_playback(self):
-        """Stop the audio playback thread (sync version)."""
-        if self.is_playing:
-            self.is_playing = False
-            
-            if self.playback_thread:
-                self.playback_thread.join(timeout=2.0)
-                self.playback_thread = None
-    
-    async def _stop_audio_playback_async(self):
-        """Stop the audio playback thread and wait for complete shutdown."""
-        if not self.is_playing:
-            return  # Already stopped
-        
-        print("🔄 Stopping audio playback...")
-        self.is_playing = False
-        
-        # Wait for playback thread to exit in a non-blocking way
-        if self.playback_thread and self.playback_thread.is_alive():
-            # Use asyncio to wait for thread without blocking
-            max_wait_time = 0.5  # Reduced to 500ms for faster stopping
-            start_time = asyncio.get_event_loop().time()
-            
-            while (self.playback_thread.is_alive() and 
-                   (asyncio.get_event_loop().time() - start_time) < max_wait_time):
-                await asyncio.sleep(0.01)  # Check every 10ms
-            
-            if self.playback_thread.is_alive():
-                print("⚠️ Audio thread didn't exit cleanly, forcing...")
-                # Thread should exit on its own when is_playing = False
-        
-        # Clean up audio stream if it still exists
-        self.playback_thread = None
-        print("✅ Audio playback fully stopped")
-    
-    def _audio_playback_worker(self):
-        """Worker thread for audio playback with responsive stop handling and audio capture."""
-        print("🎵 Audio playback worker started")
-        
-        # Capture the session this worker is associated with
-        worker_session = self.current_session
-        
-        while self.is_playing and not self._stop_requested:
-            try:
-                # Use very short timeout for more responsive stopping
-                audio_chunk = self.audio_queue.get(timeout=0.05)  # 50ms timeout
-                
-                # Double-check stop status and session before writing
-                if audio_chunk and not self._stop_requested and self.is_playing:
-                    # Also check if this worker's session is still the current one
-                    if worker_session != self.current_session:
-                        print(f"🛑 Audio worker detected session change, stopping playback")
-                        self.audio_queue.task_done()
-                        break
-                        
-                    try:
-                        # Mark that we're actively playing
-                        self._actively_playing_chunk = True
-                        
-                        # Split chunk into smaller pieces for more responsive stopping
-                        # Play in ~100ms segments (about 4410 samples at 22050Hz = 8820 bytes)
-                        segment_size = min(8820, len(audio_chunk))
-                        
-                        offset = 0
-                        while offset < len(audio_chunk):
-                            # Check for interruption before each segment
-                            if self._stop_requested or not self.is_playing or worker_session != self.current_session:
-                                print("🛑 Stopping mid-chunk playback")
-                                break
-                                
-                            # Calculate actual segment size for this iteration
-                            current_segment_size = min(segment_size, len(audio_chunk) - offset)
-                            audio_segment = audio_chunk[offset:offset + current_segment_size]
-                            
-                            # Play the segment with error handling
-                            try:
-                                write_playback_pcm(audio_segment, self.config.sample_rate)
-                                # Track that we've played audio
-                                if offset == 0:  # First segment of this chunk
-                                    self._chunks_played += 1
-                            except Exception as e:
-                                # Stream was closed or error occurred
-                                print(f"Audio segment write error: {e}")
-                                break
-                            offset += current_segment_size
-                        
-                        # Mark that we're done playing
-                        self._actively_playing_chunk = False
-                        
-                        # Only do Whisper tracking if we played the full chunk
-                        if offset >= len(audio_chunk) and worker_session and worker_session.whisper_tracker and self.track_spoken_content:
-                            try:
-                                # Convert bytes to numpy array for Whisper
-                                # ElevenLabs returns PCM 22050Hz, Whisper needs 16kHz
-                                audio_np = np.frombuffer(audio_chunk, dtype=np.int16).astype(np.float32) / 32768.0
-                                
-                                # Proper resampling from 22050Hz to 16000Hz using scipy
-                                if len(audio_np) > 0:
-                                    # Use scipy's high-quality resampling with anti-aliasing
-                                    original_rate = self.config.sample_rate  # 22050
-                                    target_rate = 16000
-                                    
-                                    # Calculate target number of samples
-                                    num_samples = int(len(audio_np) * target_rate / original_rate)
-                                    if num_samples > 0:
-                                        # Use scipy.signal.resample for high-quality resampling
-                                        audio_16k = signal.resample(audio_np, num_samples)
-                                        # Only add to tracker if it's still the current session's tracker
-                                        if worker_session == self.current_session:
-                                            worker_session.whisper_tracker.add_audio_chunk(audio_16k.astype(np.float32))
-                            except Exception as e:
-                                print(f"Whisper audio capture error: {e}")
-                        
-                        self.audio_queue.task_done()
-                    except Exception as e:
-                        print(f"Audio write error: {e}")
-                        self.audio_queue.task_done()
-                        break
-                elif audio_chunk:
-                    # If stopped, mark task as done but don't play
-                    self.audio_queue.task_done()
-                    
-            except queue.Empty:
-                # Check stop condition more frequently during silence
-                if self._stop_requested or not self.is_playing:
-                    break
-                continue
-            except Exception as e:
-                print(f"Audio playback error: {e}")
-                break
-        
-        print("🔇 Audio playback worker exited")
-    
-    def _clear_audio_queue(self):
-        """Clear the audio queue thoroughly."""
-        cleared_count = 0
-        # Try multiple approaches to ensure queue is empty
-        
-        # First, use qsize to determine how many items to clear
-        initial_size = self.audio_queue.qsize()
-        
-        # Clear using get_nowait
-        while not self.audio_queue.empty():
-            try:
-                self.audio_queue.get_nowait()
-                cleared_count += 1
-            except queue.Empty:
-                break
-        
-        # Double-check with qsize and clear any remaining
-        remaining = self.audio_queue.qsize()
-        for _ in range(remaining):
-            try:
-                self.audio_queue.get_nowait()
-                cleared_count += 1
-            except queue.Empty:
-                break
-        
-        # Create a new queue to ensure it's truly empty
-        if self.audio_queue.qsize() > 0:
-            self.audio_queue = queue.Queue()
-            cleared_count = initial_size  # Assume we cleared everything
-        
-        if cleared_count > 0:
-            print(f"🗑️ Cleared {cleared_count} audio chunks from queue")
     
     async def _cleanup_stream(self):
         """Clean up streaming resources."""
         self.is_streaming = False
+
+        await self._force_close_voice_connection()
         
         if self.websocket:
             try:
@@ -1392,7 +1264,7 @@ class AsyncTTSStreamer:
                 pass
             self.audio_task = None
         
-        self._stop_audio_playback()
+        self.is_playing = False
         
         # Stop Whisper tracking and collect spoken content
         if self.current_session and self.current_session.whisper_tracker and self.track_spoken_content:

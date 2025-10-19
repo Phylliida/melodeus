@@ -7,6 +7,7 @@ Provides callback-based speech recognition with speaker identification.
 import asyncio
 import time
 import json
+import threading
 import numpy as np
 from dataclasses import dataclass, field
 from typing import Optional, Callable, Dict, Any, List, Tuple
@@ -18,7 +19,7 @@ from deepgram import DeepgramClient, LiveTranscriptionEvents, LiveOptions
 try:
     from mel_aec_audio import (
         ensure_stream_started,
-        read_capture_chunk,
+        prepare_capture_chunk,
         shared_sample_rate,
     )
 except ImportError:  # pragma: no cover - fallback when running from repo root
@@ -30,7 +31,7 @@ except ImportError:  # pragma: no cover - fallback when running from repo root
         sys.path.insert(0, CURRENT_DIR)
     from mel_aec_audio import (
         ensure_stream_started,
-        read_capture_chunk,
+        prepare_capture_chunk,
         shared_sample_rate,
     )
 
@@ -42,18 +43,6 @@ except ImportError:
     VOICE_FINGERPRINTING_AVAILABLE = False
     print("❌ TitaNet voice fingerprinting not available (requires nemo_toolkit)")
     print("💡 Install with: pip install 'nemo_toolkit[asr]'")
-
-try:
-    from improved_echo_cancellation import SimpleEchoCancellationProcessor
-    from debug_echo_cancellation import DebugEchoCancellationProcessor
-    from advanced_echo_cancellation import AdaptiveEchoCancellationProcessor
-    from improved_aec_processor import ImprovedEchoCancellationProcessor
-    ECHO_CANCELLATION_AVAILABLE = True
-    print("✅ Echo cancellation available")
-except ImportError:
-    ECHO_CANCELLATION_AVAILABLE = False
-    print("❌ Echo cancellation not available")
-    print("💡 Install with: pip install speexdsp")
 
 class STTEventType(Enum):
     """Types of STT events."""
@@ -111,8 +100,15 @@ class AsyncSTTStreamer:
         self.is_listening = False
         self.connection = None
         self.event_loop = None
-        self.audio_task = None
         self.connection_alive = False
+        self.audio_stream = None
+        self.audio_stop_event = None
+        self._audio_callback_registered = False
+        self._chunk_counter = 0
+        self.stream_start_time = None
+        self._last_prepare_error_log = 0.0
+        self._last_fp_error_log = 0.0
+        self._last_send_error_log = 0.0
         
         # Audio setup (shared mel-aec duplex stream)
         self.stream_sample_rate = shared_sample_rate()
@@ -159,27 +155,6 @@ class AsyncSTTStreamer:
         self.keepalive_task = None
         self.keepalive_interval = 10.0  # seconds
         
-        # Echo cancellation (optional)
-        self.echo_canceller = None
-        if ECHO_CANCELLATION_AVAILABLE and hasattr(config, 'enable_echo_cancellation') and config.enable_echo_cancellation:
-            try:
-                # Get AEC parameters from config or use defaults
-                frame_size = getattr(config, 'aec_frame_size', 256)
-                filter_length = getattr(config, 'aec_filter_length', 2048)
-                delay_ms = getattr(config, 'aec_delay_ms', 100)
-                
-                # Use improved version for better handling of bursty TTS
-                self.echo_canceller = ImprovedEchoCancellationProcessor(
-                    frame_size=frame_size,
-                    filter_length=filter_length,
-                    sample_rate=config.sample_rate,
-                    initial_delay_ms=delay_ms,
-                    debug_level=1  # Basic debug info
-                )
-                print(f"🔊 Echo cancellation enabled")
-            except Exception as e:
-                print(f"⚠️  Echo cancellation failed to initialize: {e}")
-                self.echo_canceller = None
     
     def on(self, event_type: STTEventType, callback: Callable):
         """Register a callback for an event type."""
@@ -300,8 +275,12 @@ class AsyncSTTStreamer:
                 
                 # Verify connection is actually alive before starting audio
                 if self.connection_alive:
-                    # Start audio streaming task and track it
-                    self.audio_task = asyncio.create_task(self._audio_streaming_loop())
+                    # Register mel-aec capture callback for streaming audio
+                    if not self._start_audio_stream():
+                        await self._emit_event(STTEventType.ERROR, {
+                            "error": "Failed to start mel-aec capture callback"
+                        })
+                        return False
                     
                     # Start keepalive task to prevent connection timeout
                     self.keepalive_task = asyncio.create_task(self._keepalive_loop())
@@ -362,13 +341,8 @@ class AsyncSTTStreamer:
                     except:
                         pass
                 
-                # Stop audio task if still running
-                if self.audio_task and not self.audio_task.done():
-                    self.audio_task.cancel()
-                    try:
-                        await self.audio_task
-                    except asyncio.CancelledError:
-                        pass
+                # Stop audio capture callback to avoid sending stale audio
+                self._stop_audio_stream()
                 
                 # Try to reconnect
                 print("🔌 Attempting to reconnect to Deepgram...")
@@ -451,8 +425,8 @@ class AsyncSTTStreamer:
             await asyncio.sleep(0.1)
             
             if self.connection_alive:
-                # Restart audio streaming
-                self.audio_task = asyncio.create_task(self._audio_streaming_loop())
+                if not self._start_audio_stream():
+                    return False
                 
                 # Restart keepalive
                 self.keepalive_task = asyncio.create_task(self._keepalive_loop())
@@ -476,17 +450,8 @@ class AsyncSTTStreamer:
             except asyncio.CancelledError:
                 pass
         
-        # Cancel audio streaming task if it's running
-        if self.audio_task and not self.audio_task.done():
-            print("🔄 Cancelling audio streaming task...")
-            self.audio_task.cancel()
-            try:
-                await self.audio_task
-            except asyncio.CancelledError:
-                print("✅ Audio streaming task cancelled")
-            except Exception as e:
-                print(f"Error cancelling audio task: {e}")
-            self.audio_task = None
+        # Stop audio capture callback
+        self._stop_audio_stream()
         
         # Close Deepgram connection
         if self.connection:
@@ -530,125 +495,112 @@ class AsyncSTTStreamer:
             except Exception as e:
                 print(f"❌ Keepalive error: {e}")
                 break
-    
-    async def _audio_streaming_loop(self):
-        """Main audio streaming loop with proper async handling."""
-        print("🎵 Starting audio streaming loop...")
-        chunk_count = 0
-        last_stats_time = time.time()
-        
-        # Track stream start time for voice fingerprinting synchronization
-        self.stream_start_time = time.time()
-        if self.voice_fingerprinter:
-            print(f"🕐 [STREAM] Stream started at {self.stream_start_time:.3f}")
-        
-        # Minimal wait for connection to be fully established
-        await asyncio.sleep(0.001)
-        
+
+    def _start_audio_stream(self) -> bool:
+        """Register the mel-aec capture callback for streaming audio."""
         try:
-            while self.is_listening and self.connection and self.connection_alive:
-                try:
-                    # Check if we should still be running
-                    if not self.connection_alive:
-                        print("🔌 Connection no longer alive, stopping audio stream")
-                        break
-                    
-                    # Skip sending audio if paused
-                    if self.is_paused:
-                        await asyncio.sleep(0.1)  # Small delay to prevent busy loop
-                        continue
-                        
-                    # Read audio data in executor to avoid blocking
-                    try:
-                        loop = asyncio.get_event_loop()
-                        data = await loop.run_in_executor(
-                            None,
-                            lambda: read_capture_chunk(
-                                self.config.chunk_size,
-                                self.config.sample_rate,
-                            ),
-                        )
-                        if not data:
-                            await asyncio.sleep(0.01)
-                            continue
-                    except Exception as read_error:
-                        print(f"❌ Failed to read audio data: {read_error}")
-                        break
-                    
-                    
-                    # Apply echo cancellation if enabled
-                    processed_data = data
-                    if self.echo_canceller:
-                        try:
-                            # Debug: log timing every 100 chunks
-                            if chunk_count % 100 == 0:
-                                print(f"🎤 MIC: Processing {len(data)} bytes at {time.time():.3f}")
-                            processed_data = self.echo_canceller.process(data)
-                        except Exception as aec_error:
-                            # Don't break streaming if AEC fails
-                            if chunk_count % 1000 == 0:  # Only log occasionally
-                                print(f"⚠️  Echo cancellation error: {aec_error}")
-                            processed_data = data  # Fall back to original
-                    
-                    # Convert audio data to numpy array for voice fingerprinting
-                    if self.voice_fingerprinter:
-                        try:
-                            # Convert bytes to int16 numpy array, then to float32
-                            audio_np = np.frombuffer(processed_data, dtype=np.int16).astype(np.float32) / 32768.0
-                            # Feed to voice fingerprinter with stream-relative timestamp
-                            stream_relative_time = time.time() - self.stream_start_time
-                            self.voice_fingerprinter.add_audio_chunk(audio_np, stream_relative_time)
-                        except Exception as fp_error:
-                            # Don't break streaming if fingerprinting fails
-                            if chunk_count % 1000 == 0:  # Only log occasionally
-                                print(f"⚠️  Voice fingerprinting error: {fp_error}")
-                    
-                    # Try to send data to Deepgram
-                    try:
-                        self.connection.send(processed_data)
-                        chunk_count += 1
-                        
-                        # Less frequent debug output
-                        if chunk_count % 100 == 0:
-                            print(f"📊 Sent {chunk_count} audio chunks")
-                            
-                        # Print echo cancellation stats every 10 seconds
-                        # if self.echo_canceller and hasattr(self.echo_canceller, 'print_stats'):
-                        #     current_time = time.time()
-                        #     if current_time - last_stats_time > 10:
-                        #         #self.echo_canceller.print_stats()
-                        #         last_stats_time = current_time
-                            
-                    except Exception as send_error:
-                        print(f"❌ Failed to send audio data to Deepgram: {send_error}")
-                        print(f"📊 Sent {chunk_count} chunks before connection failed")
-                        # Connection is likely closed, mark as not alive
-                        self.connection_alive = False
-                        await self._emit_event(STTEventType.ERROR, {
-                            "error": f"Connection send failed: {send_error}"
-                        })
-                        break
-                    
-                    # Brief async sleep to yield control
-                    await asyncio.sleep(0.001)  # 1ms delay
-                    
-                except Exception as e:
-                    print(f"❌ Audio streaming error: {e}")
-                    await self._emit_event(STTEventType.ERROR, {
-                        "error": f"Audio streaming error: {e}"
-                    })
-                    break
-                    
-        except asyncio.CancelledError:
-            print("🔄 Audio streaming loop cancelled")
-            raise
-        except Exception as e:
-            print(f"❌ Audio streaming loop fatal error: {e}")
-            await self._emit_event(STTEventType.ERROR, {
-                "error": f"Audio streaming loop error: {e}"
+            stream = ensure_stream_started()
+        except Exception as exc:
+            print(f"❌ Failed to start mel-aec audio stream: {exc}")
+            return False
+
+        self.audio_stream = stream
+
+        if self.audio_stop_event is None:
+            self.audio_stop_event = threading.Event()
+        else:
+            self.audio_stop_event.clear()
+
+        try:
+            stream.set_input_callback(self._handle_audio_capture)
+            self._audio_callback_registered = True
+        except Exception as exc:
+            print(f"❌ Failed to register audio capture callback: {exc}")
+            self._audio_callback_registered = False
+            return False
+
+        self._chunk_counter = 0
+        self.stream_start_time = None
+        self._last_prepare_error_log = 0.0
+        self._last_fp_error_log = 0.0
+        self._last_send_error_log = 0.0
+
+        return True
+
+    def _stop_audio_stream(self):
+        """Stop streaming audio by disabling the capture callback."""
+        if self.audio_stop_event:
+            self.audio_stop_event.set()
+
+        if self.audio_stream and self._audio_callback_registered:
+            try:
+                self.audio_stream.set_input_callback(lambda _: None)
+            except Exception as exc:
+                print(f"⚠️  Failed to clear audio capture callback: {exc}")
+
+        self._audio_callback_registered = False
+        self.stream_start_time = None
+        self._chunk_counter = 0
+        self.audio_stream = None
+
+    def _handle_audio_capture(self, audio_data) -> None:
+        """mel-aec capture callback that forwards audio to Deepgram."""
+        if self.audio_stop_event and self.audio_stop_event.is_set():
+            return
+
+        if not self.is_listening or not self.connection or not self.connection_alive:
+            return
+
+        if self.is_paused:
+            return
+
+        try:
+            pcm_bytes = prepare_capture_chunk(audio_data, self.config.sample_rate)
+        except Exception as prep_error:
+            now = time.time()
+            if now - self._last_prepare_error_log > 5.0:
+                print(f"⚠️  Failed to prepare capture chunk: {prep_error}")
+                self._last_prepare_error_log = now
+            return
+
+        if not pcm_bytes:
+            return
+
+        processed_data = pcm_bytes
+
+        current_time = time.time()
+        if self.stream_start_time is None:
+            self.stream_start_time = current_time
+            if self.voice_fingerprinter and getattr(self.config, 'debug_speaker_data', False):
+                print(f"🕐 [STREAM] Capture callback started at {self.stream_start_time:.3f}")
+
+        if self.voice_fingerprinter:
+            try:
+                audio_np = np.frombuffer(processed_data, dtype=np.int16).astype(np.float32) / 32768.0
+                stream_relative_time = current_time - (self.stream_start_time or current_time)
+                self.voice_fingerprinter.add_audio_chunk(audio_np, stream_relative_time)
+            except Exception as fp_error:
+                now = time.time()
+                if now - self._last_fp_error_log > 5.0:
+                    print(f"⚠️  Voice fingerprinting error: {fp_error}")
+                    self._last_fp_error_log = now
+
+        try:
+            self.connection.send(processed_data)
+            self._chunk_counter += 1
+            if self._chunk_counter % 100 == 0:
+                print(f"📊 Sent {self._chunk_counter} audio chunks")
+        except Exception as send_error:
+            now = time.time()
+            if now - self._last_send_error_log > 2.0:
+                print(f"❌ Failed to send audio data to Deepgram: {send_error}")
+                self._last_send_error_log = now
+            self.connection_alive = False
+            if self.audio_stop_event:
+                self.audio_stop_event.set()
+            self._schedule_event(STTEventType.ERROR, {
+                "error": f"Connection send failed: {send_error}"
             })
-        finally:
-            print(f"🏁 Audio streaming loop ended. Sent {chunk_count} chunks total.")
     
     def _on_open(self, *args, **kwargs):
         """Handle Deepgram connection open."""
@@ -834,9 +786,8 @@ class AsyncSTTStreamer:
             })
     
     def add_reference_audio(self, audio_data: bytes):
-        """Add reference audio for echo cancellation (TTS output)."""
-        if self.echo_canceller:
-            self.echo_canceller.add_reference_audio(audio_data)
+        """Compatibility hook; mel-aec handles echo cancellation internally."""
+        return None
     
     def _setup_speaker_identification(self):
         """Setup speaker identification if enabled."""
