@@ -1887,11 +1887,21 @@ class UnifiedVoiceConversation:
                             self.echo_filter.on_tts_interrupted(session_id, spoken_text)
                     
                     # Store assistant response
-                    assistant_response = getattr(self.tts, 'last_session_generated_text', '')
+                    assistant_response = ""
+                    if hasattr(self.tts, 'current_session') and self.tts.current_session:
+                        if completed:
+                            assistant_response = (self.tts.current_session.generated_text or "").strip()
+                        else:
+                            assistant_response = self.tts.get_spoken_text_heuristic().strip()
+                            if not assistant_response and hasattr(self.tts, 'get_spoken_text'):
+                                assistant_response = (self.tts.get_spoken_text() or "").strip()
+                    elif completed:
+                        assistant_response = (getattr(self.tts, 'last_session_generated_text', '') or "").strip()
+                    
                     if assistant_response:
-                        print(f"📝 Captured assistant response: {len(assistant_response)} chars")
+                        print(f"📝 Captured assistant response: {len(assistant_response)} chars (completed={completed})")
                     else:
-                        print("⚠️ No TTS session or generated text available")
+                        print("⚠️ No TTS session or generated text available (anthropic)")
                 finally:
                     # Restore original voice config
                     self._restore_voice_config(original_config)
@@ -1948,7 +1958,7 @@ class UnifiedVoiceConversation:
                     assistant_response,
                     request_filename,
                     response_timestamp,
-                    was_interrupted=False,
+                    was_interrupted=not completed,
                     error=None,
                     provider=character_config.llm_provider
                 )
