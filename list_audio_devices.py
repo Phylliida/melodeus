@@ -69,9 +69,9 @@ def list_all_audio_devices():
         version = host_info.get("version_text") or host_info.get("version")
         print(f"Backend: {backend}" + (f" ({version})" if version else ""))
         if default_input_name:
-            print(f"Default input: {default_input_name}")
+            print(f"Default input: '{default_input_name}'")
         if default_output_name:
-            print(f"Default output: {default_output_name}")
+            print(f"Default output: '{default_output_name}'")
 
     for idx, entry in enumerate(devices, start=1):
         name, device_type, is_input, is_output, input_rates, output_rates = _coerce_device_entry(entry)
@@ -92,7 +92,7 @@ def list_all_audio_devices():
         if default_output_name and name == default_output_name and "DEFAULT OUTPUT" not in status_labels:
             status_labels.append("DEFAULT OUTPUT")
 
-        print(f"\n📍 Device {idx}: {name}")
+        print(f"\n📍 Device {idx}: '{name}'")
         print(f"   Type: {', '.join(capabilities)}")
         if status_labels:
             print(f"   Status: {', '.join(status_labels)} ⭐")

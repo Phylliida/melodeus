@@ -7,7 +7,6 @@ import asyncio
 import json
 import os
 import threading
-import time
 from datetime import datetime
 from typing import Dict, Optional
 
@@ -20,10 +19,10 @@ from colorama import Fore, Style, init
 from dotenv import load_dotenv
 
 try:
-    from mel_aec_audio import ensure_stream_started, read_capture_chunk, stop_stream
+    from mel_aec_audio import ensure_stream_started, prepare_capture_chunk, stop_stream
 except ImportError as mel_aec_error:  # pragma: no cover - environment specific
     ensure_stream_started = None
-    read_capture_chunk = None
+    prepare_capture_chunk = None
     stop_stream = None
     MEL_AEC_IMPORT_ERROR = mel_aec_error
 else:  # pragma: no cover - trivial assigning
@@ -61,8 +60,8 @@ class RealTimeSTTDiarization:
         self.deepgram = DeepgramClient(api_key)
         self.connection = None
         self.is_running = False
-        self.audio_thread: Optional[threading.Thread] = None
         self.audio_stop_event: Optional[threading.Event] = None
+        self.audio_stream = None
         self.audio_sample_rate = DEFAULT_SAMPLE_RATE
         self.audio_chunk_samples = DEFAULT_CHUNK_SAMPLES
         self.model = "nova-3"
@@ -84,6 +83,8 @@ class RealTimeSTTDiarization:
             Fore.BLUE,
             Fore.RED,
         ]
+
+        self._audio_callback_registered = False
 
         if config is not None:
             self._configure_from_config(config)
@@ -160,71 +161,53 @@ class RealTimeSTTDiarization:
             return False
 
     def start_audio_stream(self) -> bool:
-        """Launch the background thread that streams audio from mel-aec to Deepgram."""
-        if self.audio_thread and self.audio_thread.is_alive():
+        """Start streaming audio from mel-aec to Deepgram using the capture callback."""
+        if self._audio_callback_registered:
             return True
 
-        if ensure_stream_started is None or read_capture_chunk is None:
+        if ensure_stream_started is None or prepare_capture_chunk is None:
             print(f"{Fore.RED}mel_aec_audio is not available—cannot start audio stream.")
             return False
 
         try:
-            ensure_stream_started()
+            stream = ensure_stream_started()
         except Exception as exc:
             print(f"{Fore.RED}Error starting mel-aec audio stream: {exc}")
             return False
 
+        self.audio_stream = stream
         self.audio_stop_event = threading.Event()
-        self.audio_thread = threading.Thread(
-            target=self._audio_stream_loop,
-            name="melodeus-mic-stream",
-            daemon=True,
-        )
-        self.audio_thread.start()
+        self.audio_stop_event.clear()
+
+        stream.set_input_callback(self._handle_audio_capture)
+        self._audio_callback_registered = True
         return True
 
-    def _audio_stream_loop(self) -> None:
-        """Continuously pull audio from mel-aec and forward to Deepgram."""
-        assert read_capture_chunk is not None
-        while self.audio_stop_event and not self.audio_stop_event.is_set():
-            if not self.is_running:
-                time.sleep(0.05)
-                continue
+    def _handle_audio_capture(self, audio_data) -> None:
+        """Callback invoked by mel-aec when new capture audio is available."""
+        if self.audio_stop_event and self.audio_stop_event.is_set():
+            return
 
-            if self.connection is None:
-                time.sleep(0.05)
-                continue
+        if not self.is_running or self.connection is None:
+            return
 
-            try:
-                audio_chunk = read_capture_chunk(self.audio_chunk_samples, self.audio_sample_rate)
-            except Exception as exc:
-                import traceback
-                print(traceback.print_exc())
-                print(f"{Fore.RED}Error capturing audio chunk: {exc}")
-                time.sleep(0.1)
-                continue
+        pcm_bytes = prepare_capture_chunk(audio_data, self.audio_sample_rate)
+        if not pcm_bytes:
+            return
 
-            if not audio_chunk:
-                time.sleep(0.01)
-                continue
-
-            try:
-                self.connection.send(audio_chunk)
-            except Exception as exc:
-                if self.audio_stop_event and not self.audio_stop_event.is_set():
-                    print(f"{Fore.RED}Error sending audio chunk to Deepgram: {exc}")
-                break
-
-            # Allow other threads to run; read_capture_chunk already blocks appropriately
-            time.sleep(0.001)
+        try:
+            self.connection.send(pcm_bytes)
+        except Exception as exc:
+            if self.audio_stop_event and not self.audio_stop_event.is_set():
+                print(f"{Fore.RED}Error sending audio chunk to Deepgram: {exc}")
+                self.audio_stop_event.set()
 
     def stop_audio_stream(self) -> None:
-        """Stop the background audio streaming thread."""
+        """Stop streaming audio from the mel-aec capture callback."""
         if self.audio_stop_event:
             self.audio_stop_event.set()
-        if self.audio_thread and self.audio_thread.is_alive():
-            self.audio_thread.join(timeout=1.0)
-        self.audio_thread = None
+        self._audio_callback_registered = False
+        self.audio_stream = None
         self.audio_stop_event = None
     
     def on_open(self, *args, **kwargs):
@@ -343,7 +326,7 @@ class RealTimeSTTDiarization:
             self.is_running = True
 
             if not self.start_audio_stream():
-                print(f"{Fore.RED}Failed to start audio streaming thread")
+                print(f"{Fore.RED}Failed to start audio streaming")
                 self.is_running = False
                 return
 
@@ -383,14 +366,6 @@ class RealTimeSTTDiarization:
 
 def main():
     """Main function to run the real-time STT with diarization."""
-    # Get API key from environment or prompt user
-    api_key = os.getenv('DEEPGRAM_API_KEY')
-    
-    if not api_key:
-        print(f"{Fore.RED}Please set your DEEPGRAM_API_KEY environment variable")
-        print(f"{Fore.WHITE}You can get an API key from: https://console.deepgram.com/")
-        print(f"{Fore.WHITE}Then run: export DEEPGRAM_API_KEY='your_api_key_here'")
-        return
 
     config = None
     try:
@@ -403,6 +378,16 @@ def main():
     except Exception as exc:
         print(f"{Fore.YELLOW}⚠️  Unable to load config.yaml: {exc}")
         print(f"{Fore.YELLOW}    Proceeding with default mel-aec settings")
+    
+    # Get API key from environment or prompt user
+    api_key = os.getenv('DEEPGRAM_API_KEY')
+    if not api_key: api_key = config.conversation.deepgram_api_key
+    
+    if not api_key:
+        print(f"{Fore.RED}Please set your DEEPGRAM_API_KEY environment variable")
+        print(f"{Fore.WHITE}You can get an API key from: https://console.deepgram.com/")
+        print(f"{Fore.WHITE}Then run: export DEEPGRAM_API_KEY='your_api_key_here'")
+        return
     
     # Create and run the STT system
     stt_system = RealTimeSTTDiarization(api_key, config=config)

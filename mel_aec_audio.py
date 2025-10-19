@@ -84,6 +84,7 @@ def _load_auto_gain_settings() -> AutoGainSettings:
 
 _AUTO_GAIN_SETTINGS = _load_auto_gain_settings()
 _auto_gain_lock = threading.Lock()
+global _auto_gain_value
 _auto_gain_value = float(np.clip(1.0, _AUTO_GAIN_SETTINGS.min_gain, _AUTO_GAIN_SETTINGS.max_gain))
 _AUTO_GAIN_ENABLED = True
 
@@ -123,11 +124,13 @@ def _reset_auto_gain() -> None:
 
 
 def current_auto_gain() -> float:
+    global _auto_gain_value
     with _auto_gain_lock:
         return _auto_gain_value
 
 
 def _update_auto_gain(rms: float) -> float:
+    global _auto_gain_value
     settings = _AUTO_GAIN_SETTINGS
     if not _AUTO_GAIN_ENABLED or settings.target_rms <= 0.0:
         with _auto_gain_lock:
@@ -371,6 +374,32 @@ def float_to_int16_bytes(audio: np.ndarray) -> bytes:
     return (clipped * 32767.0).astype(np.int16).tobytes()
 
 
+def prepare_capture_chunk(float_audio: np.ndarray, target_rate: int) -> bytes:
+    """
+    Convert float32 capture audio into PCM16 bytes at the desired sample rate and length.
+    """
+    if float_audio is None:
+        return b""
+
+    audio = np.asarray(float_audio, dtype=np.float32).reshape(-1)
+    if audio.size == 0:
+        return b""
+
+    settings = _current_settings()
+    if not np.isfinite(audio).all():
+        audio = np.nan_to_num(audio, nan=0.0, posinf=0.0, neginf=0.0, copy=False)
+
+    rms = float(np.sqrt(np.mean(np.square(audio, dtype=np.float64)))) if audio.size else 0.0
+    active_gain = _update_auto_gain(rms)
+
+    resampled = _resample(audio, settings.sample_rate, target_rate)
+
+    if resampled.size:
+        resampled = resampled * active_gain
+
+    return float_to_int16_bytes(resampled)
+
+
 def _resample(audio: np.ndarray, src_rate: int, dst_rate: int) -> np.ndarray:
     """Resample audio with sane defaults."""
     if audio.size == 0 or src_rate == dst_rate:
@@ -416,19 +445,4 @@ def read_capture_chunk(target_samples: int, target_rate: int) -> bytes:
         int(math.ceil(target_samples * settings.sample_rate / target_rate)), settings.buffer_size
     )
     float_audio = stream.read(samples_needed)
-    if float_audio.size == 0:
-        return b""
-    if not np.isfinite(float_audio).all():
-        float_audio = np.nan_to_num(float_audio, nan=0.0, posinf=0.0, neginf=0.0, copy=False)
-    rms = float(np.sqrt(np.mean(np.square(float_audio, dtype=np.float64)))) if float_audio.size else 0.0
-    active_gain = _update_auto_gain(rms)
-    resampled = _resample(float_audio, settings.sample_rate, target_rate)
-    # Guarantee we do not exceed the requested chunk size to avoid buffering drift.
-    if resampled.size > target_samples:
-        resampled = resampled[:target_samples]
-    elif resampled.size < target_samples:
-        # Pad with silence if the buffer was short.
-        resampled = np.pad(resampled, (0, target_samples - resampled.size), "constant")
-    if resampled.size:
-        resampled = resampled * active_gain
-    return float_to_int16_bytes(resampled)
+    return prepare_capture_chunk(float_audio, target_samples, target_rate)
