@@ -1725,6 +1725,7 @@ class UnifiedVoiceConversation:
                 character_config.llm_provider,
                 stop_sequences
             )
+            print(messages)
             
             # Check both generations before starting LLM
             if generation is not None and generation != self.state.current_generation:
