@@ -1609,6 +1609,27 @@ class UnifiedVoiceConversation:
                     self.state.current_generation += 1
                 generation = self.state.current_generation
                 print(f"📍 Generation: {generation}")
+
+            # Ensure the most recent turn is from the user before generating
+            last_turn = next(
+                (turn for turn in reversed(self.state.conversation_history)
+                 if turn.role not in {"system"}),
+                None
+            )
+            if not last_turn or last_turn.role != "user":
+                print("🚫 Skipping LLM generation - last message not from user")
+                for turn in self.state.conversation_history:
+                    if turn.role == "user" and turn.status == "processing":
+                        turn.status = "pending"
+                self.state.next_speaker = None
+                self.state.is_processing_llm = False
+                if hasattr(self, 'ui_server'):
+                    await self.ui_server.broadcast_speaker_status(
+                        is_processing=False,
+                        pending_speaker=None,
+                        thinking_sound=False
+                    )
+                return
             
             # Increment director generation and store it
             self._director_generation += 1
