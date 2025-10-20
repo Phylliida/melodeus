@@ -1621,7 +1621,8 @@ class UnifiedVoiceConversation:
                 for turn in self.state.conversation_history:
                     if turn.role == "user" and turn.status == "processing":
                         turn.status = "pending"
-                self.state.next_speaker = None
+                async with self.state.speaker_lock:
+                    self.state.next_speaker = None
                 self.state.is_processing_llm = False
                 if hasattr(self, 'ui_server'):
                     await self.ui_server.broadcast_speaker_status(
