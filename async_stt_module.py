@@ -160,6 +160,9 @@ class AsyncSTTStreamer:
         # Keepalive settings
         self.keepalive_task = None
         self.keepalive_interval = 10.0  # seconds
+
+        # Hold final transcripts until the corresponding UtteranceEnd arrives
+        self._pending_final_results: Dict[int, STTResult] = {}
         
     
     def on(self, event_type: STTEventType, callback: Callable):
@@ -172,6 +175,42 @@ class AsyncSTTStreamer:
         """Unregister a callback for an event type."""
         if event_type in self.callbacks and callback in self.callbacks[event_type]:
             self.callbacks[event_type].remove(callback)
+
+    def _get_channel_index(self, result_obj: Any) -> int:
+        """Extract a stable integer channel index from Deepgram callbacks."""
+        if result_obj is None:
+            return 0
+
+        def _coerce(value: Any) -> Optional[int]:
+            if isinstance(value, (int, float)):
+                return int(value)
+            if isinstance(value, (list, tuple)) and value:
+                return _coerce(value[0])
+            if isinstance(value, dict):
+                # Deepgram sometimes nests channel information in dicts
+                if "channel_index" in value:
+                    return _coerce(value["channel_index"])
+                if "channel" in value:
+                    return _coerce(value["channel"])
+            return None
+
+        # Direct attribute on the result object
+        channel_index = _coerce(getattr(result_obj, "channel_index", None))
+        if channel_index is not None:
+            return channel_index
+
+        # Sometimes channel info lives under result.channel
+        channel_attr = getattr(result_obj, "channel", None)
+        channel_index = _coerce(getattr(channel_attr, "channel_index", None))
+        if channel_index is not None:
+            return channel_index
+
+        # If channel_attr itself is a list/dict, attempt to coerce it
+        channel_index = _coerce(channel_attr)
+        if channel_index is not None:
+            return channel_index
+
+        return 0
     
     async def start_listening(self) -> bool:
         """Start listening for speech."""
@@ -827,26 +866,10 @@ class AsyncSTTStreamer:
                 stt_result = self._apply_speaker_identification(stt_result)
             
             # Emit appropriate event
+            channel_index = self._get_channel_index(result)
             if is_final:
-                self._schedule_event(
-                    STTEventType.UTTERANCE_COMPLETE, 
-                    stt_result
-                )
-                
-                # Check for speaker change
-                if speaker_id is not None and speaker_id != self.current_speaker:
-                    self.current_speaker = speaker_id
-                    self._schedule_event(
-                        STTEventType.SPEAKER_CHANGE,
-                        {
-                            "speaker_id": speaker_id,
-                            "speaker_name": speaker_name,
-                            "previous_speaker": self.current_speaker
-                        }
-                    )
-                
-                self.last_utterance_time = datetime.now()
-                
+                # Hold final transcript until we receive the matching UtteranceEnd event
+                self._pending_final_results[channel_index] = stt_result
             else:
                 self._schedule_event(
                     STTEventType.INTERIM_RESULT,
@@ -860,6 +883,38 @@ class AsyncSTTStreamer:
     
     def _on_utterance_end(self, *args, **kwargs):
         """Handle utterance end events."""
+        result_obj = kwargs.get("result")
+        channel_index = self._get_channel_index(result_obj)
+
+        stt_result = self._pending_final_results.pop(channel_index, None)
+        if stt_result is None and self._pending_final_results:
+            # Fallback: pull the most recent pending result if channel index was unavailable
+            _, stt_result = self._pending_final_results.popitem()
+        
+        if stt_result is not None:
+            # Emit the deferred utterance complete event now that Deepgram confirmed the end
+            self._schedule_event(
+                STTEventType.UTTERANCE_COMPLETE,
+                stt_result
+            )
+
+            # Check for speaker change with the final information
+            speaker_id = stt_result.speaker_id
+            speaker_name = stt_result.speaker_name
+            previous_speaker = self.current_speaker
+            if speaker_id is not None and speaker_id != self.current_speaker:
+                self.current_speaker = speaker_id
+                self._schedule_event(
+                    STTEventType.SPEAKER_CHANGE,
+                    {
+                        "speaker_id": speaker_id,
+                        "speaker_name": speaker_name,
+                        "previous_speaker": previous_speaker
+                    }
+                )
+
+            self.last_utterance_time = datetime.now()
+        
         self._schedule_event(STTEventType.SPEECH_ENDED, {
             "timestamp": datetime.now()
         })
