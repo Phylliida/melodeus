@@ -28,6 +28,7 @@ from synchronized_thinking_sound import SynchronizedThinkingSoundPlayer
 from websocket_ui_server import VoiceUIServer, UIMessage
 from echo_filter import EchoFilter
 from context_manager import ContextManager
+from mel_aec_audio import stop_stream # needed for shutdown
 
 @dataclass
 class ConversationTurn:
@@ -3237,6 +3238,13 @@ class UnifiedVoiceConversation:
             self.thinking_sound.cleanup()
         except Exception as e:
             print(f"Error cleaning up thinking sound: {e}")
+        
+        # Clean up audio connection
+        try:
+            stop_stream()
+        except Exception as e:
+            print(f"Error cleaning up audio stream: {e}")
+        
 
 async def main():
     """Main function for the unified voice conversation system."""
