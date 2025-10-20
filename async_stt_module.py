@@ -446,9 +446,13 @@ class AsyncSTTStreamer:
             print("🔄 Cancelling keepalive task...")
             self.keepalive_task.cancel()
             try:
-                await self.keepalive_task
+                await asyncio.wait_for(self.keepalive_task, timeout=1.0)
+            except asyncio.TimeoutError:
+                print("⚠️ Keepalive task took too long to exit; continuing shutdown.")
             except asyncio.CancelledError:
                 pass
+            finally:
+                self.keepalive_task = None
         
         # Stop audio capture callback
         self._stop_audio_stream()
@@ -484,17 +488,19 @@ class AsyncSTTStreamer:
     
     async def _keepalive_loop(self):
         """Send keepalive messages to prevent connection timeout."""
-        while self.is_listening and self.connection_alive:
-            try:
+        try:
+            while self.is_listening and self.connection_alive:
                 # Send a keepalive message every interval
                 if self.connection:
                     # Deepgram expects a JSON message for keepalive
                     keepalive_message = json.dumps({"type": "KeepAlive"})
                     self.connection.send(keepalive_message)
                 await asyncio.sleep(self.keepalive_interval)
-            except Exception as e:
-                print(f"❌ Keepalive error: {e}")
-                break
+        except asyncio.CancelledError:
+            # Expected during shutdown; exit quietly
+            raise
+        except Exception as e:
+            print(f"❌ Keepalive error: {e}")
 
     def _start_audio_stream(self) -> bool:
         """Register the mel-aec capture callback for streaming audio."""
@@ -774,6 +780,7 @@ class AsyncSTTStreamer:
         # Cancel keepalive task if running
         if self.keepalive_task and not self.keepalive_task.done():
             self.keepalive_task.cancel()
+        self.keepalive_task = None
         
         # Trigger reconnection if not already reconnecting and not shutting down
         if self.is_listening and not self.is_reconnecting:

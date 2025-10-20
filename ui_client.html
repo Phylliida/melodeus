@@ -506,6 +506,8 @@
         let messageCount = 0;
         let isConnected = false;
         let availableCharacters = [];  // Track available AI characters
+        let reconnectTimer = null;
+        const RECONNECT_DELAY_MS = 500;
         
         function updateConnectionStatus(connected) {
             isConnected = connected;
@@ -530,11 +532,25 @@
             });
         }
         
+        function scheduleReconnect() {
+            if (reconnectTimer !== null) {
+                return;
+            }
+            reconnectTimer = setTimeout(() => {
+                reconnectTimer = null;
+                connect();
+            }, RECONNECT_DELAY_MS);
+        }
+
         function connect() {
             ws = new WebSocket('ws://localhost:8765');
             
             ws.onopen = () => {
                 console.log('Connected to voice system');
+                if (reconnectTimer !== null) {
+                    clearTimeout(reconnectTimer);
+                    reconnectTimer = null;
+                }
                 updateConnectionStatus(true);
                 ws.send(JSON.stringify({ type: 'ui_ready', data: { client_id: 'web-ui' }}));
             };
@@ -542,12 +558,22 @@
             ws.onclose = () => {
                 console.log('Disconnected from voice system');
                 updateConnectionStatus(false);
-                setTimeout(connect, 3000);  // Reconnect after 3s
+                ws = null;
+                scheduleReconnect();
             };
             
             ws.onerror = (error) => {
                 console.error('WebSocket error:', error);
                 updateConnectionStatus(false);
+                if (ws && ws.readyState !== WebSocket.CLOSED) {
+                    try {
+                        ws.close();
+                    } catch (closeError) {
+                        console.error('Error closing failed WebSocket:', closeError);
+                    }
+                }
+                ws = null;
+                scheduleReconnect();
             };
             
             ws.onmessage = (event) => {
