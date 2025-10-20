@@ -13,6 +13,8 @@ import time
 import re
 import difflib
 import bisect
+import threading
+import queue
 from typing import Optional, AsyncGenerator, Dict, Any, List, Tuple
 from dataclasses import dataclass, field
 
@@ -150,6 +152,13 @@ class AsyncTTSStreamer:
         self._current_voice_connection = None  # Current voice connection
         self._current_voice_key = None  # Key of current voice
         self._current_voice_task = None  # Task handling current connection
+
+        # Background playback worker
+        self._playback_queue = None  # type: Optional["queue.Queue[Tuple[bytes, Optional[Dict[str, Any]]]]"]
+        self._playback_thread: Optional[threading.Thread] = None
+        self._playback_stop_event: Optional[threading.Event] = None
+        self._last_playback_queue_log = 0.0
+        self._session_lock = threading.RLock()
         
     def _fuzzy_find_position(self, source_text: str, target_text: str) -> int:
         """
@@ -261,9 +270,11 @@ class AsyncTTSStreamer:
             self._chunks_played = 0  # Reset chunks played counter
             
             # Create a new session for this speaking operation
-            self.current_session = self._create_session()
-            self.current_session.generated_text = text
-            self.current_session.spoken_text_for_tts = text
+            session = self._create_session()
+            with self._session_lock:
+                self.current_session = session
+                session.generated_text = text
+                session.spoken_text_for_tts = text
             # Store for recovery in case of error
             self.last_session_generated_text = text
             
@@ -347,17 +358,24 @@ class AsyncTTSStreamer:
             self._first_audio_received = False
             
             # Cancel any existing session and create a new one
-            if self.current_session and not self.current_session.was_interrupted:
-                print(f"⚠️ Cancelling previous session: {self.current_session.session_id}")
-                self.current_session.was_interrupted = True
+            previous_session = None
+            cancelled_previous = False
+            with self._session_lock:
+                previous_session = self.current_session
+                if previous_session and not previous_session.was_interrupted:
+                    previous_session.was_interrupted = True
+                    cancelled_previous = True
+                session = self._create_session()
+                self.current_session = session
+            if cancelled_previous and previous_session:
+                print(f"⚠️ Cancelling previous session: {previous_session.session_id}")
                 
             # Close any existing voice connection from previous session
             if self._current_voice_connection:
                 await self._close_current_voice_connection()
             
             # Create a new session for this speaking operation
-            self.current_session = self._create_session()
-            print(f"🆕 Created TTS session: {self.current_session.session_id}")
+            print(f"🆕 Created TTS session: {session.session_id}")
             self._websockets_completed = 0
             self._total_websockets = 0
             self._all_text_sent = False
@@ -530,26 +548,32 @@ class AsyncTTSStreamer:
     
     def _process_xml_tag(self, xml_content: str, start_pos: int, end_pos: int):
         """Process a complete XML tag and add it to tool calls."""
-        if not self.current_session:
-            return
+        with self._session_lock:
+            session = self.current_session
+            if not session:
+                return
             
-        # Extract tag name
-        tag_match = re.match(r'<(\w+)[^>]*>', xml_content)
-        if tag_match:
-            tag_name = tag_match.group(1)
-            
-            # Create tool call
-            tool_call = ToolCall(
-                tag_name=tag_name,
-                content=xml_content,
-                start_position=start_pos,
-                end_position=end_pos
-            )
-            
-            self.current_session.tool_calls.append(tool_call)
-            print(f"🔧 Found tool call: {tag_name} at TTS position {start_pos}")
-            print(f"   Current spoken_text_for_tts length: {len(self.current_session.spoken_text_for_tts)}")
-            print(f"   Current generated_text length: {len(self.current_session.generated_text)}")
+            # Extract tag name
+            tag_match = re.match(r'<(\w+)[^>]*>', xml_content)
+            if tag_match:
+                tag_name = tag_match.group(1)
+                
+                # Create tool call
+                tool_call = ToolCall(
+                    tag_name=tag_name,
+                    content=xml_content,
+                    start_position=start_pos,
+                    end_position=end_pos
+                )
+                
+                session.tool_calls.append(tool_call)
+                spoken_len = len(session.spoken_text_for_tts)
+                generated_len = len(session.generated_text)
+        
+        if 'tool_call' in locals():
+            print(f"🔧 Found tool call: {tool_call.tag_name} at TTS position {start_pos}")
+            print(f"   Current spoken_text_for_tts length: {spoken_len}")
+            print(f"   Current generated_text length: {generated_len}")
     
     async def _monitor_speech_progress(self):
         """Monitor speech progress using alignment timings and execute tools when appropriate."""
@@ -558,37 +582,43 @@ class AsyncTTSStreamer:
             
         while self.is_streaming and not self._stop_requested:
             await asyncio.sleep(0.5)  # Check every 500ms
-            
-            session = self.current_session
-            if not session or session.audio_start_time is None:
-                continue
-            
-            if not session.alignment_chars:
-                continue
-            
-            elapsed = time.time() - session.audio_start_time
-            spoken_alignment_chars = self._alignment_chars_spoken(elapsed)
-            fuzzy_position = self._alignment_chars_to_tts_index(spoken_alignment_chars)
-            tts_text = session.spoken_text_for_tts
-            
+
+            with self._session_lock:
+                session = self.current_session
+                if not session or session.audio_start_time is None or not session.alignment_chars:
+                    continue
+                audio_start_time = session.audio_start_time
+                tts_text = session.spoken_text_for_tts
+
+            elapsed = time.time() - audio_start_time
+            spoken_alignment_chars = self._alignment_chars_spoken(elapsed, session)
+            fuzzy_position = self._alignment_chars_to_tts_index(spoken_alignment_chars, session)
+
             # Map spoken alignment progress onto the TTS text
             if not tts_text:
                 continue
-            
-            # Check which tools should be executed based on fuzzy position
-            for tool_call in session.tool_calls:
-                if not tool_call.executed:
+
+            pending_tools = []
+            with self._session_lock:
+                current_session = self.current_session
+                if session is not current_session:
+                    continue
+                for tool_call in current_session.tool_calls:
+                    if tool_call.executed:
+                        continue
                     if fuzzy_position >= tool_call.start_position:
-                        # Execute the tool
                         if tool_call.start_position <= 0:
                             progress = 100.0
                         else:
                             progress = (fuzzy_position / tool_call.start_position) * 100
                             if progress > 100.0:
                                 progress = 100.0
-                        print(f"📊 Tool '{tool_call.tag_name}' reached! Progress: {progress:.1f}%")
-                        await self._execute_tool(tool_call)
                         tool_call.executed = True
+                        pending_tools.append((tool_call, progress))
+
+            for tool_call, progress in pending_tools:
+                print(f"📊 Tool '{tool_call.tag_name}' reached! Progress: {progress:.1f}%")
+                await self._execute_tool(tool_call)
     
     async def _execute_tool(self, tool_call: ToolCall):
         """Execute a tool call and handle the result."""
@@ -616,60 +646,76 @@ class AsyncTTSStreamer:
     
     async def _execute_remaining_tools(self):
         """Execute any remaining unexecuted tools after audio completes."""
-        unexecuted_tools = [tc for tc in self.current_session.tool_calls if not tc.executed]
+        with self._session_lock:
+            session = self.current_session
+            if not session:
+                return
+            unexecuted_tools = [tc for tc in session.tool_calls if not tc.executed]
+            was_interrupted = self._interrupted or session.was_interrupted
         
-        if unexecuted_tools:
-            print(f"🔧 Checking {len(unexecuted_tools)} remaining tool(s) after audio completion")
+        if not unexecuted_tools:
+            return
+        
+        print(f"🔧 Checking {len(unexecuted_tools)} remaining tool(s) after audio completion")
+        
+        if not was_interrupted:
+            # Message completed naturally - execute ALL remaining tools
+            print(f"✅ Message completed naturally - executing all remaining tools")
+            for tool_call in unexecuted_tools:
+                print(f"🚀 Executing tool '{tool_call.tag_name}' at position {tool_call.start_position}")
+                await self._execute_tool(tool_call)
+                with self._session_lock:
+                    tool_call.executed = True
+            return
+        
+        # Message was interrupted - use fuzzy matching to determine which tools to execute
+        print(f"⚠️ Message was interrupted - checking tool progress")
+        with self._session_lock:
+            session = self.current_session
+            if not session:
+                return
+            tts_text = session.spoken_text_for_tts
+            audio_start_time = session.audio_start_time
+            session_end_time = session.end_time
+            total_audio_duration = session.total_audio_duration
+        
+        if not tts_text:
+            final_fuzzy_position = 0
+        else:
+            if audio_start_time is not None:
+                if session_end_time is not None:
+                    elapsed = session_end_time - audio_start_time
+                else:
+                    elapsed = time.time() - audio_start_time
+            else:
+                elapsed = 0.0
+            elapsed = max(0.0, min(elapsed, total_audio_duration))
+            spoken_alignment_chars = self._alignment_chars_spoken(elapsed)
+            final_fuzzy_position = self._alignment_chars_to_tts_index(spoken_alignment_chars)
+        
+        # Execute remaining tools based on progress
+        for tool_call in unexecuted_tools:
+            with self._session_lock:
+                if tool_call.executed:
+                    continue
+            if tool_call.start_position <= 0:
+                progress = 100.0
+            else:
+                progress = (final_fuzzy_position / tool_call.start_position) * 100 if tool_call.start_position else 100.0
+                if progress > 100.0:
+                    progress = 100.0
             
-            # Check if the message was interrupted
-            was_interrupted = self._interrupted or self.current_session.was_interrupted
+            # Execute tools that were close to being reached
+            # Use a more forgiving threshold (80%) for tools near the end
+            threshold = 80 if tool_call.start_position > len(tts_text) * 0.8 else 85
             
-            if not was_interrupted:
-                # Message completed naturally - execute ALL remaining tools
-                print(f"✅ Message completed naturally - executing all remaining tools")
-                for tool_call in unexecuted_tools:
-                    print(f"🚀 Executing tool '{tool_call.tag_name}' at position {tool_call.start_position}")
-                    await self._execute_tool(tool_call)
+            if progress >= threshold:
+                print(f"   ✅ Executing interrupted tool at {progress:.1f}% progress")
+                await self._execute_tool(tool_call)
+                with self._session_lock:
                     tool_call.executed = True
             else:
-                # Message was interrupted - use fuzzy matching to determine which tools to execute
-                print(f"⚠️ Message was interrupted - checking tool progress")
-                
-                tts_text = self.current_session.spoken_text_for_tts
-                if not tts_text:
-                    final_fuzzy_position = 0
-                else:
-                    if self.current_session.audio_start_time is not None:
-                        if self.current_session.end_time is not None:
-                            elapsed = self.current_session.end_time - self.current_session.audio_start_time
-                        else:
-                            elapsed = time.time() - self.current_session.audio_start_time
-                    else:
-                        elapsed = 0.0
-                    elapsed = max(0.0, min(elapsed, self.current_session.total_audio_duration))
-                    spoken_alignment_chars = self._alignment_chars_spoken(elapsed)
-                    final_fuzzy_position = self._alignment_chars_to_tts_index(spoken_alignment_chars)
-                
-                # Execute remaining tools based on progress
-                for tool_call in unexecuted_tools:
-                    if not tool_call.executed:
-                        if tool_call.start_position <= 0:
-                            progress = 100.0
-                        else:
-                            progress = (final_fuzzy_position / tool_call.start_position) * 100
-                            if progress > 100.0:
-                                progress = 100.0
-                        
-                        # Execute tools that were close to being reached
-                        # Use a more forgiving threshold (80%) for tools near the end
-                        threshold = 80 if tool_call.start_position > len(tts_text) * 0.8 else 85
-                        
-                        if progress >= threshold:
-                            print(f"   ✅ Executing interrupted tool at {progress:.1f}% progress")
-                            await self._execute_tool(tool_call)
-                            tool_call.executed = True
-                        else:
-                            print(f"   ❌ Skipping tool at {progress:.1f}% progress (threshold: {threshold}%)")
+                print(f"   ❌ Skipping tool at {progress:.1f}% progress (threshold: {threshold}%)")
 
     async def _speak_sentence_with_voice_switching(self, sentence: str):
         """Speak a sentence with appropriate voice switching for emotive parts."""
@@ -952,7 +998,9 @@ class AsyncTTSStreamer:
             self._chunks_played = 0  # Reset chunks played counter
             
             # Create a new session for this speaking operation
-            self.current_session = self._create_session()
+            session = self._create_session()
+            with self._session_lock:
+                self.current_session = session
             
             await self._start_streaming_generator(text_generator)
             
@@ -977,6 +1025,7 @@ class AsyncTTSStreamer:
 
         # Interrupt hardware playback right away
         interrupt_playback()
+        self._stop_playback_worker()
         
         # Mark current session as interrupted
         if self.current_session:
@@ -1159,75 +1208,163 @@ class AsyncTTSStreamer:
             if not self._stop_requested:
                 print(f"TTS audio handling error: {e}")
 
+    def _ensure_playback_worker(self) -> bool:
+        """Ensure a background thread exists to process playback chunks."""
+        if self._playback_thread and self._playback_thread.is_alive():
+            return True
+
+        self._playback_queue = queue.Queue()
+        self._playback_stop_event = threading.Event()
+
+        def _worker():
+            while True:
+                if self._playback_stop_event and self._playback_stop_event.is_set():
+                    break
+
+                if self._stop_requested and self._playback_queue.empty():
+                    break
+
+                try:
+                    item = self._playback_queue.get(timeout=0.1)
+                except queue.Empty:
+                    continue
+
+                if item is None:
+                    break
+
+                audio_chunk, alignment = item
+
+                if self._playback_stop_event and self._playback_stop_event.is_set():
+                    break
+
+                try:
+                    self._process_audio_chunk(audio_chunk, alignment)
+                except Exception as playback_error:
+                    print(f"Audio playback worker error: {playback_error}")
+                    if self._stop_requested:
+                        break
+
+        self._playback_thread = threading.Thread(
+            target=_worker,
+            name="TTSPlaybackWorker",
+            daemon=True,
+        )
+        self._playback_thread.start()
+        return True
+
+    def _stop_playback_worker(self):
+        """Stop the background playback worker thread."""
+        thread = self._playback_thread
+        if not thread:
+            return
+
+        if self._playback_stop_event and not self._playback_stop_event.is_set():
+            self._playback_stop_event.set()
+
+        if self._playback_queue:
+            try:
+                self._playback_queue.put_nowait(None)
+            except Exception:
+                pass
+
+        if thread.is_alive():
+            thread.join(timeout=1.0)
+
+        self._playback_thread = None
+        self._playback_stop_event = None
+        self._playback_queue = None
+
     def _play_audio_chunk(self, audio_chunk: bytes, alignment: Optional[Dict[str, Any]] = None):
-        """Write an audio chunk to the shared output and record alignment timing."""
+        """Queue an audio chunk for background processing."""
         if not audio_chunk or self._stop_requested:
             return
 
-        session = self.current_session
-        if not session:
+        if not self._ensure_playback_worker():
             return
 
-        # Determine chunk timing information before playback
-        bytes_per_sample = 2  # 16-bit PCM
-        chunk_duration = len(audio_chunk) / (bytes_per_sample * self.config.sample_rate)
-        chunk_start_offset = session.total_audio_duration
-        chunk_end_offset = chunk_start_offset + chunk_duration
+        if not self._playback_queue:
+            return
+
+        try:
+            self._playback_queue.put_nowait((audio_chunk, alignment))
+        except Exception:
+            now = time.time()
+            if now - self._last_playback_queue_log > 2.0:
+                print("⚠️ TTS playback queue rejected chunk; dropping audio")
+                self._last_playback_queue_log = now
+
+    def _process_audio_chunk(self, audio_chunk: bytes, alignment: Optional[Dict[str, Any]]):
+        """Write an audio chunk to the shared output and capture metadata."""
+        if not audio_chunk or self._stop_requested:
+            return
+
+        with self._session_lock:
+            session = self.current_session
+            if not session:
+                return
+            bytes_per_sample = 2  # 16-bit PCM
+            chunk_duration = len(audio_chunk) / (bytes_per_sample * self.config.sample_rate)
+            chunk_start_offset = session.total_audio_duration
+            chunk_end_offset = chunk_start_offset + chunk_duration
 
         try:
             write_playback_pcm(audio_chunk, self.config.sample_rate)
             self._chunks_played += 1
             self.is_playing = True
-        except Exception as e:
+        except Exception as playback_error:
             if not self._stop_requested:
-                print(f"Audio playback error: {e}")
+                print(f"Audio playback error: {playback_error}")
             return
 
-        # Record playback start time on first successful chunk
-        if session.audio_start_time is None:
-            session.audio_start_time = time.time()
+        chunk_playback_time = time.time()
 
-        # Update cumulative audio duration
-        session.total_audio_duration = chunk_end_offset
+        with self._session_lock:
+            session = self.current_session
+            if not session:
+                return
+            if session.audio_start_time is None:
+                session.audio_start_time = chunk_playback_time
+            session.total_audio_duration = chunk_end_offset
 
         if alignment:
             self._record_alignment(alignment, chunk_start_offset)
 
     def _record_alignment(self, alignment: Dict[str, Any], chunk_start_offset: float):
         """Record alignment data for a chunk to support interruption recovery."""
-        session = self.current_session
-        if not session:
-            return
+        with self._session_lock:
+            session = self.current_session
+            if not session:
+                return
 
-        # Normalize keys: some payloads use camelCase, others snake_case
-        chars = alignment.get("chars") or alignment.get("characters") or []
-        start_times = alignment.get("charStartTimesMs") or alignment.get("char_start_times_ms") or []
-        durations = alignment.get("charDurationsMs") or alignment.get("char_durations_ms") or []
+            # Normalize keys: some payloads use camelCase, others snake_case
+            chars = alignment.get("chars") or alignment.get("characters") or []
+            start_times = alignment.get("charStartTimesMs") or alignment.get("char_start_times_ms") or []
+            durations = alignment.get("charDurationsMs") or alignment.get("char_durations_ms") or []
 
-        if not chars or not isinstance(chars, list):
-            return
+            if not chars or not isinstance(chars, list):
+                return
 
-        session.raw_alignment_chunks.append(alignment)
+            session.raw_alignment_chunks.append(alignment)
 
-        for idx, char in enumerate(chars):
-            start_ms = start_times[idx] if idx < len(start_times) else 0
-            duration_ms = durations[idx] if idx < len(durations) else 0
+            for idx, char in enumerate(chars):
+                start_ms = start_times[idx] if idx < len(start_times) else 0
+                duration_ms = durations[idx] if idx < len(durations) else 0
 
-            # Convert to seconds relative to audio start
-            start_time = chunk_start_offset + (start_ms / 1000.0)
-            end_time = start_time + max(duration_ms, 0) / 1000.0
+                # Convert to seconds relative to audio start
+                start_time = chunk_start_offset + (start_ms / 1000.0)
+                end_time = start_time + max(duration_ms, 0) / 1000.0
 
-            alignment_char = AlignmentChar(
-                char=char,
-                start_time=start_time,
-                end_time=end_time,
-                global_index=session.alignment_char_count
-            )
+                alignment_char = AlignmentChar(
+                    char=char,
+                    start_time=start_time,
+                    end_time=end_time,
+                    global_index=session.alignment_char_count
+                )
 
-            session.alignment_chars.append(alignment_char)
-            session.alignment_char_count += 1
-            session.alignment_text += char
-            session.alignment_start_times.append(start_time)
+                session.alignment_chars.append(alignment_char)
+                session.alignment_char_count += 1
+                session.alignment_text += char
+                session.alignment_start_times.append(start_time)
 
     @staticmethod
     def _extract_alignment_payload(data: Dict[str, Any]) -> Optional[Dict[str, Any]]:
@@ -1244,75 +1381,79 @@ class AsyncTTSStreamer:
 
     def _alignment_chars_spoken(self, elapsed_time: float, session: Optional[TTSSession] = None) -> int:
         """Return how many alignment characters have started playback within elapsed_time."""
-        session = session or self.current_session
-        if not session or not session.alignment_start_times:
-            return 0
+        with self._session_lock:
+            session = session or self.current_session
+            if not session or not session.alignment_start_times:
+                return 0
 
-        clamped_time = max(0.0, elapsed_time)
-        index = bisect.bisect_right(session.alignment_start_times, clamped_time)
-        return min(index, session.alignment_char_count)
+            clamped_time = max(0.0, elapsed_time)
+            index = bisect.bisect_right(session.alignment_start_times, clamped_time)
+            return min(index, session.alignment_char_count)
 
     def _alignment_chars_to_tts_index(self, alignment_char_count: int, session: Optional[TTSSession] = None) -> int:
         """Map a count of alignment characters to an index in the TTS text."""
-        session = session or self.current_session
-        if not session or not session.spoken_text_for_tts:
-            return 0
+        with self._session_lock:
+            session = session or self.current_session
+            if not session or not session.spoken_text_for_tts:
+                return 0
 
-        alignment_char_count = max(0, min(alignment_char_count, session.alignment_char_count))
-        if alignment_char_count == 0:
-            return 0
+            alignment_char_count = max(0, min(alignment_char_count, session.alignment_char_count))
+            if alignment_char_count == 0:
+                return 0
 
-        tts_text = session.spoken_text_for_tts
-        total_alignment = max(session.alignment_char_count, 1)
-        ratio_index = int(len(tts_text) * min(alignment_char_count / total_alignment, 1.0))
+            tts_text = session.spoken_text_for_tts
+            total_alignment = max(session.alignment_char_count, 1)
+            ratio_index = int(len(tts_text) * min(alignment_char_count / total_alignment, 1.0))
 
-        if session.alignment_text:
-            alignment_prefix = session.alignment_text[:alignment_char_count]
-            fuzzy_index = self._fuzzy_find_position(alignment_prefix, tts_text)
-            if fuzzy_index:
-                return min(fuzzy_index, len(tts_text))
+            if session.alignment_text:
+                alignment_prefix = session.alignment_text[:alignment_char_count]
+                fuzzy_index = self._fuzzy_find_position(alignment_prefix, tts_text)
+                if fuzzy_index:
+                    return min(fuzzy_index, len(tts_text))
 
-        return min(ratio_index, len(tts_text))
+            return min(ratio_index, len(tts_text))
 
     def _resolve_session_elapsed_time(self, session: TTSSession) -> float:
         """Determine how much audio time elapsed for a session."""
-        if not session.audio_start_time:
-            return 0.0
+        with self._session_lock:
+            if not session.audio_start_time:
+                return 0.0
 
-        if session.end_time is not None:
-            elapsed = session.end_time - session.audio_start_time
-        else:
-            elapsed = time.time() - session.audio_start_time
+            if session.end_time is not None:
+                elapsed = session.end_time - session.audio_start_time
+            else:
+                elapsed = time.time() - session.audio_start_time
 
-        max_duration = session.total_audio_duration if session.total_audio_duration > 0 else elapsed
-        return max(0.0, min(elapsed, max_duration))
+            max_duration = session.total_audio_duration if session.total_audio_duration > 0 else elapsed
+            return max(0.0, min(elapsed, max_duration))
 
     def _finalize_spoken_segments(self, session: TTSSession):
         """Populate session.current_spoken_content using alignment data."""
-        if not session:
-            return
+        with self._session_lock:
+            if not session:
+                return
 
-        elapsed = self._resolve_session_elapsed_time(session)
-        spoken_alignment_chars = self._alignment_chars_spoken(elapsed, session)
-        tts_index = self._alignment_chars_to_tts_index(spoken_alignment_chars, session)
+            elapsed = self._resolve_session_elapsed_time(session)
+            spoken_alignment_chars = self._alignment_chars_spoken(elapsed, session)
+            tts_index = self._alignment_chars_to_tts_index(spoken_alignment_chars, session)
 
-        if tts_index <= 0:
-            session.current_spoken_content = []
-            return
+            if tts_index <= 0:
+                session.current_spoken_content = []
+                return
 
-        spoken_text = session.spoken_text_for_tts[:tts_index].strip()
-        if not spoken_text:
-            session.current_spoken_content = []
-            return
+            spoken_text = session.spoken_text_for_tts[:tts_index].strip()
+            if not spoken_text:
+                session.current_spoken_content = []
+                return
 
-        segment_end_time = elapsed
-        segment = SpokenContent(
-            text=spoken_text,
-            start_time=0.0,
-            end_time=segment_end_time,
-            confidence=1.0
-        )
-        session.current_spoken_content = [segment]
+            segment_end_time = elapsed
+            segment = SpokenContent(
+                text=spoken_text,
+                start_time=0.0,
+                end_time=segment_end_time,
+                confidence=1.0
+            )
+            session.current_spoken_content = [segment]
 
     async def _wait_for_playback_drain(self):
         """Wait until the shared stream output buffer is effectively empty."""
@@ -1370,6 +1511,7 @@ class AsyncTTSStreamer:
     async def _cleanup_stream(self):
         """Clean up streaming resources."""
         self.is_streaming = False
+        self._stop_playback_worker()
 
         await self._force_close_voice_connection()
         
@@ -1390,10 +1532,11 @@ class AsyncTTSStreamer:
         
         self.is_playing = False
         
-        if self.current_session:
+        with self._session_lock:
             session = self.current_session
-            if session.audio_start_time is not None and session.end_time is None:
+            if session and session.audio_start_time is not None and session.end_time is None:
                 session.end_time = session.audio_start_time + session.total_audio_duration
+        if session:
             self._finalize_spoken_segments(session)
     
     def get_spoken_content(self) -> List[SpokenContent]:
@@ -1403,10 +1546,13 @@ class AsyncTTSStreamer:
         Returns:
             List of SpokenContent objects representing what was actually spoken
         """
-        if not self.current_session:
+        with self._session_lock:
+            session = self.current_session
+        if not session:
             return []
-        self._finalize_spoken_segments(self.current_session)
-        return self.current_session.current_spoken_content.copy()
+        self._finalize_spoken_segments(session)
+        with self._session_lock:
+            return session.current_spoken_content.copy()
     
     def get_spoken_text(self) -> str:
         """
@@ -1415,12 +1561,15 @@ class AsyncTTSStreamer:
         Returns:
             Combined text of what was actually spoken
         """
-        if not self.current_session:
+        with self._session_lock:
+            session = self.current_session
+        if not session:
             return ""
-        self._finalize_spoken_segments(self.current_session)
-        if not self.current_session.current_spoken_content:
-            return ""
-        return " ".join(content.text for content in self.current_session.current_spoken_content)
+        self._finalize_spoken_segments(session)
+        with self._session_lock:
+            if not session.current_spoken_content:
+                return ""
+            return " ".join(content.text for content in session.current_spoken_content)
     
     def get_spoken_text_heuristic(self) -> str:
         """
@@ -1430,16 +1579,21 @@ class AsyncTTSStreamer:
         Returns:
             Portion of original generated text that was likely spoken
         """
-        if not self.current_session or not self.current_session.generated_text:
-            return ""
-        
-        session = self.current_session
+        with self._session_lock:
+            session = self.current_session
+            interrupted = self._interrupted
+            if not session or not session.generated_text:
+                return ""
+            audio_start_time = session.audio_start_time
+            alignment_char_count = session.alignment_char_count
+            generated_text = session.generated_text
+            spoken_text_for_tts = session.spoken_text_for_tts
 
         # If playback completed without interruption, return full text
-        if not self._interrupted:
-            return session.generated_text
+        if not interrupted:
+            return generated_text
 
-        if session.audio_start_time is None:
+        if audio_start_time is None:
             return ""
 
         elapsed = self._resolve_session_elapsed_time(session)
@@ -1450,41 +1604,41 @@ class AsyncTTSStreamer:
             return ""
 
         tts_char_index = self._alignment_chars_to_tts_index(spoken_alignment_chars, session)
-        reference_text = session.spoken_text_for_tts[:tts_char_index]
+        reference_text = spoken_text_for_tts[:tts_char_index]
 
-        print(f"🔍 [HEURISTIC DEBUG] Alignment chars spoken: {spoken_alignment_chars}/{session.alignment_char_count}")
+        print(f"🔍 [HEURISTIC DEBUG] Alignment chars spoken: {spoken_alignment_chars}/{alignment_char_count}")
         print(f"🔍 [HEURISTIC DEBUG] Reference text length: {len(reference_text)}")
-        print(f"🔍 [HEURISTIC DEBUG] Generated text length: {len(session.generated_text)}")
+        print(f"🔍 [HEURISTIC DEBUG] Generated text length: {len(generated_text)}")
 
         if not reference_text.strip():
             print("🔍 [HEURISTIC DEBUG] Reference text empty after trimming — returning empty string.")
             return ""
 
         # Map reference text back to generated text using fuzzy matching
-        fuzzy_position = self._fuzzy_find_position(reference_text, session.generated_text)
-        if fuzzy_position <= 0 and len(session.spoken_text_for_tts) > 0:
-            ratio = len(reference_text) / len(session.spoken_text_for_tts)
-            fuzzy_position = int(len(session.generated_text) * min(ratio * 1.1, 1.0))
+        fuzzy_position = self._fuzzy_find_position(reference_text, generated_text)
+        if fuzzy_position <= 0 and len(spoken_text_for_tts) > 0:
+            ratio = len(reference_text) / len(spoken_text_for_tts)
+            fuzzy_position = int(len(generated_text) * min(ratio * 1.1, 1.0))
 
-        fuzzy_position = min(fuzzy_position, len(session.generated_text))
+        fuzzy_position = min(fuzzy_position, len(generated_text))
 
         # Extend to nearest word boundary for cleaner truncation
         word_end_position = fuzzy_position
         while (
-            word_end_position < len(session.generated_text)
-            and session.generated_text[word_end_position] not in [' ', '.', ',', '!', '?', ';', ':', '\n']
+            word_end_position < len(generated_text)
+            and generated_text[word_end_position] not in [' ', '.', ',', '!', '?', ';', ':', '\n']
         ):
             word_end_position += 1
 
-        result_text = session.generated_text[:word_end_position]
+        result_text = generated_text[:word_end_position]
 
         # Ensure we don't leave emotive markers unbalanced
         asterisk_count = result_text.count('*')
         if asterisk_count % 2 == 1:
-            close_pos = session.generated_text.find('*', word_end_position)
+            close_pos = generated_text.find('*', word_end_position)
             if close_pos != -1:
                 word_end_position = close_pos + 1
-                result_text = session.generated_text[:word_end_position]
+                result_text = generated_text[:word_end_position]
 
         result = result_text.strip()
         print(f"🔍 [HEURISTIC DEBUG] Returning heuristic result: '{result}' ({len(result)} chars)")
@@ -1498,11 +1652,13 @@ class AsyncTTSStreamer:
             Dictionary with 'generated', 'spoken_alignment', 'spoken_whisper', and 'spoken_heuristic' keys.
             'spoken_whisper' is kept for backward compatibility and mirrors 'spoken_alignment'.
         """
-        if not self.current_session:
+        with self._session_lock:
+            session = self.current_session
+        if not session:
             return {"generated": "", "spoken_alignment": "", "spoken_whisper": "", "spoken_heuristic": ""}
             
         return {
-            "generated": self.current_session.generated_text,
+            "generated": session.generated_text,
             "spoken_alignment": self.get_spoken_text(),
             "spoken_whisper": self.get_spoken_text(),
             "spoken_heuristic": self.get_spoken_text_heuristic()
@@ -1516,15 +1672,19 @@ class AsyncTTSStreamer:
         Returns:
             True if likely fully spoken, False if interrupted
         """
-        if not self.current_session:
+        with self._session_lock:
+            session = self.current_session
+        if not session:
             return False
             
         spoken_heuristic = self.get_spoken_text_heuristic()
-        if not self.current_session.generated_text or not spoken_heuristic:
+        with self._session_lock:
+            generated_length = len(session.generated_text) if session else 0
+        if generated_length == 0 or not spoken_heuristic:
             return False
         
         # If heuristic captured at least 90% of generated text, consider it fully spoken
-        return len(spoken_heuristic) >= (len(self.current_session.generated_text) * 0.9)
+        return len(spoken_heuristic) >= (generated_length * 0.9)
 
     async def cleanup(self):
         """Clean up all resources."""

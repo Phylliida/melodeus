@@ -8,6 +8,7 @@ import asyncio
 import time
 import json
 import threading
+import queue
 import numpy as np
 from dataclasses import dataclass, field
 from typing import Optional, Callable, Dict, Any, List, Tuple
@@ -109,6 +110,11 @@ class AsyncSTTStreamer:
         self._last_prepare_error_log = 0.0
         self._last_fp_error_log = 0.0
         self._last_send_error_log = 0.0
+        self._last_queue_full_log = 0.0
+
+        self._send_queue = None  # type: Optional["queue.Queue[bytes]"]
+        self._sender_thread: Optional[threading.Thread] = None
+        self._sender_stop_event: Optional[threading.Event] = None
         
         # Audio setup (shared mel-aec duplex stream)
         self.stream_sample_rate = shared_sample_rate()
@@ -516,6 +522,16 @@ class AsyncSTTStreamer:
             self.audio_stop_event = threading.Event()
         else:
             self.audio_stop_event.clear()
+        self._chunk_counter = 0
+        self.stream_start_time = None
+        self._last_prepare_error_log = 0.0
+        self._last_fp_error_log = 0.0
+        self._last_send_error_log = 0.0
+        self._last_queue_full_log = 0.0
+
+        if not self._start_sender_thread():
+            print("❌ Failed to start Deepgram send worker thread")
+            return False
 
         try:
             stream.set_input_callback(self._handle_audio_capture)
@@ -525,18 +541,78 @@ class AsyncSTTStreamer:
             self._audio_callback_registered = False
             return False
 
-        self._chunk_counter = 0
-        self.stream_start_time = None
-        self._last_prepare_error_log = 0.0
-        self._last_fp_error_log = 0.0
-        self._last_send_error_log = 0.0
+        return True
 
+    def _start_sender_thread(self) -> bool:
+        """Ensure a background thread is running to send audio to Deepgram."""
+        if self._sender_thread and self._sender_thread.is_alive():
+            return True
+
+        # Fresh queue for this session
+        self._send_queue = queue.Queue(maxsize=128)
+        self._sender_stop_event = threading.Event()
+
+        def _sender_worker():
+            while True:
+                if self._sender_stop_event and self._sender_stop_event.is_set():
+                    break
+
+                try:
+                    chunk = self._send_queue.get(timeout=0.1)
+                except queue.Empty:
+                    continue
+
+                if chunk is None:
+                    break
+
+                if self._sender_stop_event and self._sender_stop_event.is_set():
+                    break
+
+                if self.audio_stop_event and self.audio_stop_event.is_set():
+                    break
+
+                if not self.is_listening or not self.connection or not self.connection_alive:
+                    continue
+
+                try:
+                    self.connection.send(chunk)
+                    self._chunk_counter += 1
+                    if self._chunk_counter % 100 == 0:
+                        print(f"📊 Sent {self._chunk_counter} audio chunks")
+                except Exception as send_error:
+                    now = time.time()
+                    if now - self._last_send_error_log > 2.0:
+                        print(f"❌ Failed to send audio data to Deepgram: {send_error}")
+                        self._last_send_error_log = now
+                    self.connection_alive = False
+                    if self.audio_stop_event:
+                        self.audio_stop_event.set()
+                    self._schedule_event(STTEventType.ERROR, {
+                        "error": f"Connection send failed: {send_error}"
+                    })
+                    break
+
+            # Drain any remaining items to unblock producers
+            if self._send_queue:
+                try:
+                    while True:
+                        self._send_queue.get_nowait()
+                except queue.Empty:
+                    pass
+
+        self._sender_thread = threading.Thread(
+            target=_sender_worker,
+            daemon=True,
+            name="DeepgramSendWorker",
+        )
+        self._sender_thread.start()
         return True
 
     def _stop_audio_stream(self):
         """Stop streaming audio by disabling the capture callback."""
         if self.audio_stop_event:
             self.audio_stop_event.set()
+        self._stop_sender_thread()
 
         if self.audio_stream and self._audio_callback_registered:
             try:
@@ -548,6 +624,50 @@ class AsyncSTTStreamer:
         self.stream_start_time = None
         self._chunk_counter = 0
         self.audio_stream = None
+
+    def _stop_sender_thread(self):
+        """Signal the background sender thread to exit."""
+        thread = self._sender_thread
+        if not thread:
+            return
+
+        if self._sender_stop_event and not self._sender_stop_event.is_set():
+            self._sender_stop_event.set()
+
+        if self._send_queue:
+            try:
+                self._send_queue.put_nowait(None)
+            except queue.Full:
+                try:
+                    self._send_queue.get_nowait()
+                except queue.Empty:
+                    pass
+                try:
+                    self._send_queue.put_nowait(None)
+                except queue.Full:
+                    pass
+
+        if thread.is_alive():
+            thread.join(timeout=1.0)
+
+        self._sender_thread = None
+        self._sender_stop_event = None
+        self._send_queue = None
+
+    def _enqueue_audio_chunk(self, chunk: bytes) -> None:
+        """Queue audio bytes for asynchronous sending to Deepgram."""
+        if not self._send_queue:
+            return
+        if self._sender_stop_event and self._sender_stop_event.is_set():
+            return
+
+        try:
+            self._send_queue.put_nowait(chunk)
+        except queue.Full:
+            now = time.time()
+            if now - self._last_queue_full_log > 2.0:
+                print("⚠️ Deepgram send queue full; dropping audio chunk")
+                self._last_queue_full_log = now
 
     def _handle_audio_capture(self, audio_data) -> None:
         """mel-aec capture callback that forwards audio to Deepgram."""
@@ -591,22 +711,7 @@ class AsyncSTTStreamer:
                     print(f"⚠️  Voice fingerprinting error: {fp_error}")
                     self._last_fp_error_log = now
 
-        try:
-            self.connection.send(processed_data)
-            self._chunk_counter += 1
-            if self._chunk_counter % 100 == 0:
-                print(f"📊 Sent {self._chunk_counter} audio chunks")
-        except Exception as send_error:
-            now = time.time()
-            if now - self._last_send_error_log > 2.0:
-                print(f"❌ Failed to send audio data to Deepgram: {send_error}")
-                self._last_send_error_log = now
-            self.connection_alive = False
-            if self.audio_stop_event:
-                self.audio_stop_event.set()
-            self._schedule_event(STTEventType.ERROR, {
-                "error": f"Connection send failed: {send_error}"
-            })
+        self._enqueue_audio_chunk(processed_data)
     
     def _on_open(self, *args, **kwargs):
         """Handle Deepgram connection open."""
