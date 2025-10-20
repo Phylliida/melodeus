@@ -25,7 +25,7 @@ from tools import create_tool_registry
 from character_system import create_character_manager, CharacterManager
 from camera_capture import CameraCapture, CameraConfig as CameraCaptureConfig
 from synchronized_thinking_sound import SynchronizedThinkingSoundPlayer
-from websocket_ui_server import VoiceUIServer
+from websocket_ui_server import VoiceUIServer, UIMessage
 from echo_filter import EchoFilter
 from context_manager import ContextManager
 
@@ -56,8 +56,9 @@ class ConversationState:
     pending_tool_response: Optional[str] = None
     # Track request generation to handle concurrent requests
     request_generation: int = 0
-    
-        # Global speaker management
+    # Track active AI stream session for UI corrections
+    current_ui_session_id: Optional[str] = None
+    # Global speaker management
     next_speaker: Optional[str] = None  # Who should speak next
     current_speaker: Optional[str] = None  # Who is currently speaking  
     current_generation: int = 0  # The active generation number
@@ -1132,6 +1133,73 @@ class UnifiedVoiceConversation:
         
         print("✅ Conversation stopped")
     
+    def _get_spoken_text_with_fallback(self, candidate: str = "") -> str:
+        """Retrieve spoken text using heuristic with sane fallbacks when Whisper data is unavailable."""
+        candidate = (candidate or "").strip()
+        session = getattr(self.tts, "current_session", None)
+        if not session:
+            return candidate
+        
+        generated = (session.generated_text or "").strip()
+        
+        # Primary heuristic (uses Whisper character counts when available)
+        heuristic_text = ""
+        try:
+            heuristic_text = self.tts.get_spoken_text_heuristic().strip()
+        except Exception as e:
+            print(f"⚠️ Failed to compute spoken text heuristic: {e}")
+        
+        if heuristic_text:
+            if getattr(self.tts, "_interrupted", False) and generated and heuristic_text == generated:
+                fallback = (session.spoken_text_for_tts or "").strip()
+                if fallback and fallback != generated:
+                    print("🔍 [DEBUG] Using spoken_text_for_tts fallback (heuristic matched full generated text)")
+                    return fallback
+            return heuristic_text
+        
+        # Whisper segments if tracking is active
+        if session.current_spoken_content:
+            fallback = " ".join(segment.text for segment in session.current_spoken_content).strip()
+            if fallback:
+                print("🔍 [DEBUG] Using Whisper spoken segments fallback")
+                return fallback
+        
+        # Fallback to text actually dispatched to TTS
+        fallback = (session.spoken_text_for_tts or "").strip()
+        if fallback:
+            print("🔍 [DEBUG] Using spoken_text_for_tts fallback")
+            return fallback
+        
+        # Fall back to provided candidate or full generated text
+        if candidate:
+            return candidate
+        
+        if getattr(self.tts, "_interrupted", False) and generated:
+            return generated
+        
+        return generated
+    
+    async def _stop_tts_and_notify_ui(self) -> str:
+        """Stop TTS playback and update the UI with any spoken content."""
+        await self.tts.stop()
+        
+        spoken_content = self._get_spoken_text_with_fallback()
+        
+        if hasattr(self, 'ui_server'):
+            session_id = getattr(self.state, "current_ui_session_id", None)
+            if session_id:
+                await self.ui_server.broadcast(UIMessage(
+                    type="ai_stream_correction",
+                    data={
+                        "session_id": session_id,
+                        "corrected_text": spoken_content,
+                        "was_interrupted": True
+                    }
+                ))
+                print(f"🔄 Sent AI stream correction for session '{session_id}'")
+        
+        return spoken_content
+    
     async def _on_utterance_complete(self, result: STTResult, skip_processing: bool = False):
         """Handle completed utterances from STT."""
         # Use speaker name if available from voice fingerprinting, otherwise fall back to speaker ID
@@ -1217,12 +1285,9 @@ class UnifiedVoiceConversation:
         if self.tts.is_currently_playing():
             print(f"🛑 Interrupting TTS playback with: {result.text}")
             
-            # Stop TTS and wait for Whisper to finish processing
-            await self.tts.stop()
-            
-            # Get spoken content synchronously (available after stop() completes)
-            spoken_content = self.tts.get_spoken_text_heuristic().strip()
-            print(f"🔍 [DEBUG] Interruption - get_spoken_text_heuristic returned: '{spoken_content}' ({len(spoken_content)} chars)")
+            # Stop TTS, capture spoken content, and update UI
+            spoken_content = await self._stop_tts_and_notify_ui()
+            print(f"🔍 [DEBUG] Interruption - truncated spoken content: '{spoken_content}' ({len(spoken_content)} chars)")
             
             # Don't add assistant response here - character processing will handle it
             # This avoids duplicates
@@ -1240,11 +1305,11 @@ class UnifiedVoiceConversation:
             interrupted = True
             # Stop any ongoing TTS that might be starting
             if self.tts.is_streaming:
-                await self.tts.stop()
+                await self._stop_tts_and_notify_ui()
             
         elif self.state.is_speaking:
             print(f"🛑 Interrupting TTS setup with: {result.text}")
-            await self.tts.stop()
+            await self._stop_tts_and_notify_ui()
             # Mark current processing as interrupted by user speech
             if self.state.current_processing_turn:
                 self.state.current_processing_turn.status = "interrupted"
@@ -1526,6 +1591,7 @@ class UnifiedVoiceConversation:
     
     async def _process_with_character_llm(self, user_input: str, reference_turn: ConversationTurn, generation: int = None, prepared_statement_name: str = None):
         """Process user input with multi-character system."""
+        ui_session_id: Optional[str] = None
         try:
             self.state.is_processing_llm = True
             
@@ -1640,6 +1706,8 @@ class UnifiedVoiceConversation:
             
             # Request timestamp for logging
             request_timestamp = time.time()
+            ui_session_id = f"session_{request_timestamp}"
+            self.state.current_ui_session_id = ui_session_id
             
             # Check if we should use prefill format
             use_prefill = (self.config.conversation.conversation_mode == "prefill" and 
@@ -1803,7 +1871,7 @@ class UnifiedVoiceConversation:
                         await self.ui_server.broadcast_ai_stream(
                             speaker=next_speaker,
                             text=prepared_text,
-                            session_id=f"session_{request_timestamp}",
+                            session_id=ui_session_id,
                             is_complete=True
                         )
                 finally:
@@ -1817,7 +1885,7 @@ class UnifiedVoiceConversation:
                     # Create TTS task for this character
                     self.state.current_llm_task = asyncio.create_task(
                         self.tts.speak_stream_multi_voice(
-                            self._stream_character_openai_response(messages, character_config, request_timestamp)
+                            self._stream_character_openai_response(messages, character_config, request_timestamp, ui_session_id)
                         )
                     )
                     
@@ -1862,7 +1930,7 @@ class UnifiedVoiceConversation:
                     # Create TTS task for this character
                     self.state.current_llm_task = asyncio.create_task(
                         self.tts.speak_stream_multi_voice(
-                            self._stream_character_anthropic_response(messages, character_config, request_timestamp)
+                            self._stream_character_anthropic_response(messages, character_config, request_timestamp, ui_session_id)
                         )
                     )
                     
@@ -1912,7 +1980,7 @@ class UnifiedVoiceConversation:
                     # Create TTS task for this character
                     self.state.current_llm_task = asyncio.create_task(
                         self.tts.speak_stream_multi_voice(
-                            self._stream_character_bedrock_response(messages, character_config, request_timestamp)
+                            self._stream_character_bedrock_response(messages, character_config, request_timestamp, ui_session_id)
                         )
                     )
                     
@@ -1950,6 +2018,9 @@ class UnifiedVoiceConversation:
                 finally:
                     # Restore original voice config
                     self._restore_voice_config(original_config)
+            
+            if not completed:
+                assistant_response = self._get_spoken_text_with_fallback(assistant_response)
             
             # Log the response
             if assistant_response.strip():
@@ -2046,6 +2117,8 @@ class UnifiedVoiceConversation:
         finally:
             # Always stop thinking sound (no generation means force stop)
             await self.thinking_sound.stop()
+            if getattr(self.state, "current_ui_session_id", None) == ui_session_id:
+                self.state.current_ui_session_id = None
             self.state.is_processing_llm = False
             
             # Clear current speaker when done
@@ -2066,9 +2139,10 @@ class UnifiedVoiceConversation:
                     thinking_sound=False
                 )
     
-    async def _stream_character_openai_response(self, messages, character_config, request_timestamp):
+    async def _stream_character_openai_response(self, messages, character_config, request_timestamp, ui_session_id: Optional[str] = None):
         """Stream response from OpenAI for a specific character."""
         client = self.character_manager.get_character_client(character_config.name)
+        ui_session_id = ui_session_id or f"session_{request_timestamp}"
         
         # Create session ID for echo tracking
         session_id = f"openai_{character_config.name}_{request_timestamp}"
@@ -2096,7 +2170,7 @@ class UnifiedVoiceConversation:
                         await self.ui_server.broadcast_ai_stream(
                             speaker=character_config.name,
                             text=content,
-                            session_id=f"session_{request_timestamp}"
+                            session_id=ui_session_id
                         )
                     
         except Exception as e:
@@ -2108,13 +2182,14 @@ class UnifiedVoiceConversation:
                 await self.ui_server.broadcast_ai_stream(
                     speaker=character_config.name,
                     text="",
-                    session_id=f"session_{request_timestamp}",
+                    session_id=ui_session_id,
                     is_complete=True
                 )
     
-    async def _stream_character_anthropic_response(self, messages, character_config, request_timestamp):
+    async def _stream_character_anthropic_response(self, messages, character_config, request_timestamp, ui_session_id: Optional[str] = None):
         """Stream response from Anthropic for a specific character."""
         client = self.character_manager.get_character_client(character_config.name)
+        ui_session_id = ui_session_id or f"session_{request_timestamp}"
         
         # Create session ID for echo tracking
         session_id = f"anthropic_{character_config.name}_{request_timestamp}"
@@ -2234,7 +2309,7 @@ class UnifiedVoiceConversation:
                             await self.ui_server.broadcast_ai_stream(
                                 speaker=character_config.name,
                                 text=text,
-                                session_id=f"session_{request_timestamp}"
+                                session_id=ui_session_id
                             )
                     
         except Exception as e:
@@ -2246,14 +2321,15 @@ class UnifiedVoiceConversation:
                 await self.ui_server.broadcast_ai_stream(
                     speaker=character_config.name,
                     text="",
-                    session_id=f"session_{request_timestamp}",
+                    session_id=ui_session_id,
                     is_complete=True
                 )
     
-    async def _stream_character_bedrock_response(self, messages, character_config, request_timestamp):
+    async def _stream_character_bedrock_response(self, messages, character_config, request_timestamp, ui_session_id: Optional[str] = None):
         """Stream response from Bedrock for a specific character."""
         # For Bedrock, we use the async bedrock client
         client = self.async_bedrock_client
+        ui_session_id = ui_session_id or f"session_{request_timestamp}"
         
         # Create session ID for echo tracking
         session_id = f"bedrock_{character_config.name}_{request_timestamp}"
@@ -2378,7 +2454,7 @@ class UnifiedVoiceConversation:
                                             await self.ui_server.broadcast_ai_stream(
                                                 speaker=character_config.name,
                                                 text=remaining,
-                                                session_id=f"session_{request_timestamp}"
+                                                session_id=ui_session_id
                                             )
                                 else:
                                     # No prefix found, output everything
@@ -2391,7 +2467,7 @@ class UnifiedVoiceConversation:
                                         await self.ui_server.broadcast_ai_stream(
                                             speaker=character_config.name,
                                             text=prefix_buffer,
-                                            session_id=f"session_{request_timestamp}"
+                                            session_id=ui_session_id
                                         )
                             prefix_buffer = None  # Done checking for prefix
                     else:
@@ -2404,7 +2480,7 @@ class UnifiedVoiceConversation:
                             await self.ui_server.broadcast_ai_stream(
                                 speaker=character_config.name,
                                 text=text,
-                                session_id=f"session_{request_timestamp}"
+                                session_id=ui_session_id
                             )
                     
         except Exception as e:
@@ -2416,7 +2492,7 @@ class UnifiedVoiceConversation:
                 await self.ui_server.broadcast_ai_stream(
                     speaker=character_config.name,
                     text="",
-                    session_id=f"session_{request_timestamp}",
+                    session_id=ui_session_id,
                     is_complete=True
                 )
     
