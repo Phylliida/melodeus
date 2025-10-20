@@ -121,13 +121,7 @@ class ThinkingSoundPlayer:
                     except Exception as playback_error:
                         print(f"Error playing thinking sound: {playback_error}")
                         return
-
-                    if self.echo_cancellation_callback:
-                        try:
-                            self.echo_cancellation_callback(chunk)
-                        except Exception as ec_error:
-                            print(f"⚠️ Thinking sound echo cancellation error: {ec_error}")
-
+                    
                     if chunk_duration > 0.0:
                         next_frame_time += chunk_duration
                         sleep_for = next_frame_time - time.perf_counter()
@@ -189,7 +183,7 @@ class ThinkingSoundPlayer:
 
         if play_thread and play_thread.is_alive():
             await asyncio.get_event_loop().run_in_executor(
-                None, play_thread.join, 1.0
+                None, play_thread.join
             )
 
         with self._lock:
