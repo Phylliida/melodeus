@@ -16,3 +16,5 @@ programs.nix-ld = {
      ]
    );
 };
+
+X11_X11_INCLUDE_PATH = $(nix eval --raw --expr 'let pkgs = import <nixpkgs> {}; in "${pkgs.xorg.libX11}/lib"' --impure)

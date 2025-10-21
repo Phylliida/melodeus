@@ -270,6 +270,14 @@ class UnifiedVoiceConversation:
         self.conversation_logs_dir = Path("conversation_logs")
         self.conversation_logs_dir.mkdir(exist_ok=True)
         
+        state_file = getattr(self.config.conversation, "state_file", None)
+        if state_file:
+            self.conversation_state_file = Path(state_file)
+        else:
+            self.conversation_state_file = self.conversation_logs_dir / "last_state.json"
+        self.conversation_state_file.parent.mkdir(parents=True, exist_ok=True)
+        self._suppress_state_save = True
+        
         # Initialize conversation log file
         self._init_conversation_log()
         
@@ -284,6 +292,11 @@ class UnifiedVoiceConversation:
         else:
             # Legacy: Load history directly if no context manager
             self._load_history_file()
+        
+        # Attempt to restore previous conversation state from JSON
+        self._load_conversation_state()
+        self._suppress_state_save = False
+        self._save_conversation_state()
         
         # Log any loaded history to the conversation log
         self._log_loaded_history()
@@ -464,6 +477,8 @@ class UnifiedVoiceConversation:
                 self.detected_speakers.update(additional_speakers)
                 print(f"🔄 Added speakers from conversation state: {sorted(additional_speakers)}")
                 print(f"🔄 Total detected speakers: {sorted(self.detected_speakers)}")
+        
+        self._save_conversation_state()
     
     def _sync_history_to_context(self):
         """Sync conversation history to active context."""
@@ -485,6 +500,8 @@ class UnifiedVoiceConversation:
             context = self.context_manager.get_active_context()
             if context:
                 context.add_turn(turn)
+        
+        self._save_conversation_state()
     
     def _log_loaded_history(self):
         """Log any existing conversation history to the conversation log."""
@@ -507,6 +524,147 @@ class UnifiedVoiceConversation:
         except Exception as e:
             print(f"⚠️ Failed to log loaded history: {e}")
             self.logger.error(f"Failed to log loaded history: {e}")
+    
+    def _serialize_conversation_turn(self, turn: ConversationTurn) -> Dict[str, Any]:
+        """Convert a conversation turn to JSON-serializable data."""
+        return {
+            "role": turn.role,
+            "content": turn.content,
+            "timestamp": turn.timestamp.isoformat(),
+            "status": turn.status,
+            "speaker_id": turn.speaker_id,
+            "speaker_name": turn.speaker_name,
+            "character": turn.character,
+            "metadata": turn.metadata,
+        }
+    
+    def _deserialize_conversation_turn(self, data: Dict[str, Any]) -> ConversationTurn:
+        """Create a ConversationTurn from persisted data."""
+        timestamp = datetime.now()
+        ts_value = data.get("timestamp")
+        if ts_value:
+            try:
+                timestamp = datetime.fromisoformat(ts_value)
+            except ValueError:
+                pass
+        
+        return ConversationTurn(
+            role=data.get("role", "assistant"),
+            content=data.get("content"),
+            timestamp=timestamp,
+            status=data.get("status", "completed"),
+            speaker_id=data.get("speaker_id"),
+            speaker_name=data.get("speaker_name"),
+            character=data.get("character"),
+            metadata=data.get("metadata"),
+        )
+    
+    def _get_current_processing_turn_index(self) -> Optional[int]:
+        """Return the index of the current processing turn if available."""
+        if self.state.current_processing_turn and self.state.current_processing_turn in self.state.conversation_history:
+            return self.state.conversation_history.index(self.state.current_processing_turn)
+        return None
+    
+    def _serialize_conversation_state(self) -> Dict[str, Any]:
+        """Build a JSON representation of the current conversation state."""
+        return {
+            "conversation_history": [
+                self._serialize_conversation_turn(turn)
+                for turn in self.state.conversation_history
+            ],
+            "state": {
+                "current_generation": self.state.current_generation,
+                "request_generation": self.state.request_generation,
+                "pending_tool_response": self.state.pending_tool_response,
+                "next_speaker": self.state.next_speaker,
+                "current_speaker": self.state.current_speaker,
+                "is_processing_llm": self.state.is_processing_llm,
+                "is_speaking": self.state.is_speaking,
+            },
+            "current_processing_turn_index": self._get_current_processing_turn_index(),
+            "saved_at": datetime.now().isoformat(),
+        }
+    
+    def _save_conversation_state(self):
+        """Persist the current conversation state to JSON."""
+        if not hasattr(self, "conversation_state_file"):
+            return
+        if getattr(self, "_suppress_state_save", False):
+            return
+        
+        try:
+            data = self._serialize_conversation_state()
+            temp_file = self.conversation_state_file.with_suffix(self.conversation_state_file.suffix + ".tmp")
+            with open(temp_file, 'w', encoding='utf-8') as f:
+                json.dump(data, f, indent=2, default=str)
+            temp_file.replace(self.conversation_state_file)
+        except Exception as e:
+            print(f"⚠️ Failed to save conversation state: {e}")
+            if hasattr(self, "logger"):
+                self.logger.error(f"Failed to save conversation state: {e}")
+    
+    def _rebuild_detected_speakers_from_history(self):
+        """Refresh detected speaker list from current conversation history."""
+        if not hasattr(self, 'detected_speakers'):
+            self.detected_speakers = set()
+        else:
+            self.detected_speakers.clear()
+        
+        for turn in self.state.conversation_history:
+            if turn.speaker_name:
+                self.detected_speakers.add(turn.speaker_name)
+            if isinstance(turn.content, str):
+                matches = re.findall(r'^([A-Za-z0-9_\s\.]+):', turn.content, re.MULTILINE)
+                for match in matches:
+                    speaker_name = match.strip()
+                    if self._is_valid_speaker_name(speaker_name):
+                        self.detected_speakers.add(speaker_name)
+        
+        if self.detected_speakers:
+            print(f"🔄 Rebuilt detected speakers from state: {sorted(self.detected_speakers)}")
+    
+    def _load_conversation_state(self):
+        """Load persisted conversation state from JSON if available."""
+        if not hasattr(self, "conversation_state_file"):
+            return
+        
+        if not self.conversation_state_file.exists():
+            return
+        
+        try:
+            with open(self.conversation_state_file, 'r', encoding='utf-8') as f:
+                data = json.load(f)
+            
+            history_data = data.get("conversation_history", [])
+            if not history_data:
+                return
+            
+            loaded_turns = [self._deserialize_conversation_turn(item) for item in history_data]
+            self.state.conversation_history = loaded_turns
+            
+            state_data = data.get("state", {})
+            self.state.current_generation = state_data.get("current_generation", 0)
+            self.state.request_generation = state_data.get("request_generation", 0)
+            self.state.pending_tool_response = state_data.get("pending_tool_response")
+            self.state.next_speaker = state_data.get("next_speaker")
+            self.state.current_speaker = state_data.get("current_speaker")
+            self.state.is_processing_llm = False
+            self.state.is_speaking = False
+            
+            idx = data.get("current_processing_turn_index")
+            if isinstance(idx, int) and 0 <= idx < len(self.state.conversation_history):
+                self.state.current_processing_turn = self.state.conversation_history[idx]
+            else:
+                self.state.current_processing_turn = None
+            
+            self._rebuild_detected_speakers_from_history()
+            self._sync_history_to_context()
+            
+            print(f"💾 Restored {len(loaded_turns)} turns from {self.conversation_state_file}")
+        except Exception as e:
+            print(f"⚠️ Failed to load conversation state: {e}")
+            if hasattr(self, "logger"):
+                self.logger.error(f"Failed to load conversation state: {e}")
     
     def _setup_stt_keywords(self, config: VoiceAIConfig):
         """Setup STT keywords including character names."""
@@ -1111,6 +1269,7 @@ class UnifiedVoiceConversation:
         """Stop the conversation system."""
         print("🛑 Stopping conversation...")
         self.state.is_active = False
+        self._save_conversation_state()
         
         # Cancel conversation management
         if self.conversation_task and not self.conversation_task.done():
@@ -1336,6 +1495,7 @@ class UnifiedVoiceConversation:
             self.state.is_processing_llm = False
             self.state.current_processing_turn = None
             print("🔄 All AI processing interrupted and state cleared")
+            self._save_conversation_state()
             
             # Broadcast state cleared
             if hasattr(self, 'ui_server'):
@@ -1506,6 +1666,7 @@ class UnifiedVoiceConversation:
             if result.should_interrupt and result.content:
                 # Store for later processing after current TTS is interrupted
                 self.state.pending_tool_response = result.content
+                self._save_conversation_state()
             
             return result
                     
@@ -1565,6 +1726,7 @@ class UnifiedVoiceConversation:
             # Mark all pending turns as processing
             for turn in pending_turns:
                 turn.status = "processing"
+            self._save_conversation_state()
             
             # Check generation again before processing
             if generation != self.state.current_generation:
@@ -1572,6 +1734,7 @@ class UnifiedVoiceConversation:
                 # Reset status for all turns
                 for turn in pending_turns:
                     turn.status = "pending"
+                self._save_conversation_state()
                 return
                 
             # For now, pass the combined text. The actual content (including images) 
@@ -1584,6 +1747,7 @@ class UnifiedVoiceConversation:
             for turn in self.state.conversation_history:
                 if turn.role == "user" and turn.status == "processing":
                     turn.status = "pending"
+            self._save_conversation_state()
             raise
         except Exception as e:
             print(f"❌ Error in processing: {e}")
@@ -1624,6 +1788,7 @@ class UnifiedVoiceConversation:
                 async with self.state.speaker_lock:
                     self.state.next_speaker = None
                 self.state.is_processing_llm = False
+                self._save_conversation_state()
                 if hasattr(self, 'ui_server'):
                     await self.ui_server.broadcast_speaker_status(
                         is_processing=False,
@@ -2988,6 +3153,7 @@ class UnifiedVoiceConversation:
             if turn.role == "user" and turn.status == "processing":
                 turn.status = "completed"
                 print(f"   ✅ Marked user turn as completed: '{turn.content[:50]}...'")
+        self._save_conversation_state()
         
         # Always use character processing
         await self._process_with_character_llm(user_input, reference_turn, generation)
