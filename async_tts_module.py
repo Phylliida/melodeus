@@ -391,7 +391,10 @@ class AsyncTTSStreamer:
             in_xml_tag = False
             current_xml_start = -1
             
+            chunksfff = []
             async for chunk in text_generator:
+                chunksfff.append(chunk)
+            for chunk in chunksfff:
                 if self._stop_requested:
                     self._interrupted = True
                     break
@@ -1469,7 +1472,7 @@ class AsyncTTSStreamer:
 
         idle_checks = 0
         start_time = time.time()
-        max_wait = 3.0  # seconds
+        max_wait = 300.0  # seconds
 
         while not self._stop_requested:
             try:
@@ -1479,7 +1482,7 @@ class AsyncTTSStreamer:
 
             if buffered <= 0.02:  # ~20ms remaining
                 idle_checks += 1
-                if idle_checks >= 3:
+                if idle_checks >= 30000000:
                     break
             else:
                 idle_checks = 0
@@ -1495,7 +1498,7 @@ class AsyncTTSStreamer:
         """Wait for audio processing to complete."""
         if self.audio_task and not self._stop_requested:
             try:
-                await asyncio.wait_for(self.audio_task, timeout=15.0)
+                await asyncio.wait_for(self.audio_task, timeout=1500.0)
             except asyncio.TimeoutError:
                 print("⏰ TTS audio task timed out")
                 if self.audio_task:

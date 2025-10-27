@@ -44,13 +44,19 @@ class SpeakerProfile:
             return np.array([])
         return np.mean(self.embeddings, axis=0)
 
-class ImprovedSpeakerIdentificationSystem:
+class SpeakerIdentifier:
     """Improved system for identifying speakers with false positive prevention."""
     
-    def __init__(self, profiles_dir: str = "speaker_profiles"):
+    def __init__(self, profiles_dir: str = "speaker_profiles", profiles_file: Optional[str] = None):
         """Initialize the improved speaker identification system."""
-        self.profiles_dir = Path(profiles_dir)
-        self.profiles_dir.mkdir(exist_ok=True)
+        if profiles_file:
+            self.profiles_dir = Path(profiles_file).parent
+            self.profiles_dir.mkdir(parents=True, exist_ok=True)
+            self._profiles_file_override = Path(profiles_file)
+        else:
+            self.profiles_dir = Path(profiles_dir)
+            self.profiles_dir.mkdir(exist_ok=True)
+            self._profiles_file_override = None
         
         self.known_speakers: Dict[str, SpeakerProfile] = {}
         self.session_speakers: Dict[int, str] = {}  # Maps session speaker_id to known speaker_id
@@ -70,7 +76,7 @@ class ImprovedSpeakerIdentificationSystem:
     def load_speaker_profiles(self):
         """Load existing speaker profiles from disk."""
         try:
-            profiles_file = self.profiles_dir / "speaker_profiles.json"
+            profiles_file = self._profiles_file_override or (self.profiles_dir / "speaker_profiles.json")
             if profiles_file.exists():
                 with open(profiles_file, 'r') as f:
                     profiles_data = json.load(f)
@@ -89,7 +95,7 @@ class ImprovedSpeakerIdentificationSystem:
     def save_speaker_profiles(self):
         """Save speaker profiles to disk."""
         try:
-            profiles_file = self.profiles_dir / "speaker_profiles.json"
+            profiles_file = self._profiles_file_override or (self.profiles_dir / "speaker_profiles.json")
             profiles_data = {}
             
             for speaker_id, profile in self.known_speakers.items():

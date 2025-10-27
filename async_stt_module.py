@@ -164,6 +164,9 @@ class AsyncSTTStreamer:
         # Hold final transcripts until the corresponding UtteranceEnd arrives
         self._pending_final_results: Dict[int, STTResult] = {}
         
+        # Accumulate text from multiple final results within an utterance
+        self._accumulated_utterance_text: Dict[int, str] = {}
+        
     
     def on(self, event_type: STTEventType, callback: Callable):
         """Register a callback for an event type."""
@@ -212,6 +215,31 @@ class AsyncSTTStreamer:
 
         return 0
     
+    def _merge_transcripts(self, previous: str, new: str) -> str:
+        """Merge two transcript segments while preserving earlier content."""
+        if not previous:
+            return new
+        if not new:
+            return previous
+
+        # Prefer whichever string already contains the other
+        if new.startswith(previous) or previous in new:
+            return new
+        if previous.endswith(new) or new in previous:
+            return previous
+
+        prev_tokens = previous.split()
+        new_tokens = new.split()
+        max_overlap = min(len(prev_tokens), len(new_tokens))
+
+        for overlap in range(max_overlap, 0, -1):
+            if prev_tokens[-overlap:] == new_tokens[:overlap]:
+                merged_tokens = prev_tokens + new_tokens[overlap:]
+                return " ".join(merged_tokens)
+
+        # No overlap detected; append with a space
+        return f"{previous} {new}".strip()
+
     async def start_listening(self) -> bool:
         """Start listening for speech."""
         if self.is_listening:
@@ -762,7 +790,6 @@ class AsyncSTTStreamer:
         result = kwargs.get('result')
         if not result or not hasattr(result, 'channel'):
             return
-        
         try:
             channel = result.channel
             alternative = channel.alternatives[0]
@@ -868,6 +895,20 @@ class AsyncSTTStreamer:
             # Emit appropriate event
             channel_index = self._get_channel_index(result)
             if is_final:
+                # Accumulate text from multiple final results within the same utterance
+                # Deepgram can send multiple final results as you speak a long utterance
+                if channel_index not in self._accumulated_utterance_text:
+                    self._accumulated_utterance_text[channel_index] = transcript
+                else:
+                    # Merge sections while preserving earlier portions
+                    self._accumulated_utterance_text[channel_index] = self._merge_transcripts(
+                        self._accumulated_utterance_text[channel_index],
+                        transcript,
+                    )
+                
+                # Update the result with the accumulated text
+                stt_result.text = self._accumulated_utterance_text[channel_index]
+                
                 # Hold final transcript until we receive the matching UtteranceEnd event
                 self._pending_final_results[channel_index] = stt_result
             else:
@@ -890,6 +931,14 @@ class AsyncSTTStreamer:
         if stt_result is None and self._pending_final_results:
             # Fallback: pull the most recent pending result if channel index was unavailable
             _, stt_result = self._pending_final_results.popitem()
+        
+        # Clear accumulated text for this channel now that the utterance is complete
+        self._accumulated_utterance_text.pop(channel_index, None)
+        # Also clear any accumulated text that might be left over from fallback
+        if not stt_result and self._accumulated_utterance_text:
+            # Clear the most recent if we had to use popitem above
+            if self._accumulated_utterance_text:
+                self._accumulated_utterance_text.popitem()
         
         if stt_result is not None:
             # Emit the deferred utterance complete event now that Deepgram confirmed the end
