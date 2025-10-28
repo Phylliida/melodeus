@@ -52,7 +52,6 @@ class SynchronizedThinkingSoundPlayer:
                 while audio_stream.get_buffered_duration() > 0.5:
                     await asyncio.sleep(0.05)
         except asyncio.CancelledError:
-            print(f"Cancelled thinking sound, interrupting playback")
             interrupt_playback()
             raise
         except Exception as e:
@@ -68,18 +67,12 @@ class SynchronizedThinkingSoundPlayer:
 
     async def interrupt(self):
         if self.play_task is not None: # if existing one, stop it
-            print("interrupting thinking (inside)")
             try:
-                print("Cancel")
                 self.play_task.cancel()
-                print("waiting for it to cancel")
                 await self.play_task # wait for it to cancel
-                print("finished waiting")
             except asyncio.CancelledError:
-                print("canceled inside")
                 pass # intentional
             except Exception as e:
-                print(f"Thinking sound await error")
                 print(traceback.print_exc()) 
             finally:
                 self.play_task = None

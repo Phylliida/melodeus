@@ -2119,7 +2119,6 @@ class UnifiedVoiceConversation:
             # Set callback to stop thinking sound when first audio arrives
             # Create a closure that captures the current director generation and speaker
             async def stop_thinking_for_generation():
-                print("Interrupting thinking sound")
                 await self.thinking_sound.interrupt()
                 if hasattr(self, 'ui_server'):
                     await self.ui_server.broadcast_speaker_status(
