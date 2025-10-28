@@ -156,12 +156,11 @@ class TitaNetVoiceFingerprinter:
             print(f"❌ [TITANET] Failed to load TitaNet model: {e}")
             raise RuntimeError(f"Failed to load TitaNet model: {e}")
     
-    def add_audio_chunk(self, audio_data: np.ndarray, timestamp: float):
+    def add_audio_chunk(self, audio_data: np.ndarray, timestamp: float, sample_rate: int):
         """Add raw audio data to the circular buffer for later processing."""
         # Debug: Check chunk timing
         # if len(self.audio_buffer) % (self.sample_rate * 10) == 0:  # Every 10 seconds of audio
         #     print(f"🔧 [BUFFER DEBUG] Chunk: {len(audio_data)} samples, {chunk_duration:.3f}s duration, timestamp: {timestamp:.3f}s")
-        sample_rate = shared_sample_rate()
         # can't resample here or it adds a few too many (or too few) and messes up timestamps
         # so we resample later
         # Add samples to circular buffer with correct timestamps
@@ -173,7 +172,7 @@ class TitaNetVoiceFingerprinter:
             self.audio_buffer = self.audio_buffer[-capacity:]
             self.buffer_timestamps = self.buffer_timestamps[-capacity:]
     
-    def process_transcript_words(self, word_timings: List[WordTiming]):
+    def process_transcript_words(self, word_timings: List[WordTiming], sample_rate: int):
         """
         Process word timings to extract speaker segments and update fingerprints.
         
@@ -191,7 +190,6 @@ class TitaNetVoiceFingerprinter:
         end_times = {}
         duration = 0.0
         words = defaultdict(list)
-        sample_rate = shared_sample_rate()
         for word_timing in word_timings:
             start_idx = np.searchsorted(self.buffer_timestamps, word_timing.start_time, side='left')
             end_idx = np.searchsorted(self.buffer_timestamps, word_timing.end_time, side='right')
@@ -199,7 +197,6 @@ class TitaNetVoiceFingerprinter:
             if start_idx == end_idx: # out of array, ignore
                 print("ignoring audio out of array")
             speaker_audios[word_timing.speaker_id] += self.audio_buffer[start_idx:end_idx]
-            print((end_idx-start_idx)/float(sample_rate))
             duration += (end_idx-start_idx)/float(sample_rate)
             start_times[word_timing.speaker_id] = min(start_times.get(word_timing.speaker_id, word_timing.start_time), word_timing.start_time)
             end_times[word_timing.speaker_id] = max(end_times.get(word_timing.speaker_id, word_timing.end_time), word_timing.end_time)
@@ -209,14 +206,9 @@ class TitaNetVoiceFingerprinter:
             # Check if segment has sufficient duration (at least 0.5s)
             segment_duration = len(speaker_audio)/float(sample_rate)
             # don't do more than 10 seconds
-            print("segment duration")
-            print(segment_duration)
             speaker_audio_trimmed = np.array(speaker_audio[:sample_rate*10])
             # resample now to the sample rate that titanet wants
-            print(f"resampling from {sample_rate} to {self.sample_rate}")
             resampled_speaker_audio = _resample(speaker_audio_trimmed, sample_rate, self.sample_rate)
-            print("size resampled")
-            print(len(resampled_speaker_audio))
             # Create voice segment
             voice_segment = VoiceSegment(
                 audio_data=resampled_speaker_audio,
@@ -233,7 +225,7 @@ class TitaNetVoiceFingerprinter:
                 continue
             
             if self.debug_save_audio or True:
-                debug_filename = f"segment_{self.debug_counter:03d}_speaker_{voice_segment.speaker_id}_{len(speaker_audio_trimmed)}samples.wav"
+                debug_filename = f"segment_{self.debug_counter:03d}_speaker_{voice_segment.speaker_id}_{len(resampled_speaker_audio)}samples.wav"
                 debug_path = self.debug_dir / debug_filename
                 self.debug_counter += 1
                 
@@ -242,7 +234,7 @@ class TitaNetVoiceFingerprinter:
                 audio = np.clip(np.array(resampled_speaker_audio), -1.0, 1.0)
                 pcm16 = (audio * 32767).astype(np.int16)
 
-                with wave.open(debug_filename, "wb") as wf:
+                with wave.open(str(debug_path), "wb") as wf:
                     wf.setnchannels(1)                    # audio is mono
                     wf.setsampwidth(2)                    # int16 -> 2 bytes
                     wf.setframerate(self.sample_rate)

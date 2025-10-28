@@ -403,6 +403,8 @@ def prepare_capture_chunk(float_audio: np.ndarray, target_rate: int) -> bytes:
 
 def _resample(audio: np.ndarray, src_rate: int, dst_rate: int) -> np.ndarray:
     """Resample audio with sane defaults."""
+    if src_rate == dst_rate:
+        return audio
     return resampy.resample(audio, src_rate, dst_rate)
 
 

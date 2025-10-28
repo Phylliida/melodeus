@@ -169,6 +169,9 @@ class AsyncSTTStreamer:
         
         # Accumulate text from multiple final results within an utterance
         self._accumulated_utterance_text: Dict[int, str] = {}
+
+        # Defer voice fingerprinting until we receive the matching utterance end
+        self._pending_fingerprint_words: Dict[int, List[Any]] = {}
         
     
     def on(self, event_type: STTEventType, callback: Callable):
@@ -774,7 +777,7 @@ class AsyncSTTStreamer:
             try:
                 audio_np = np.frombuffer(processed_data, dtype=np.int16).astype(np.float32) / 32768.0
                 stream_relative_time = current_time - (self.stream_start_time or current_time)
-                self.voice_fingerprinter.add_audio_chunk(audio_np, stream_relative_time)
+                self.voice_fingerprinter.add_audio_chunk(audio_np, stream_relative_time, self.config.sample_rate)
             except Exception as fp_error:
                 now = time.time()
                 if now - self._last_fp_error_log > 5.0:
@@ -799,6 +802,7 @@ class AsyncSTTStreamer:
             transcript = alternative.transcript.strip()
             confidence = alternative.confidence
             is_final = result.is_final
+            pending_word_timings = None
             
             # # Debug: Print raw response structure for final results
             # if is_final and hasattr(self.config, 'debug_speaker_data') and self.config.debug_speaker_data:
@@ -860,10 +864,9 @@ class AsyncSTTStreamer:
                                 word_timing.utterance_start = utterance_start_time
                                 word_timings.append(word_timing)
                             
-                            # Process synchronously (called from sync callback context)
                             if word_timings:
-                                #print(f"🔊 [VOICE FINGERPRINT] Processing transcript words")
-                                self.voice_fingerprinter.process_transcript_words(word_timings)
+                                # Defer processing until we receive the matching UtteranceEnd
+                                pending_word_timings = list(word_timings)
                         except Exception as fp_error:
                             import traceback
                             print(traceback.print_exc())
@@ -916,6 +919,13 @@ class AsyncSTTStreamer:
                 
                 # Hold final transcript until we receive the matching UtteranceEnd event
                 self._pending_final_results[channel_index] = stt_result
+
+                if self.voice_fingerprinter and pending_word_timings:
+                    existing_timings = self._pending_fingerprint_words.get(channel_index)
+                    if existing_timings is not None:
+                        existing_timings.extend(pending_word_timings)
+                    else:
+                        self._pending_fingerprint_words[channel_index] = pending_word_timings
             else:
                 self._schedule_event(
                     STTEventType.INTERIM_RESULT,
@@ -932,10 +942,14 @@ class AsyncSTTStreamer:
         result_obj = kwargs.get("result")
         channel_index = self._get_channel_index(result_obj)
 
+        pending_word_timings = self._pending_fingerprint_words.pop(channel_index, None)
         stt_result = self._pending_final_results.pop(channel_index, None)
         if stt_result is None and self._pending_final_results:
             # Fallback: pull the most recent pending result if channel index was unavailable
-            _, stt_result = self._pending_final_results.popitem()
+            fallback_channel, stt_result = self._pending_final_results.popitem()
+            if pending_word_timings is None:
+                pending_word_timings = self._pending_fingerprint_words.pop(fallback_channel, None)
+            channel_index = fallback_channel
         
         # Clear accumulated text for this channel now that the utterance is complete
         self._accumulated_utterance_text.pop(channel_index, None)
@@ -946,6 +960,20 @@ class AsyncSTTStreamer:
                 self._accumulated_utterance_text.popitem()
         
         if stt_result is not None:
+            if self.voice_fingerprinter and pending_word_timings:
+                try:
+                    self.voice_fingerprinter.process_transcript_words(pending_word_timings, self.config.sample_rate)
+                except Exception as fp_error:
+                    import traceback
+                    print(traceback.print_exc())
+                    print(f"⚠️  Voice fingerprinting word processing error: {fp_error}")
+
+                if stt_result.speaker_id is not None:
+                    fingerprint_name = self.voice_fingerprinter.get_speaker_name(stt_result.speaker_id)
+                    if fingerprint_name:
+                        stt_result.speaker_name = fingerprint_name
+                        self.session_speakers[stt_result.speaker_id] = fingerprint_name
+
             # Emit the deferred utterance complete event now that Deepgram confirmed the end
             self._schedule_event(
                 STTEventType.UTTERANCE_COMPLETE,
