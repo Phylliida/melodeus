@@ -4,20 +4,19 @@ Synchronized thinking sound player that streams audio in real-time.
 """
 import asyncio
 import threading
-import numpy as np
-import pyaudio
-from typing import Optional, Callable
 import time
-import queue
+from typing import Optional, Callable
 
+import numpy as np
+
+from mel_aec_audio import ensure_stream_started, write_playback_pcm
 
 class SynchronizedThinkingSoundPlayer:
     """Plays thinking sound with proper timing for echo cancellation."""
     
     def __init__(self, sample_rate: int = 16000):
         self.sample_rate = sample_rate
-        self.p = pyaudio.PyAudio()
-        self.stream = None
+        self.stream = None  # Retained for backwards compatibility with previous PyAudio usage
         self.is_playing = False
         self.play_thread = None
         self._stop_event = threading.Event()
@@ -77,23 +76,12 @@ class SynchronizedThinkingSoundPlayer:
     def _play_worker(self):
         """Worker thread that plays thinking sound with proper timing."""
         try:
-            # Open stream with small buffer for low latency
-            local_stream = pyaudio.Stream(
-                self.p,
-                format=pyaudio.paInt16,
-                channels=1,
-                rate=self.sample_rate,
-                output=True,
-                frames_per_buffer=self.frame_size,  # Match frame size
-                stream_callback=None
-            )
-            self.stream = local_stream
-            
+            ensure_stream_started()
+            next_frame_time = time.perf_counter()
             frame_index = 0
-            next_frame_time = time.time()
             
-            while not self._stop_event.is_set() and local_stream:
-                current_time = time.time()
+            while not self._stop_event.is_set():
+                current_time = time.perf_counter()
                 
                 # Check if it's time for the next frame
                 if current_time >= next_frame_time:
@@ -102,8 +90,8 @@ class SynchronizedThinkingSoundPlayer:
                     frame_bytes = frame.tobytes()
                     
                     try:
-                        # Play the frame
-                        local_stream.write(frame_bytes, exception_on_underflow=False)
+                        # Play the frame through mel-aec
+                        write_playback_pcm(frame_bytes, self.sample_rate)
                         
                         # Send to echo cancellation at the same time
                         if self.echo_cancellation_callback:
@@ -124,7 +112,7 @@ class SynchronizedThinkingSoundPlayer:
                     # Schedule next frame
                     next_frame_time += self.frame_duration
                     
-                    # If we're running behind, catch up
+                    # If we're running behind, catch up without drifting indefinitely
                     if next_frame_time < current_time:
                         next_frame_time = current_time + self.frame_duration
                 else:
@@ -136,14 +124,9 @@ class SynchronizedThinkingSoundPlayer:
         except Exception as e:
             print(f"Error in thinking sound setup: {e}")
         finally:
-            # Clean up
-            if local_stream:
-                try:
-                    local_stream.stop_stream()
-                    local_stream.close()
-                except:
-                    pass
-            self.stream = None
+            with self._lock:
+                self.stream = None
+                self.is_playing = False
     
     async def start(self, generation: int = 0):
         """Start playing the thinking sound."""
@@ -198,15 +181,6 @@ class SynchronizedThinkingSoundPlayer:
                 self._stop_event.set()
                 if self.play_thread:
                     self.play_thread.join(timeout=1.0)
-                    
-            if self.stream:
-                try:
-                    self.stream.stop_stream()
-                    self.stream.close()
-                except:
-                    pass
-                    
-            self.p.terminate()
         except Exception as e:
             print(f"Error during thinking sound cleanup: {e}")
 

@@ -258,7 +258,7 @@ class UnifiedVoiceConversation:
             print("🎭 Character mode enabled")
         
         # Set up tool execution callback
-        self.tts.on_tool_execution = self._handle_tool_execution
+        #self.tts.on_tool_execution = self._handle_tool_execution
         
         # Set up STT callbacks
         self._setup_stt_callbacks()
@@ -1289,7 +1289,7 @@ class UnifiedVoiceConversation:
         
         # Stop TTS if speaking
         if self.state.is_speaking:
-            await self.tts.stop()
+            await self.tts.interrupt()
         
         # Stop STT
         await self.stt.stop_listening()
@@ -1349,9 +1349,7 @@ class UnifiedVoiceConversation:
     
     async def _stop_tts_and_notify_ui(self) -> str:
         """Stop TTS playback and update the UI with any spoken content."""
-        await self.tts.stop()
-        
-        spoken_content = self._get_spoken_text_with_fallback()
+        interrupted_text = await self.tts.interrupt()
         
         if hasattr(self, 'ui_server'):
             session_id = getattr(self.state, "current_ui_session_id", None)
@@ -1360,7 +1358,7 @@ class UnifiedVoiceConversation:
                     type="ai_stream_correction",
                     data={
                         "session_id": session_id,
-                        "corrected_text": spoken_content,
+                        "corrected_text": interrupted_text,
                         "was_interrupted": True
                     }
                 ))
@@ -1394,6 +1392,7 @@ class UnifiedVoiceConversation:
         
         # Check if this is an echo of TTS output
         # Check echo filter
+        '''
         is_echo = False
         matched_tts = None
         similarity = 0.0
@@ -1410,7 +1409,8 @@ class UnifiedVoiceConversation:
                     is_final=True
                 )
             return  # Don't process as real user input
-            
+        '''
+
         print(f"🎯 Final{speaker_info}: {result.text}")
         
         # Broadcast final transcription
@@ -1435,9 +1435,9 @@ class UnifiedVoiceConversation:
         
         # Check if voice interruptions are enabled
         # Allow interruptions if no audio has been played yet (even if interruptions are disabled)
-        if False and not self.config.conversation.interruptions_enabled and (self.tts.is_currently_playing() or self.state.is_processing_llm or self.state.is_speaking):
-            # Check if any audio has been played
-            if self.tts.has_played_audio():
+        if not self.config.conversation.interruptions_enabled and (self.tts.is_currently_playing() or self.state.is_processing_llm or self.state.is_speaking):
+            # Check if we are playing audio
+            if self.tts.is_currently_playing():
                 print(f"🚫 Voice interruptions disabled - ignoring: {result.text}")
                 # Still broadcast to UI but mark as ignored
                 if hasattr(self, 'ui_server'):
@@ -1447,10 +1447,8 @@ class UnifiedVoiceConversation:
                         is_final=True
                     )
                 return  # Don't process as user input
-            else:
-                print(f"📣 Allowing interruption before audio started: {result.text}")
         
-        if self.tts.is_currently_playing():
+        if self.config.conversation.interruptions_enabled and self.tts.is_currently_playing():
             print(f"🛑 Interrupting TTS playback with: {result.text}")
             
             # Stop TTS, capture spoken content, and update UI
@@ -1472,7 +1470,7 @@ class UnifiedVoiceConversation:
                 self.state.current_processing_turn.metadata['interrupted_by'] = 'user_speech'
             interrupted = True
             # Stop any ongoing TTS that might be starting
-            if self.tts.is_streaming:
+            if self.tts.is_currently_playing():
                 await self._stop_tts_and_notify_ui()
             
         elif self.state.is_speaking:
@@ -1603,8 +1601,9 @@ class UnifiedVoiceConversation:
                               self.state.is_speaking)
             
             if should_interrupt:
+                return # stap we don't need this
                 # Only interrupt if audio has actually played (allow pre-audio speech)
-                if self.tts.has_played_audio():
+                if self.tts.is_currently_playing():
                     print(f"🛑 INSTANT INTERRUPTION triggered by: '{result.text}' (conf: {result.confidence:.2f})")
                     
                     # Stop TTS if playing
@@ -2143,6 +2142,8 @@ class UnifiedVoiceConversation:
                 try:
                     # Create a simple async generator that yields the prepared text
                     async def prepared_text_generator():
+                        yield prepared_text
+                        '''
                         # Yield the text in chunks for natural streaming
                         chunk_size = 50  # Characters per chunk
                         for i in range(0, len(prepared_text), chunk_size):
@@ -2150,10 +2151,10 @@ class UnifiedVoiceConversation:
                             yield chunk
                             # Small delay to simulate natural streaming
                             await asyncio.sleep(0.02)
-                    
+                        '''
                     # Create TTS task for the prepared statement
                     self.state.current_llm_task = asyncio.create_task(
-                        self.tts.speak_stream_multi_voice(prepared_text_generator())
+                        self.tts.speak_text(prepared_text_generator(), stop_thinking_for_generation)
                     )
                     
                     # Wait for completion
@@ -2165,15 +2166,16 @@ class UnifiedVoiceConversation:
                     
                     # Update echo filter
                     session_id = f"prepared_{character_config.name}_{request_timestamp}"
-                    if self.echo_filter:
-                        if completed:
-                            self.echo_filter.on_tts_complete(session_id)
-                        else:
-                            spoken_text = self.tts.get_spoken_text_heuristic() if hasattr(self.tts, 'get_spoken_text_heuristic') else None
-                            self.echo_filter.on_tts_interrupted(session_id, spoken_text)
+                    #if self.echo_filter:
+                    #    if completed:
+                    #        self.echo_filter.on_tts_complete(session_id)
+                    #    else:
+                    #        spoken_text = self.tts.get_spoken_text_heuristic() if hasattr(self.tts, 'get_spoken_text_heuristic') else None
+                    #        self.echo_filter.on_tts_interrupted(session_id, spoken_text)
                     
                     # Capture the response
-                    assistant_response = prepared_text if completed else self.tts.get_spoken_text_heuristic().strip()
+                    #assistant_response = prepared_text if completed else self.tts.get_spoken_text_heuristic().strip()
+                    assistant_response = prepared_text
                     
                     # Send to UI
                     if hasattr(self, 'ui_server'):
@@ -2193,8 +2195,9 @@ class UnifiedVoiceConversation:
                 try:
                     # Create TTS task for this character
                     self.state.current_llm_task = asyncio.create_task(
-                        self.tts.speak_stream_multi_voice(
-                            self._stream_character_openai_response(messages, character_config, request_timestamp, ui_session_id)
+                        self.tts.speak_text(
+                            self._stream_character_openai_response(messages, character_config, request_timestamp, ui_session_id),
+                            stop_thinking_for_generation
                         )
                     )
                     
@@ -2222,7 +2225,7 @@ class UnifiedVoiceConversation:
                     if hasattr(self.tts, 'current_session') and self.tts.current_session:
                         if completed:
                             # Use full generated text for completed responses
-                            assistant_response = self.tts.current_session.generated_text.strip()
+                            assistant_response = self.tts.generated_text.strip()
                         else:
                             # Use spoken heuristic for interrupted responses
                             assistant_response = self.tts.get_spoken_text_heuristic().strip()
@@ -2238,8 +2241,9 @@ class UnifiedVoiceConversation:
                 try:
                     # Create TTS task for this character
                     self.state.current_llm_task = asyncio.create_task(
-                        self.tts.speak_stream_multi_voice(
-                            self._stream_character_anthropic_response(messages, character_config, request_timestamp, ui_session_id)
+                        self.tts.speak_text(
+                            self._stream_character_anthropic_response(messages, character_config, request_timestamp, ui_session_id),
+                            stop_thinking_for_generation
                         )
                     )
                     
@@ -2267,7 +2271,7 @@ class UnifiedVoiceConversation:
                     assistant_response = ""
                     if hasattr(self.tts, 'current_session') and self.tts.current_session:
                         if completed:
-                            assistant_response = (self.tts.current_session.generated_text or "").strip()
+                            assistant_response = (self.tts.generated_text or "").strip()
                         else:
                             assistant_response = self.tts.get_spoken_text_heuristic().strip()
                             if not assistant_response and hasattr(self.tts, 'get_spoken_text'):
@@ -2288,8 +2292,9 @@ class UnifiedVoiceConversation:
                 try:
                     # Create TTS task for this character
                     self.state.current_llm_task = asyncio.create_task(
-                        self.tts.speak_stream_multi_voice(
-                            self._stream_character_bedrock_response(messages, character_config, request_timestamp, ui_session_id)
+                        self.tts.speak_text(
+                            self._stream_character_bedrock_response(messages, character_config, request_timestamp, ui_session_id),
+                            stop_thinking_for_generation
                         )
                     )
                     
@@ -2317,7 +2322,7 @@ class UnifiedVoiceConversation:
                     if hasattr(self.tts, 'current_session') and self.tts.current_session:
                         if completed:
                             # Use full generated text for completed responses
-                            assistant_response = self.tts.current_session.generated_text.strip()
+                            assistant_response = self.tts.generated_text.strip()
                         else:
                             # Use spoken heuristic for interrupted responses
                             assistant_response = self.tts.get_spoken_text_heuristic().strip()
@@ -2421,9 +2426,12 @@ class UnifiedVoiceConversation:
                 print(f"⏭️ Skipping recursive call - generation {generation} is stale (current: {self.state.current_generation})")
                 
         except Exception as e:
+            import traceback
+            print(traceback.print_exc())
             print(f"❌ Character LLM error: {e}")
             self.logger.error(f"Character LLM error: {e}")
         finally:
+            print("Character LLM Finished processing")
             # Always stop thinking sound (no generation means force stop)
             await self.thinking_sound.stop()
             if getattr(self.state, "current_ui_session_id", None) == ui_session_id:
@@ -2583,10 +2591,7 @@ class UnifiedVoiceConversation:
             # Track if we need to skip the prefill prefix
             skip_prefix = is_prefill_format
             prefix_buffer = "" if skip_prefix else None
-            chunksff = []
             async for chunk in response:
-                chunksff.append(chunk)
-            for chunk in chunksff:
                 if chunk.type == "content_block_delta" and chunk.delta.text:
                     text = chunk.delta.text
                     
@@ -2768,10 +2773,7 @@ class UnifiedVoiceConversation:
             # Track if we need to skip the prefill prefix
             skip_prefix = is_prefill_format
             prefix_buffer = "" if skip_prefix else None
-            chunksff = []
             async for chunk in response:
-                chunksff.append(chunk)
-            for chunk in chunksff:
                 if chunk.type == "content_block_delta" and chunk.delta.text:
                     text = chunk.delta.text
                     
