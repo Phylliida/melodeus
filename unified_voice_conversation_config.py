@@ -229,7 +229,7 @@ class UnifiedVoiceConversation:
             self.context_manager.auto_save_interval = config.contexts.auto_save_interval
         
         # Initialize thinking sound player (use same sample rate as STT for echo cancellation)
-        self.thinking_sound = SynchronizedThinkingSoundPlayer(sample_rate=config.stt.sample_rate)
+        self.thinking_sound = SynchronizedThinkingSoundPlayer()
         
         # Connect thinking sound to echo cancellation if enabled
         if config.conversation.enable_echo_cancellation:
@@ -1909,7 +1909,7 @@ class UnifiedVoiceConversation:
             director_gen = self._director_generation
             
             # Start thinking sound with director generation
-            await self.thinking_sound.start(generation=director_gen)
+            await self.thinking_sound.play()
             
             # Broadcast thinking sound status
             if hasattr(self, 'ui_server'):
@@ -1960,19 +1960,19 @@ class UnifiedVoiceConversation:
             # Check both processing generation and director generation
             if generation is not None and generation != self.state.current_generation:
                 print(f"🚫 Processing cancelled after director - newer utterance exists (gen {generation} vs current {self.state.current_generation})")
-                await self.thinking_sound.stop(generation=director_gen)
+                await self.thinking_sound.interrupt()
                 self.state.is_processing_llm = False
                 return
                 
             if director_gen != self._director_generation:
                 print(f"🚫 Processing cancelled after director - newer director request exists")
-                await self.thinking_sound.stop(generation=director_gen)
+                await self.thinking_sound.interrupt()
                 self.state.is_processing_llm = False
                 return
             
             if next_speaker == "USER" or next_speaker is None:
                 print("🎭 Director: User should speak next")
-                await self.thinking_sound.stop(generation=director_gen)
+                await self.thinking_sound.interrupt()
                 self.state.is_processing_llm = False
                 return
             
@@ -1982,7 +1982,7 @@ class UnifiedVoiceConversation:
             
             if not character_config:
                 print(f"❌ Unknown character: {next_speaker}")
-                await self.thinking_sound.stop(generation=director_gen)
+                await self.thinking_sound.interrupt()
                 self.state.is_processing_llm = False
                 return
             
@@ -2106,20 +2106,20 @@ class UnifiedVoiceConversation:
             # Check both generations before starting LLM
             if generation is not None and generation != self.state.current_generation:
                 print(f"🚫 Processing cancelled before LLM call - newer utterance exists (gen {generation} vs current {self.state.current_generation})")
-                await self.thinking_sound.stop(generation=director_gen)
+                await self.thinking_sound.interrupt()
                 self.state.is_processing_llm = False
                 return
                 
             if director_gen != self._director_generation:
                 print(f"🚫 Processing cancelled before LLM call - newer director request exists")
-                await self.thinking_sound.stop(generation=director_gen)
+                await self.thinking_sound.interrupt()
                 self.state.is_processing_llm = False
                 return
             
             # Set callback to stop thinking sound when first audio arrives
             # Create a closure that captures the current director generation and speaker
             async def stop_thinking_for_generation():
-                await self.thinking_sound.stop(generation=director_gen)
+                await self.thinking_sound.interrupt()
                 if hasattr(self, 'ui_server'):
                     await self.ui_server.broadcast_speaker_status(
                         thinking_sound=False,
@@ -2433,7 +2433,7 @@ class UnifiedVoiceConversation:
         finally:
             print("Character LLM Finished processing")
             # Always stop thinking sound (no generation means force stop)
-            await self.thinking_sound.stop()
+            await self.thinking_sound.interrupt()
             if getattr(self.state, "current_ui_session_id", None) == ui_session_id:
                 self.state.current_ui_session_id = None
             self.state.is_processing_llm = False
@@ -3552,7 +3552,7 @@ class UnifiedVoiceConversation:
         
         # Stop thinking sound early to prevent conflicts
         try:
-            await self.thinking_sound.stop()  # Force stop any playing sound
+            await self.thinking_sound.interrupt()  # Force stop any playing sound
             await asyncio.sleep(0.1)  # Give it time to stop
         except Exception as e:
             print(f"Error stopping thinking sound: {e}")

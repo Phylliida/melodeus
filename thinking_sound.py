@@ -31,7 +31,6 @@ class ThinkingSoundPlayer:
 
     def __init__(
         self,
-        sample_rate: Optional[int] = None,
         chunk_size: int = 256,
     ):
         self.sample_rate = sample_rate or shared_sample_rate()
