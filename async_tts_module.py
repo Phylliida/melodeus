@@ -154,7 +154,7 @@ class AsyncTTSStreamer:
                     audio_datas = []
                 
                     # Get the audio and add it to audio queue
-                    # we buffer all audio before playing (wait_for_finish) because that prevents jitters
+                    # we buffer all audio before playing because that prevents jitters
                     # (this is okay because we do this one sentence at a time)
                     async for message in websocket:
                         data = json.loads(message)
@@ -348,11 +348,3 @@ async def stream_sentences(
     tail = buffer.strip()
     if tail:
         yield tail
-
-# first n buffered to reduce initial jitters
-async def wait_for_finish(stream):
-    buffer = []
-    async for item in stream:
-        buffer.append(item)
-    for b in buffer:
-        yield b
