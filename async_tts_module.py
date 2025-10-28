@@ -182,7 +182,8 @@ class AsyncTTSStreamer:
                     await websocket.close()
                     
             async for sentence in stream_sentences(text_generator):
-                self.generated_text += sentence
+                # add spaces back between the sentences
+                self.generated_text = (self.generated_text + " " + sentence).strip()
 
                 # split out *emotive* into seperate parts
                 eleven_messages = []
