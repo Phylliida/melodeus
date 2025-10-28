@@ -14,6 +14,9 @@ from dataclasses import dataclass, field
 from typing import Optional, Callable, Dict, Any, List, Tuple
 from datetime import datetime
 from enum import Enum
+import wave
+import os
+import numpy as np
 
 from deepgram import DeepgramClient, LiveTranscriptionEvents, LiveOptions
 
@@ -860,8 +863,10 @@ class AsyncSTTStreamer:
                             # Process synchronously (called from sync callback context)
                             if word_timings:
                                 #print(f"🔊 [VOICE FINGERPRINT] Processing transcript words")
-                                self.voice_fingerprinter.process_transcript_words(word_timings, utterance_start_time)
+                                self.voice_fingerprinter.process_transcript_words(word_timings)
                         except Exception as fp_error:
+                            import traceback
+                            print(traceback.print_exc())
                             print(f"⚠️  Voice fingerprinting word processing error: {fp_error}")
                     
                     # Check if we have a speaker name from voice fingerprinting
@@ -1019,20 +1024,67 @@ class AsyncSTTStreamer:
                 print("⚠️ Speaker identification module not found")
                 self.speaker_identifier = None
     
+    def _save_speaker_audio(self, audio_data, sample_rate):
+        # Ensure output directory exists
+        os.makedirs("recieved_audio", exist_ok=True)
+
+        filename = f"recieved_audio/speaker_{int(time.time()*1000)}.wav"
+
+        # Normalize float audio to int16
+        audio = np.clip(audio_data, -1.0, 1.0)
+        pcm16 = (audio * 32767).astype(np.int16)
+
+        with wave.open(filename, "wb") as wf:
+            wf.setnchannels(1)                    # audio is mono
+            wf.setsampwidth(2)                    # int16 -> 2 bytes
+            wf.setframerate(sample_rate)
+            wf.writeframes(pcm16.tobytes())
+
+        print(f"Saved segment to {filename}")
+
     def _apply_speaker_identification(self, stt_result: STTResult) -> STTResult:
-        """Apply speaker identification to the result."""
-        if self.speaker_identifier and stt_result.raw_data:
-            try:
-                # Extract audio features and identify speaker
-                # This would need to be implemented based on your speaker ID system
-                identified_name = self.speaker_identifier.identify_speaker(
-                    # Pass appropriate audio data
-                )
-                if identified_name:
-                    stt_result.speaker_name = identified_name
-            except Exception as e:
-                print(f"Speaker identification error: {e}")
+        if not (self.speaker_identifier and self.voice_fingerprinter and stt_result.raw_data):
+            return stt_result
         
+        return stt_result
+
+        result = stt_result.raw_data.get("result")
+        if not result or not hasattr(result, "channel"):
+            return stt_result
+
+        alt = result.channel.alternatives[0]
+        words = getattr(alt, "words", None)
+        if not words:
+            return stt_result
+
+        speaker_id = stt_result.speaker_id or getattr(words[0], "speaker", None)
+        if speaker_id is None:
+            return stt_result
+
+        word_timings = [create_word_timing_from_deepgram_word(w) for w in words]
+        utterance_start = getattr(words[0], "start", 0.0)
+
+        voice_segment = self.voice_fingerprinter._extract_voice_segment(word_timings, utterance_start)
+        # Create a proper TitaNet embedding for this segment
+        fingerprint = self.voice_fingerprinter._create_titanet_fingerprint(voice_segment)
+        if not fingerprint:
+            return stt_result  # segment too short/quiet etc.
+
+        embedding = fingerprint.embedding  # This is the 192-dim TitaNet vector
+
+        if voice_segment is None:
+            return stt_result
+        # save audio for reference
+        self._save_speaker_audio(voice_segment.audio_data, voice_segment.sample_rate)
+        embedding = self.speaker_identifier.extract_speaker_embedding(
+            voice_segment.audio_data,
+            voice_segment.sample_rate,
+        )
+        identified_name, confidence, _ = self.speaker_identifier.identify_speaker(embedding)
+        if identified_name:
+            stt_result.speaker_name = identified_name
+            self.session_speakers[speaker_id] = identified_name
+
         return stt_result
     
     async def _emit_event(self, event_type: STTEventType, data: Any):

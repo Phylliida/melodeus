@@ -63,9 +63,9 @@ class SpeakerIdentifier:
         self.unknown_count = 0
         
         # Improved similarity thresholds
-        self.identification_threshold = 0.92    # Much higher threshold to prevent false positives
-        self.registration_threshold = 0.80      # Higher threshold for adding to profiles
-        self.margin_threshold = 0.10           # Best match must be this much better than second best
+        self.identification_threshold = 0.3    # Much higher threshold to prevent false positives
+        self.registration_threshold = 0.4      # Higher threshold for adding to profiles
+        self.margin_threshold = 0.01           # Best match must be this much better than second best
         self.min_confidence_diff = 0.05        # Minimum difference between best and second-best
         
         # Debug mode for monitoring similarities
@@ -234,6 +234,7 @@ class SpeakerIdentifier:
                 continue
                 
             similarity = self.calculate_similarity(embedding, avg_embedding)
+            print(f"Simliarity {speaker_id} {similarity}")
             similarities.append(similarity)
             speaker_names.append((speaker_id, profile.name))
         

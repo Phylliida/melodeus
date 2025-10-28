@@ -12,6 +12,7 @@ import os
 import threading
 from dataclasses import dataclass
 from typing import Any, Optional
+import resampy
 
 import numpy as np
 from scipy import signal
@@ -402,12 +403,7 @@ def prepare_capture_chunk(float_audio: np.ndarray, target_rate: int) -> bytes:
 
 def _resample(audio: np.ndarray, src_rate: int, dst_rate: int) -> np.ndarray:
     """Resample audio with sane defaults."""
-    if audio.size == 0 or src_rate == dst_rate:
-        return audio
-    gcd = math.gcd(src_rate, dst_rate)
-    up = dst_rate // gcd
-    down = src_rate // gcd
-    return signal.resample_poly(audio, up, down).astype(np.float32, copy=False)
+    return resampy.resample(audio, src_rate, dst_rate)
 
 
 def write_playback_pcm(pcm_bytes: bytes, source_rate: int) -> int:
