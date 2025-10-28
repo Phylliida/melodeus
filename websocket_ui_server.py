@@ -785,11 +785,12 @@ class VoiceUIServer:
             await self.conversation._on_utterance_complete(result)
         
         # Broadcast the transcription to all UI clients
-        await self.broadcast_transcription(
-            speaker=speaker_name,
-            text=text,
-            is_final=True
-        )
+        # don't need this because it's already broadcasted in on_utterance_complete
+        #await self.broadcast_transcription(
+        #    speaker=speaker_name,
+        #    text=text,
+        #    is_final=True
+        #)
     
     async def handle_toggle_interruptions(self, enabled: bool):
         """Handle toggling interruptions on/off."""

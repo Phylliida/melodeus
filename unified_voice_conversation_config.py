@@ -1304,6 +1304,7 @@ class UnifiedVoiceConversation:
     def _get_spoken_text_with_fallback(self, candidate: str = "") -> str:
         """Retrieve spoken text using heuristic with sane fallbacks when Whisper data is unavailable."""
         candidate = (candidate or "").strip()
+        return self.tts.generated_text
         session = getattr(self.tts, "current_session", None)
         if not session:
             return candidate
@@ -2101,7 +2102,7 @@ class UnifiedVoiceConversation:
                 if context_snapshot:
                     print(f"   📝 Context metadata: {context_snapshot}")
             print(f"   📄 Request log: {request_filename}")
-            #print(messages)
+            print(messages)
             
             # Check both generations before starting LLM
             if generation is not None and generation != self.state.current_generation:

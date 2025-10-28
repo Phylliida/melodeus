@@ -45,7 +45,6 @@ class SynchronizedThinkingSoundPlayer:
         try:
             audio_stream = ensure_stream_started()
             while True:
-                print(self.audio_frames.shape)
                 audio_stream.write(self.audio_frames)
                 # wait for buffered audio to drain (polling)
                 # leave 0.5 second so we have time to populate it with new audio

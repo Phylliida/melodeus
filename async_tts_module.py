@@ -164,7 +164,6 @@ class AsyncTTSStreamer:
                             audio_data = base64.b64decode(audio_base64)
                             # call callback (this will stop the "thinking" sound)
                             if not first_audio_callback is None:
-                                print("calling first callback")
                                 await first_audio_callback()
                                 first_audio_callback = None
 
@@ -184,7 +183,6 @@ class AsyncTTSStreamer:
                     
             async for sentence in stream_sentences(text_generator):
                 self.generated_text += sentence
-                print(sentence)
 
                 # split out *emotive* into seperate parts
                 eleven_messages = []
@@ -221,7 +219,6 @@ class AsyncTTSStreamer:
                             "xi_api_key": self.config.api_key
                         }
                         await websocket.send(json.dumps(initial_message))
-                    print("sent text " + repr(message['text']))
                     await websocket.send(json.dumps({
                         "text": message['text'].strip() + " ", # elevenlabs always requires ends with single space
                     }))
