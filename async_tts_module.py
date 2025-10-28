@@ -105,6 +105,7 @@ class AsyncTTSStreamer:
     def __init__(self, config: TTSConfig):
         self.config = config
         self.speak_task = None
+        self.generated_text = ""
     
     def _get_voice_settings(self, is_emotive: bool) -> Dict[str, float]:
         """Get voice settings for regular or emotive speech."""
@@ -163,6 +164,7 @@ class AsyncTTSStreamer:
                             audio_data = base64.b64decode(audio_base64)
                             # call callback (this will stop the "thinking" sound)
                             if not first_audio_callback is None:
+                                print("calling first callback")
                                 await first_audio_callback()
                                 first_audio_callback = None
 
@@ -237,6 +239,7 @@ class AsyncTTSStreamer:
             print(f"Cancelled tts, interrupting playback")
             # interrupt audio, this clears the buffers
             interrupt_playback()
+            raise
         except Exception as e:
             print(f"TTS error")
             print(traceback.print_exc())
@@ -246,7 +249,7 @@ class AsyncTTSStreamer:
                 try:
                     await websocket.close()
                 except Exception as e:
-                    print(f"TTS close error")
+                    print(f"TTS websocket close error")
                     print(traceback.print_exc())
                 
 

@@ -195,7 +195,7 @@ class VoiceUIServer:
         
         # Stop TTS and clear audio queue
         if hasattr(self.conversation, 'tts'):
-            await self.conversation.tts.stop()
+            await self.conversation.tts.interrupt()
             
         # Mark current processing as interrupted if needed
         if hasattr(self.conversation.state, 'current_processing_turn') and self.conversation.state.current_processing_turn:
@@ -322,7 +322,7 @@ class VoiceUIServer:
         if hasattr(self.conversation, 'tts') and self.conversation.tts.is_currently_playing():
             print("🚫 Cancelling previous TTS playback")
             # Stop TTS and get the spoken content
-            await self.conversation.tts.stop()
+            await self.conversation.tts.interrupt()
             interrupted = True
             
         # Check if LLM is processing
@@ -413,7 +413,7 @@ class VoiceUIServer:
         # Check if TTS is currently playing
         if hasattr(self.conversation, 'tts') and self.conversation.tts.is_currently_playing():
             print("🚫 Cancelling previous TTS playback")
-            await self.conversation.tts.stop()
+            await self.conversation.tts.interrupt()
             interrupted = True
             
         # Check if LLM is processing
