@@ -1434,21 +1434,6 @@ class UnifiedVoiceConversation:
         # Check for interruption at ANY stage of AI response
         interrupted = False
         
-        # Check if voice interruptions are enabled
-        # Allow interruptions if no audio has been played yet (even if interruptions are disabled)
-        if not self.config.conversation.interruptions_enabled and (self.tts.is_currently_playing() or self.state.is_processing_llm or self.state.is_speaking):
-            # Check if we are playing audio
-            if self.tts.is_currently_playing():
-                print(f"🚫 Voice interruptions disabled - ignoring: {result.text}")
-                # Still broadcast to UI but mark as ignored
-                if hasattr(self, 'ui_server'):
-                    await self.ui_server.broadcast_transcription(
-                        speaker=ui_speaker_name,
-                        text=f"[Interruptions disabled] {result.text}",
-                        is_final=True
-                    )
-                return  # Don't process as user input
-        
         if self.config.conversation.interruptions_enabled and self.tts.is_currently_playing():
             print(f"🛑 Interrupting TTS playback with: {result.text}")
             
@@ -1460,7 +1445,7 @@ class UnifiedVoiceConversation:
             # This avoids duplicates
             interrupted = True
             
-        elif self.state.is_processing_llm:
+        elif self.state.is_processing_llm and self.config.conversation.interruptions_enabled:
             print(f"🛑 Interrupting LLM generation with: {result.text}")
             # Mark current processing as interrupted
             if self.state.current_processing_turn:
@@ -1474,7 +1459,7 @@ class UnifiedVoiceConversation:
             if self.tts.is_currently_playing():
                 await self._stop_tts_and_notify_ui()
             
-        elif self.state.is_speaking:
+        elif self.state.is_speaking and self.config.conversation.interruptions_enabled:
             print(f"🛑 Interrupting TTS setup with: {result.text}")
             await self._stop_tts_and_notify_ui()
             # Mark current processing as interrupted by user speech
