@@ -37,7 +37,6 @@ class WordTiming:
     start_time: float
     end_time: float
     confidence: float
-    utterance_start: float  # When the utterance started relative to audio stream
 
 @dataclass
 class VoiceSegment:
@@ -178,14 +177,15 @@ class TitaNetVoiceFingerprinter:
                 continue
             if seg_start >= end_frames:
                 break  # later segments start after the window
-
+            #print(f"Found segment {start_frames} {end_frames} {seg_start} {seg_end}")
             clip_start = max(start_frames, seg_start)
             clip_end = min(end_frames, seg_end)
             if clip_start >= clip_end:
                 continue
 
             offset_start = clip_start - seg_start
-            offset_end = clip_end - seg_end
+            offset_end = clip_end - seg_start
+            #print(f"Offset start {offset_start} offset end {offset_end}")
             pieces.append(samples[offset_start:offset_end])
 
         return np.concatenate(pieces) if pieces else np.zeros(0, dtype=np.float32)
@@ -214,6 +214,7 @@ class TitaNetVoiceFingerprinter:
                     round(word_timing.start_time*sample_rate),
                     round(word_timing.end_time*sample_rate),
                     sample_rate)
+            print(f"Got word audio of len {len(word_audio)}")
             if len(word_audio) > 0:
                 speaker_audios[word_timing.speaker_id].append(word_audio)
                 start_times[word_timing.speaker_id] = min(start_times.get(word_timing.speaker_id, word_timing.start_time), word_timing.start_time)
@@ -260,21 +261,29 @@ class TitaNetVoiceFingerprinter:
                 print(f"writing debug audio to {debug_filename}")
             
             # Try to match against known speakers
-            matched_speaker = self._match_speaker(fingerprint)
-            if matched_speaker:
-                print(f"✅ [TITANET] Matched speaker {speaker_id} to {matched_speaker}")
-                self.session_speakers[speaker_id] = matched_speaker
+            matched_id = self._match_speaker(fingerprint)
+            if matched_id:
+                print(f"✅ [TITANET] Matched speaker {speaker_id} to {matched_id}")
+                self.session_speakers[speaker_id] = matched_id
                 
                 # Add to reference fingerprints for continued learning
                 if self.learning_mode:
-                    self._add_reference_fingerprint(matched_speaker, fingerprint)
+                    self._add_reference_fingerprint(matched_id, fingerprint)
             else:
                 # Unknown speaker
                 if self.learning_mode:
-                    new_speaker_id = self._handle_unknown_speaker(speaker_id, fingerprint)
-                    print(f"👤 [TITANET] Learning new speaker: {new_speaker_id}")
+                    matched_id = self._handle_unknown_speaker(speaker_id, fingerprint)
+                    print(f"👤 [TITANET] Learning new speaker: {matched_id}")
                 else:
                     print(f"❓ [TITANET] Unknown speaker {speaker_id} (learning disabled)")
+            
+            # Unknown speaker - return friendly name
+            if matched_id.startswith("unknown_speaker_"):
+                count = matched_id.replace("unknown_speaker_", "")
+                return f"User {count}"
+            else:
+                return matched_id
+        return "User"
     def _extract_voice_segment(self, words: List[WordTiming], utterance_start: float) -> Optional[VoiceSegment]:
         """Extract audio segment from buffer based on word timings."""
         if not words:
@@ -483,11 +492,11 @@ class TitaNetVoiceFingerprinter:
             
             # Calculate similarities against all reference fingerprints for this speaker
             similarities = []
-            print(f"similarities for speaker {speaker_id}:")
+            #print(f"similarities for speaker {speaker_id}:")
             for ref_fp in fingerprints:
                 similarity = self._cosine_similarity(fingerprint.embedding, ref_fp.embedding)
                 similarities.append(similarity)
-                print(f"Similarity {similarity}")
+                #print(f"Similarity {similarity}")
             
             # Use best similarity for this speaker
             speaker_similarity = max(similarities) if similarities else 0.0

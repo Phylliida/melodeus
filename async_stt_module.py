@@ -5,22 +5,24 @@ import traceback
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional, Tuple, Callable
 from enum import Enum
+from dataclasses import field
 
 import numpy as np
 import json
+from datetime import datetime
 
 from deepgram import AsyncDeepgramClient
 from deepgram.core.events import EventType
 from deepgram.extensions.types.sockets import (
-    ListenV1MetadataEvent,
-    ListenV1ResultsEvent,
-    ListenV1SpeechStartedEvent,
-    ListenV1UtteranceEndEvent,
+    ListenV2ConnectedEvent,
+    ListenV2FatalErrorEvent,
+    ListenV2TurnInfoEvent,
 )
 
 from mel_aec_audio import ensure_stream_started, prepare_capture_chunk
 from titanet_voice_fingerprinting import (
     TitaNetVoiceFingerprinter,
+    WordTiming
 )
 
 class STTEventType(Enum):
@@ -36,10 +38,21 @@ class STTEventType(Enum):
 
 
 @dataclass
+class STTResult:
+    """Result from speech-to-text recognition."""
+    text: str
+    confidence: float
+    is_final: bool
+    speaker_id: Optional[int] = None
+    speaker_name: Optional[str] = None
+    timestamp: datetime = field(default_factory=datetime.now)
+    raw_data: Optional[Dict[str, Any]] = None
+
+@dataclass
 class STTConfig:
     """Configuration for STT settings."""
     api_key: str
-    model: str = "nova-3"
+    model: str = "flux-general-en"
     language: str = "en-US"
     sample_rate: int = 16000
     chunk_size: int = 8000
@@ -75,6 +88,7 @@ class AsyncSTTStreamer:
         stream.set_input_callback(self._handle_audio_capture)
         self.audio_task = None
         self.websocket_task = None
+        self._turn_transcripts: Dict[int, str] = {}
 
 
         self.callbacks: Dict[STTEventType, List[Callable]] = {
@@ -107,38 +121,34 @@ class AsyncSTTStreamer:
             self.callbacks[event_type].remove(callback)
 
     def _build_listen_params(self) -> Dict[str, Any]:
-        """Prepare query parameters for Deepgram Listen v1 connection."""
+        """Prepare query parameters for Deepgram Listen v2 connection."""
+        model = (self.config.model or "").strip()
+        if not model:
+            model = "flux-general-en"
+
+        # Gracefully fall back if a legacy v1 model is configured
+        legacy_models = {
+            "nova-2": "flux-general-en",
+            "nova-3": "flux-general-en",
+            "nova-2-general": "flux-general-en",
+            "nova-3-general": "flux-general-en",
+        }
+        if model in legacy_models:
+            fallback = legacy_models[model]
+            print(f"⚠️  Listen v2 does not support model '{model}'. Falling back to '{fallback}'.")
+            model = fallback
+
         params: Dict[str, Any] = {
-            "model": self.config.model,
+            "model": model,
             "encoding": "linear16",
             "sample_rate": str(self.config.sample_rate),
-            "channels": str(self.config.channels),
-            "smart_format": str(self.config.smart_format).lower(),
-            "interim_results": str(self.config.interim_results).lower(),
-            "punctuate": str(self.config.punctuate).lower(),
-            "diarize": str(self.config.diarize).lower(),
-            "vad_events": str(self.config.vad_events).lower(),
         }
 
-        if self.config.language:
-            params["language"] = self.config.language
-        if self.config.utterance_end_ms is not None:
-            params["utterance_end_ms"] = str(self.config.utterance_end_ms)
-
-        # Add keywords/keyterms based on model
+        # Only nova/flux models accept keyterm; v2 ignores legacy keywords.
         if self.config.keywords:
-            if self.config.model == "nova-3":
-                keyterms = [word for word, _ in self.config.keywords if word]
-                if keyterms:
-                    params["keyterm"] = " ".join(keyterms)
-            else:
-                sanitized_keywords = []
-                for word, weight in self.config.keywords:
-                    sanitized_word = word.replace(" ", "_").replace(",", "")
-                    if sanitized_word:
-                        sanitized_keywords.append(f"{sanitized_word}:{weight}")
-                if sanitized_keywords:
-                    params["keywords"] = ",".join(sanitized_keywords)
+            keyterms = [word for word, _ in self.config.keywords if word]
+            if keyterms:
+                params["keyterm"] = " ".join(keyterms)
 
         return params
     
@@ -147,17 +157,15 @@ class AsyncSTTStreamer:
         """Handle Deepgram connection open."""
         print("🔗 Deepgram STT connection opened")
     
-    def _handle_socket_message(self, message: Any):
+    async def _handle_socket_message(self, message: Any):
         """Dispatch Deepgram websocket messages to the appropriate handlers."""
         try:
-            if isinstance(message, ListenV1ResultsEvent):
-                self._on_transcript(message)
-            elif isinstance(message, ListenV1UtteranceEndEvent):
-                self._on_utterance_end(message)
-            elif isinstance(message, ListenV1SpeechStartedEvent):
-                self._on_speech_started()
-            elif isinstance(message, ListenV1MetadataEvent):
-                # Currently unused but available for future diagnostics
+            if isinstance(message, ListenV2TurnInfoEvent):
+                await self._on_turn_info(message)
+            elif isinstance(message, ListenV2FatalErrorEvent):
+                print(f"❌ Deepgram fatal error ({message.code}): {message.description}")
+            elif isinstance(message, ListenV2ConnectedEvent):
+                # Already handled by EventType.OPEN; nothing additional needed.
                 pass
         except Exception as dispatch_error:
             print(f"⚠️  Failed to process Deepgram message:")
@@ -172,13 +180,81 @@ class AsyncSTTStreamer:
     def _on_speech_started(self):
         print("Deepgram speech started")
 
-    def _on_transcript(self, message: Any):
-        print("Deepgram on transcript")
-        print(json.dumps(message))
+    async def _on_turn_info(self, message: ListenV2TurnInfoEvent):
+        event_type = (message.event or "").lower()
+        turn_idx = message.turn_index
+        transcript = message.transcript or ""
 
-    def _on_utterance_end(self, message: Any):
-        print("Deepgram utterance end")
-        print(message)
+        if event_type in {"speech_started", "speech_start"}:
+            self._on_speech_started()
+
+        if turn_idx != self.prev_turn_idx and self.prev_turn_idx != None and self.prev_transcript:
+            if self.voice_fingerprinter:
+                word_timing = WordTiming(
+                    word=self.prev_transcript,
+                    speaker_id=f"speaker {turn_idx}", # v2 doesn't have diarization yet
+                    start_time=self.prev_audio_window_start,
+                    end_time=self.prev_audio_window_end,
+                    confidence=1)
+                user_tag = self.voice_fingerprinter.process_transcript_words(word_timings=[word_timing], sample_rate=self.config.sample_rate)
+            else:
+                user_tag = "User"
+            stt_result = STTResult(
+                text = self.prev_transcript,
+                confidence = 1.0,
+                is_final = True,
+                speaker_id = None,
+                speaker_name = user_tag,
+                timestamp = datetime.now(),
+            )
+            await self._emit_event(
+                STTEventType.UTTERANCE_COMPLETE,
+                stt_result
+            )
+            
+
+        self.prev_turn_idx = turn_idx
+        self.prev_transcript = transcript
+        self.prev_audio_window_start = message.audio_window_start
+        self.prev_audio_window_end = message.audio_window_end
+
+        if transcript:
+            self.most_recent_turn_text = transcript
+
+            stt_result = STTResult(
+                text = self.prev_transcript,
+                confidence = 1.0,
+                is_final = False,
+                speaker_id = None,
+                speaker_name =  None,
+                timestamp = datetime.now(),
+            ) 
+
+            await self._emit_event(
+                STTEventType.INTERIM_RESULT,
+                stt_result
+            )
+            #print(f"Turn {turn_idx} {transcript}")
+        else:
+            #print(f"Turn {turn_idx} Dummy turn")
+            pass
+        #if event_type in {"turn_end", "speech_ended", "speech_end"}:
+        #    self._on_utterance_end(message)
+
+    async def _emit_event(event_type: STTEventType, data: Any):
+        if event_type in self.callbacks:
+            for callback in self.callbacks[event_type]:
+                try:
+                    if asyncio.iscoroutinefunction(callback):
+                        await callback(data)
+                    else:
+                        callback(data)
+                except Exception as e:
+                    print(f"Sync callback error for {event_type}")
+                    print(traceback.print_exc())
+
+    def _on_utterance_end(self, message: ListenV2TurnInfoEvent):
+        pass
 
     def _on_close(self, *args, **kwargs):
         """Handle Deepgram connection open."""
@@ -195,6 +271,13 @@ class AsyncSTTStreamer:
     
     async def create_audio_task(self, connection):
         try:
+            self.listening = False
+            self.clear_audio_queue()
+            self.listening = True
+            self.prev_turn_idx = None
+            self.prev_transcript = ""
+            self.prev_audio_window_start = 0
+            self.prev_audio_window_end = 0
             while True:
                 waitingAmount = self.audio_queue.qsize()
                 if waitingAmount > 100:
@@ -207,10 +290,15 @@ class AsyncSTTStreamer:
                     continue
                 
                 pcm_bytes = prepare_capture_chunk(audio_data, self.config.sample_rate)
-                audio_np = np.frombuffer(pcm_bytes, dtype=np.int16).astype(np.float32) / 32768.0
-                self.voice_fingerprinter.add_audio_chunk(audio_np, self.num_audio_frames_recieved, self.config.sample_rate)
-                # increment frame count
-                self.num_audio_frames_recieved += len(audio_np)
+                if self.voice_fingerprinter is not None:
+                    audio_np = np.frombuffer(pcm_bytes, dtype=np.int16).astype(np.float32) / 32768.0
+                    self.voice_fingerprinter.add_audio_chunk(
+                        audio_np,
+                        self.num_audio_frames_recieved,
+                        self.config.sample_rate,
+                    )
+                    # increment frame count
+                    self.num_audio_frames_recieved += len(audio_np)
                 
                 await connection.send_media(pcm_bytes)
         except asyncio.CancelledError:
@@ -221,6 +309,7 @@ class AsyncSTTStreamer:
             print(traceback.print_exc())
             raise
         finally:
+            self.listening = False
             self.audio_task = None
 
     async def cancel_task(self, task):
@@ -240,7 +329,10 @@ class AsyncSTTStreamer:
                 params = self._build_listen_params()
                 async with asyncio.TaskGroup() as tg: # this audio awaits for it to cancel/finish when we try to exit context
                     self.num_audio_frames_recieved = 0
-                    async with self.deepgram.listen.v1.connect(**params) as connection:
+                    async with self.deepgram.listen.v2.connect(
+                        model="flux-general-en",
+                        encoding="linear16",
+                        sample_rate="16000") as connection:
                         connection.on(EventType.OPEN, self._on_open)
                         connection.on(EventType.MESSAGE, self._handle_socket_message)
                         connection.on(EventType.ERROR, self._handle_socket_error)
@@ -268,15 +360,11 @@ class AsyncSTTStreamer:
 
     async def start_listening(self):
         await self.cancel_task(self.websocket_task) # cancel listening task if already exists
-        self.clear_audio_queue()
-        self.listening = True
         self.websocket_task = asyncio.create_task(self.create_websocket_task())
         return True
 
     async def stop_listening(self):
         await self.cancel_task(self.websocket_task)
-        self.listening = False
-        self.clear_audio_queue()
         return True
     
     async def cleanup(self):
