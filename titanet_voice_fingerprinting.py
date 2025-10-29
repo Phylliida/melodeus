@@ -88,10 +88,7 @@ class TitaNetVoiceFingerprinter:
         self.max_fingerprints_per_speaker = 20  # Limit to prevent memory issues
         
         # Audio buffering for real-time processing
-        buffer_duration = 60.0  # seconds
-        self.buffer_size = int(buffer_duration * self.sample_rate)
-        self.audio_buffer = []
-        self.buffer_timestamps = []
+        self.audio_buffer = deque()
         
         # Speaker fingerprints: {speaker_profile_id: [TitaNetFingerprint, ...]}
         self.reference_fingerprints: Dict[str, List[TitaNetFingerprint]] = {}
@@ -156,7 +153,7 @@ class TitaNetVoiceFingerprinter:
             print(f"❌ [TITANET] Failed to load TitaNet model: {e}")
             raise RuntimeError(f"Failed to load TitaNet model: {e}")
     
-    def add_audio_chunk(self, audio_data: np.ndarray, timestamp: float, sample_rate: int):
+    def add_audio_chunk(self, audio_data: np.ndarray, num_frames_before_this: int, sample_rate: int):
         """Add raw audio data to the circular buffer for later processing."""
         # Debug: Check chunk timing
         # if len(self.audio_buffer) % (self.sample_rate * 10) == 0:  # Every 10 seconds of audio
@@ -164,14 +161,35 @@ class TitaNetVoiceFingerprinter:
         # can't resample here or it adds a few too many (or too few) and messes up timestamps
         # so we resample later
         # Add samples to circular buffer with correct timestamps
-        self.audio_buffer += list(audio_data)
-        last_time = timestamp + (len(audio_data)-1)/float(sample_rate)
-        self.buffer_timestamps += list(np.linspace(timestamp, last_time, len(audio_data)))        
-        capacity = sample_rate*360 # 3 min capacity
-        if len(self.audio_buffer) > capacity:
-            self.audio_buffer = self.audio_buffer[-capacity:]
-            self.buffer_timestamps = self.buffer_timestamps[-capacity:]
+        self.audio_buffer.append((num_frames_before_this, audio_data))
+        chunk_len = len(audio_data)
+        # 3 min capacity
+        while len(audio_data)*len(self.audio_buffer)/float(sample_rate) > 360.0:
+            self.audio_buffer.popleft()
     
+
+    def _slice_audio(self, start_frames: int, end_frames: int, sample_rate: int) -> np.ndarray:
+        """Return samples between start_time and end_time."""
+        pieces = []
+        
+        for seg_start, samples in self.audio_buffer:
+            seg_end = seg_start + len(samples)
+            if seg_end <= start_frames:
+                continue
+            if seg_start >= end_frames:
+                break  # later segments start after the window
+
+            clip_start = max(start_frames, seg_start)
+            clip_end = min(end_frames, seg_end)
+            if clip_start >= clip_end:
+                continue
+
+            offset_start = clip_start - seg_start
+            offset_end = clip_end - seg_end
+            pieces.append(samples[offset_start:offset_end])
+
+        return np.concatenate(pieces) if pieces else np.zeros(0, dtype=np.float32)
+
     def process_transcript_words(self, word_timings: List[WordTiming], sample_rate: int):
         """
         Process word timings to extract speaker segments and update fingerprints.
@@ -191,22 +209,22 @@ class TitaNetVoiceFingerprinter:
         duration = 0.0
         words = defaultdict(list)
         for word_timing in word_timings:
-            start_idx = np.searchsorted(self.buffer_timestamps, word_timing.start_time, side='left')
-            end_idx = np.searchsorted(self.buffer_timestamps, word_timing.end_time, side='right')
-            print(f"word {word_timing.word} at location {start_idx}:{end_idx}")
-            if start_idx == end_idx: # out of array, ignore
-                print("ignoring audio out of array")
-            speaker_audios[word_timing.speaker_id] += self.audio_buffer[start_idx:end_idx]
-            duration += (end_idx-start_idx)/float(sample_rate)
-            start_times[word_timing.speaker_id] = min(start_times.get(word_timing.speaker_id, word_timing.start_time), word_timing.start_time)
-            end_times[word_timing.speaker_id] = max(end_times.get(word_timing.speaker_id, word_timing.end_time), word_timing.end_time)
-            words[word_timing.speaker_id].append(word_timing.word)
+            audio_pieces = []
+            word_audio = self._slice_audio(
+                    round(word_timing.start_time*sample_rate),
+                    round(word_timing.end_time*sample_rate),
+                    sample_rate)
+            if len(word_audio) > 0:
+                speaker_audios[word_timing.speaker_id].append(word_audio)
+                start_times[word_timing.speaker_id] = min(start_times.get(word_timing.speaker_id, word_timing.start_time), word_timing.start_time)
+                end_times[word_timing.speaker_id] = max(end_times.get(word_timing.speaker_id, word_timing.end_time), word_timing.end_time)
+                words[word_timing.speaker_id].append(word_timing.word)
         # Process each speaker segment
         for speaker_id, speaker_audio in speaker_audios.items():
             # Check if segment has sufficient duration (at least 0.5s)
             segment_duration = len(speaker_audio)/float(sample_rate)
             # don't do more than 10 seconds
-            speaker_audio_trimmed = np.array(speaker_audio[:sample_rate*10])
+            speaker_audio_trimmed = np.array(np.concatenate(speaker_audio)[:sample_rate*10])
             # resample now to the sample rate that titanet wants
             resampled_speaker_audio = _resample(speaker_audio_trimmed, sample_rate, self.sample_rate)
             # Create voice segment

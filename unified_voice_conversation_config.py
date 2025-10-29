@@ -18,7 +18,7 @@ import anthropic
 from anthropic import AsyncAnthropic
 
 # Import our modular systems and config loader
-from async_stt_module import AsyncSTTStreamer, STTEventType, STTResult
+from async_stt_module import AsyncSTTStreamer, STTEventType # , STTResult
 from async_tts_module import AsyncTTSStreamer
 from config_loader import load_config, VoiceAIConfig
 from tools import create_tool_registry
@@ -1367,7 +1367,7 @@ class UnifiedVoiceConversation:
         
         return spoken_content
     
-    async def _on_utterance_complete(self, result: STTResult, skip_processing: bool = False):
+    async def _on_utterance_complete(self, result, skip_processing: bool = False):
         """Handle completed utterances from STT."""
         # Use speaker name if available from voice fingerprinting, otherwise fall back to speaker ID
         if result.speaker_name:
@@ -1557,7 +1557,7 @@ class UnifiedVoiceConversation:
         if self.config.development.enable_debug_mode:
             self.logger.debug(f"Utterance added to history")
     
-    async def _on_interim_result(self, result: STTResult):
+    async def _on_interim_result(self, result):
         """Handle interim results for showing progress and immediate interruption."""
         # Determine speaker name for UI
         if result.speaker_name:
