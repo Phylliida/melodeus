@@ -241,7 +241,7 @@ class AsyncSTTStreamer:
         #if event_type in {"turn_end", "speech_ended", "speech_end"}:
         #    self._on_utterance_end(message)
 
-    async def _emit_event(event_type: STTEventType, data: Any):
+    async def _emit_event(self, event_type: STTEventType, data: Any):
         if event_type in self.callbacks:
             for callback in self.callbacks[event_type]:
                 try:

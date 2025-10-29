@@ -18,6 +18,8 @@ import logging
 from collections import defaultdict
 from mel_aec_audio import shared_sample_rate, _resample
 import wave
+import wespeaker
+
 
 # Try to import NeMo
 try:
@@ -103,8 +105,9 @@ class TitaNetVoiceFingerprinter:
             self.debug_dir.mkdir(exist_ok=True)
         
         # Initialize TitaNet model
-        self._load_titanet_model()
-        
+        #self._load_titanet_model()
+        self._load_wespeaker_model()
+
         # Load existing fingerprints
         self._load_reference_fingerprints()
         
@@ -112,7 +115,11 @@ class TitaNetVoiceFingerprinter:
         self._load_reference_audio_files()
         
         print(f"🔊 [TITANET] System ready with {len(self.reference_fingerprints)} speaker profiles")
-        
+    
+    def _load_wespeaker_model(self):
+        self.wespeaker_model = wespeaker.load_model("english")
+        self.device = "cpu"
+
     def _load_titanet_model(self):
         """Load pre-trained TitaNet model."""
         print("🔊 [TITANET] Loading pre-trained TitaNet model...")
@@ -138,7 +145,7 @@ class TitaNetVoiceFingerprinter:
                 dummy_length = torch.tensor([16000]).to(device)
                 
                 with torch.no_grad():
-                    _, embeddings = self.titanet_model.forward(
+                    _, embeddings = self.titanet_model.get_normalized_embedding(
                         input_signal=dummy_audio,
                         input_signal_length=dummy_length
                     )
@@ -432,7 +439,7 @@ class TitaNetVoiceFingerprinter:
                     print(f"🐛 [TITANET] Failed to save debug audio: {e}")
             '''
             # Normalize audio
-            audio_data = audio_data / (np.max(np.abs(audio_data)) + 1e-8)
+            #audio_data = audio_data / (np.max(np.abs(audio_data)) + 1e-8)
             
             # Convert to tensor
             audio_tensor = torch.tensor(audio_data).unsqueeze(0).to(self.device)
@@ -443,13 +450,21 @@ class TitaNetVoiceFingerprinter:
                 audio_length = torch.tensor([len(audio_data)]).to(self.device)
                 
                 # Get embedding
-                _, embeddings = self.titanet_model.forward(
-                    input_signal=audio_tensor,
-                    input_signal_length=audio_length
+                #_, embeddings = self.wespeaker_model.extract_embedding_from_pcm(
+                #    input_signal=audio_tensor,
+                #    input_signal_length=audio_length
+                #)
+                print("getting embeddings")
+                embeddings = self.wespeaker_model.extract_embedding_from_pcm(
+                    audio_tensor, sample_rate=self.sample_rate
                 )
+                print("Got embeddings")
+                print(embeddings.shape)
                 
                 # Extract embedding vector
+                #embedding = embeddings[0].cpu().numpy()
                 embedding = embeddings[0].cpu().numpy()
+                print(embedding.shape)
             
             duration = len(audio_data) / self.sample_rate
             
@@ -532,6 +547,11 @@ class TitaNetVoiceFingerprinter:
                 print(f"❌ [TITANET] No match found (best similarity: {best_similarity:.3f} < threshold: {self.confidence_threshold:.3f})")
             return None
     
+    def _softmax(self, x: np.ndarray) -> np.ndarray:
+        x = x - np.max(x)                      # numerical stability
+        exp_x = np.exp(x)
+        return exp_x / (np.sum(exp_x) + 1e-12)
+
     def _cosine_similarity(self, a: np.ndarray, b: np.ndarray) -> float:
         """Calculate cosine similarity between two embeddings."""
         # Ensure same shape
