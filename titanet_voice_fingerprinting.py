@@ -572,7 +572,7 @@ class TitaNetVoiceFingerprinter:
         # Unknown speaker - return friendly name
         if speaker_id.startswith("unknown_speaker_"):
             count = speaker_id.replace("unknown_speaker_", "")
-            return f"Unknown Speaker {count}"
+            return f"User {count}"
         
         return speaker_id
     
