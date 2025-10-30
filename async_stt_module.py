@@ -6,6 +6,7 @@ from dataclasses import dataclass
 from typing import Any, Dict, List, Optional, Tuple, Callable
 from enum import Enum
 from dataclasses import field
+import websockets
 
 import numpy as np
 import json
@@ -178,16 +179,17 @@ class AsyncSTTStreamer:
         print(error_message)
 
     def _on_speech_started(self):
-        print("Deepgram speech started")
+        self._emit_event(STTEventType.SPEECH_STARTED, {
+            "timestamp": datetime.now()
+        })
 
     async def _on_turn_info(self, message: ListenV2TurnInfoEvent):
         event_type = (message.event or "").lower()
         turn_idx = message.turn_index
         transcript = message.transcript or ""
-
-        if event_type in {"speech_started", "speech_start"}:
+        if event_type == "startofturn":
             self._on_speech_started()
-
+        
         if turn_idx != self.prev_turn_idx and self.prev_turn_idx != None and self.prev_transcript:
             if self.voice_fingerprinter:
                 word_timing = WordTiming(
@@ -280,7 +282,7 @@ class AsyncSTTStreamer:
             self.prev_audio_window_end = 0
             while True:
                 waitingAmount = self.audio_queue.qsize()
-                if waitingAmount > 100:
+                if waitingAmount > 500:
                     print(f"Warning: {waitingAmount} audio in queue, we are falling behind")
                 try:
                     audio_data = self.audio_queue.get_nowait()
@@ -304,6 +306,9 @@ class AsyncSTTStreamer:
         except asyncio.CancelledError:
             print("Audio task canceled")
             raise
+        except websockets.exceptions.ConnectionClosedOK:
+            print("Audio task canceled due to websocket being closed")
+            pass
         except:
             print(f"Error in audio task")
             print(traceback.print_exc())
@@ -332,7 +337,8 @@ class AsyncSTTStreamer:
                     async with self.deepgram.listen.v2.connect(
                         model="flux-general-en",
                         encoding="linear16",
-                        sample_rate="16000") as connection:
+                        sample_rate="16000",
+                        eot_timeout_ms="500") as connection:
                         connection.on(EventType.OPEN, self._on_open)
                         connection.on(EventType.MESSAGE, self._handle_socket_message)
                         connection.on(EventType.ERROR, self._handle_socket_error)
@@ -340,7 +346,9 @@ class AsyncSTTStreamer:
                         # create audio task (leaving the with auto-cancels/awaits)
                         audio_task = tg.create_task(self.create_audio_task(connection))
                         await connection.start_listening()
-                    audio_task.cancel()
+                        # important to cancel and wait for it to return before closing connection by exiting contextc
+                        audio_task.cancel()
+                        await audio_task
         except asyncio.CancelledError:
             print("Websocket task canceled")
             raise
@@ -358,6 +366,12 @@ class AsyncSTTStreamer:
             except queue.Empty:
                 break
 
+    async def pause(self):
+        await self.stop_listening()
+    
+    async def resume(self):
+        await self.start_listening()
+    
     async def start_listening(self):
         await self.cancel_task(self.websocket_task) # cancel listening task if already exists
         self.websocket_task = asyncio.create_task(self.create_websocket_task())

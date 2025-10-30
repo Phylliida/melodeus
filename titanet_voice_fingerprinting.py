@@ -105,8 +105,8 @@ class TitaNetVoiceFingerprinter:
             self.debug_dir.mkdir(exist_ok=True)
         
         # Initialize TitaNet model
-        #self._load_titanet_model()
-        self._load_wespeaker_model()
+        self._load_titanet_model()
+        #self._load_wespeaker_model()
 
         # Load existing fingerprints
         self._load_reference_fingerprints()
@@ -450,21 +450,17 @@ class TitaNetVoiceFingerprinter:
                 audio_length = torch.tensor([len(audio_data)]).to(self.device)
                 
                 # Get embedding
-                #_, embeddings = self.wespeaker_model.extract_embedding_from_pcm(
-                #    input_signal=audio_tensor,
-                #    input_signal_length=audio_length
-                #)
-                print("getting embeddings")
-                embeddings = self.wespeaker_model.extract_embedding_from_pcm(
-                    audio_tensor, sample_rate=self.sample_rate
+                _, embeddings = self.titanet_model.forward(
+                    input_signal=audio_tensor,
+                    input_signal_length=audio_length
                 )
-                print("Got embeddings")
-                print(embeddings.shape)
+                embedding = embeddings[0].cpu().numpy()
+                #embeddings = self.wespeaker_model.extract_embedding_from_pcm(
+                #    audio_tensor, sample_rate=self.sample_rate
+                #)
                 
                 # Extract embedding vector
-                #embedding = embeddings[0].cpu().numpy()
-                embedding = embeddings[0].cpu().numpy()
-                print(embedding.shape)
+                #embedding = embeddings.cpu().numpy()
             
             duration = len(audio_data) / self.sample_rate
             

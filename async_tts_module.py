@@ -17,7 +17,7 @@ from collections import defaultdict
 import threading
 import traceback
 import queue
-from typing import Optional, AsyncGenerator, Dict, Any, List, Tuple
+from typing import Optional, AsyncGenerator, Dict, Any, List, Tuple, Any
 from dataclasses import dataclass, field
 import numpy as np
 
@@ -99,6 +99,62 @@ class TTSConfig:
     # Audio output device
     output_device_name: Optional[str] = None  # None = default device, or specify device name
 
+@dataclass
+class AlignmentData:
+    start_time_played: float
+    # {'chars': [
+    # 'W', 'h', 'a', 't', ' ', 'd', 'o', ' ', 'y', 'o', 'u', ' ',
+    #  'k', 'n', 'o', 'w', ' ', 'a', 'b', 'o', 'u', 't', ' ', 'w', 'h', 'a', 't',
+    # ' ', 'I', "'", 'm', ' ', 'd', 'o', 'i', 'n', 'g', '?', ' '],
+    # 'charStartTimesMs':
+    # [0, 81, 128, 151, 174, 197, 221, 244, 279, 302, 325, 360, 418, 464, 499, 534, 569, 627, 673, 720, 766, 801, 836, 871, 894, 929, 964, 987, 1022, 1057, 1091, 1138, 1196, 1242, 1358, 1428, 1463, 1533, 1614], 'charDurationsMs': [81, 47, 23, 23, 23, 24, 23, 35, 23, 23, 35, 58, 46, 35, 35, 35, 58, 46, 47, 46, 35, 35, 35, 23, 35, 35, 23, 35, 35, 34, 47, 58, 46, 116, 70, 35, 70, 81, 244]}
+    chars: list
+    chars_start_times_ms: list
+from rapidfuzz.distance import Levenshtein
+
+# with a of like "*wow hi there* I like bees" and b of "wow hi there i like" this will give us index of end of like inside a
+def _collapse(s: str, ignore: set[str]):
+    kept = []
+    idx_map = []
+    for idx, ch in enumerate(s):
+        if ch in ignore:
+            continue
+        kept.append(ch)
+        idx_map.append(idx)
+    return "".join(kept), idx_map
+
+def _noisy_prefix_end(filtered_a: str, filtered_b: str) -> int | None:
+    ops = iter(Levenshtein.editops(filtered_b, filtered_a))
+    op = next(ops, None)
+    i = j = 0
+    last_match = -1
+
+    while i < len(filtered_b):
+        if op and op.src_pos == i and op.dst_pos == j:
+            if op.tag in {"delete", "replace"}:
+                return None
+            j += 1               # insertion in filtered_a
+            op = next(ops, None)
+        else:
+            last_match = j
+            i += 1
+            j += 1
+
+    return last_match + 1
+
+def trimmed_end(a: str, b: str, ignore="*\n\r\t #@\\/.,?!-+[]()&%$"):
+    ignore_set = set(ignore)
+    filtered_a, idx_map_a = _collapse(a, ignore_set)
+    filtered_b, _ = _collapse(b, ignore_set)
+
+    end = _noisy_prefix_end(filtered_a, filtered_b)
+    if end is None:
+        return None
+    if end == 0:
+        return 0
+    return idx_map_a[end - 1] + 1
+
+
 class AsyncTTSStreamer:
     """Async TTS Streamer with interruption capabilities and spoken content tracking."""
     
@@ -144,7 +200,6 @@ class AsyncTTSStreamer:
         try:
             audio_stream = ensure_stream_started()
             audios = []
-
             async def flush_websocket(websocket):
                 nonlocal first_audio_callback, alignments
                 if websocket is not None:
@@ -153,7 +208,8 @@ class AsyncTTSStreamer:
                     }))
 
                     audio_datas = []
-                
+                    segment_alignments = []
+
                     # Get the audio and add it to audio queue
                     # we buffer all audio before playing because that prevents jitters
                     # (this is okay because we do this one sentence at a time)
@@ -167,17 +223,32 @@ class AsyncTTSStreamer:
                                 await first_audio_callback()
                                 first_audio_callback = None
 
-                            stream = ensure_stream_started()
                             float_audio = int16_bytes_to_float(audio_data)
                             resampled = _resample(float_audio, self.config.sample_rate, shared_sample_rate())
-                            audio_datas.append(resampled)
-                            alignments.append(data["alignment"])
+                            if len(resampled) > 0:
+                                audio_datas.append(resampled)
+                                if data["alignment"]:
+                                    segment_alignments.append((len(resampled), data["alignment"]))
                         elif data.get("isFinal"):
                             break # done
                     
                     # now send the audio, all in one piece
                     concat_data = np.concatenate(audio_datas)
-                    stream.write(concat_data)
+
+                    # see when it'll actually be played
+                    current_time = time.time()
+                    buffered_duration = audio_stream.get_buffered_duration()
+                    play_start_time = current_time + buffered_duration
+                    for buffer_len, alignment in segment_alignments:
+                        alignment_data = AlignmentData(
+                            start_time_played=play_start_time,
+                            chars=alignment['chars'],
+                            chars_start_times_ms=alignment['charStartTimesMs']
+                        )
+                        alignments.append(alignment_data)
+                        play_start_time += buffer_len/float(shared_sample_rate())
+
+                    audio_stream.write(concat_data)
 
                     await websocket.close()
                     
@@ -235,6 +306,42 @@ class AsyncTTSStreamer:
                 
         except asyncio.CancelledError:
             print(f"Cancelled tts, interrupting playback")
+            # compute where it was interrupted at
+
+            # no audio played yet, empty text
+            if len(alignments) == 0:
+                self.generated_text = ""
+            else:
+                # AI Alignment TM
+                # (computes where in the text it was interrupted and trims context to that)
+                current_time = time.time()
+                end_alignment_i = 0 # if none have been played, don't include any
+                end_char_i_in_alignment_i = 0 # if no characters have been played, don't include any
+                for alignmentI, alignment in list(enumerate(alignments))[::-1]:
+                    # find the latest thing that is already started playing
+                    if alignment.start_time_played < current_time:
+                        end_alignment_i = alignmentI
+                        millis_since_start_time = (current_time-alignment.start_time_played)*1000
+                        # find the latest char that has already played
+                        end_char_i_in_alignment_i = 0 # default to first (if none in array)
+                        for charI, (char, char_ms) in list(enumerate(zip(alignment.chars, alignment.chars_start_times_ms)))[::-1]:
+                            if char_ms < millis_since_start_time:
+                                end_char_i_in_alignment_i = charI+1
+                                break
+                        break
+                    
+                played_chars = [alignment.chars for alignment in alignments[:end_alignment_i]] + [alignments[end_alignment_i].chars[:end_char_i_in_alignment_i]]
+                played_text = " ".join(["".join(chars) for chars in played_chars])
+                # do some fuzzy matching to handle the loss of things like *
+                print("Interrupting with this text")
+                print(played_text)
+                print("Original text")
+                print(self.generated_text)
+                offset_in_original_text = trimmed_end(self.generated_text, played_text)
+                self.generated_text = self.generated_text[:offset_in_original_text]
+                print(f"Fuzzy matched to position {offset_in_original_text}")
+                print(self.generated_text)
+
             # interrupt audio, this clears the buffers
             interrupt_playback()
             raise

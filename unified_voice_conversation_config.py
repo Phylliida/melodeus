@@ -1365,7 +1365,7 @@ class UnifiedVoiceConversation:
                 ))
                 print(f"🔄 Sent AI stream correction for session '{session_id}'")
         
-        return spoken_content
+        return interrupted_text
     
     async def _on_utterance_complete(self, result, skip_processing: bool = False):
         """Handle completed utterances from STT."""
