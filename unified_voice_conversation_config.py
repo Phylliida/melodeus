@@ -1568,7 +1568,7 @@ class UnifiedVoiceConversation:
                         type="ai_stream_correction",
                         data={
                             "session_id": ui_session_id,
-                            "corrected_text": assistant_response,
+                            "corrected_text": assistant_response + ("" if completed else "[Interrupted by user]"),
                             "was_interrupted": not completed
                         }
                     ))
