@@ -39,7 +39,7 @@ class SynchronizedThinkingSoundPlayer:
 
         silence = np.zeros(int(self.sample_rate * silence_duration), dtype=np.float32)
 
-        self.audio_frames = np.concatenate([pulse, silence])
+        self.audio_frames = np.concatenate([silence, silence, silence, silence] + [silence, pulse]*100)
 
     async def _play_helper(self):
         try:
@@ -63,7 +63,10 @@ class SynchronizedThinkingSoundPlayer:
 
         # start the task (this way it's cancellable and we don't need to spam checks)
         self.play_task = asyncio.create_task(self._play_helper())
-
+    
+    async def stop(self):
+        await self.interrupt()
+    
     async def interrupt(self):
         if self.play_task is not None: # if existing one, stop it
             try:

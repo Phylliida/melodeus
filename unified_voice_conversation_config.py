@@ -72,6 +72,8 @@ class UnifiedVoiceConversation:
     def __init__(self, config: VoiceAIConfig):
         self.config = config
         self.state = ConversationState()
+
+        self.llm_output_task = None
         
         # Initialize LLM clients
         self.openai_client = None
@@ -1381,9 +1383,240 @@ class UnifiedVoiceConversation:
         
         return interrupted_text
     
+
+    def get_llm_context(self, next_speaker, request_timestamp):
+        character_config = self.character_manager.get_character_config(next_speaker)
+        # Check if we should use prefill format
+        use_prefill = (self.config.conversation.conversation_mode == "prefill" and 
+                        character_config.llm_provider in ["anthropic", "bedrock"])
+        
+        if use_prefill:
+            # For prefill mode, convert directly from raw history
+            prefill_name = character_config.prefill_name or character_config.name
+            raw_history = self._get_conversation_history_for_character()
+            
+            # Get character histories from current context if available
+            context_char_histories = None
+            if self.context_manager:
+                active_context = self.context_manager.get_active_context()
+                if active_context:
+                    context_char_histories = active_context.character_histories
+                    print(f"🔍 DEBUG: Active context '{active_context.config.name}' has character_histories: {list(context_char_histories.keys()) if context_char_histories else None}")
+            
+            print(f"🔍 DEBUG: Creating prefill messages for character '{next_speaker}' (prefill_name: '{prefill_name}')")
+            print(f"🔍 DEBUG: Context has character histories: {context_char_histories is not None}")
+            if context_char_histories:
+                print(f"🔍 DEBUG: Character histories available for: {list(context_char_histories.keys())}")
+            
+            # Create messages in prefill format directly
+            messages = self._create_character_prefill_messages(
+                raw_history, 
+                next_speaker, 
+                prefill_name,
+                character_config.system_prompt,
+                context_char_histories
+            )
+        else:
+            # Standard chat format
+            # Get character histories from current context if available
+            context_char_histories = None
+            if self.context_manager:
+                active_context = self.context_manager.get_active_context()
+                if active_context:
+                    context_char_histories = active_context.character_histories
+            
+            messages = self.character_manager.format_messages_for_character(
+                next_speaker,
+                self._get_conversation_history_for_character(),
+                context_char_histories
+            )
+        
+        # Check if we're in prefill format to generate stop sequences
+        stop_sequences = None
+        if self.config.conversation.conversation_mode == "prefill":
+            stop_sequences = []
+            # Add all character names as stop sequences
+            for char_name in self.character_manager.characters.keys():
+                stop_sequences.append(f"\n\n{char_name}:")
+                # Also add prefill names if different
+                char_config_temp = self.character_manager.get_character_config(char_name)
+                if char_config_temp and char_config_temp.prefill_name and char_config_temp.prefill_name != char_name:
+                    stop_sequences.append(f"\n\n{char_config_temp.prefill_name}:")
+            
+            # Add human names
+            if hasattr(self.config.conversation, 'prefill_participants'):
+                human_name = self.config.conversation.prefill_participants[0]
+                stop_sequences.append(f"\n\n{human_name}:")
+            
+            # Add any detected speakers
+            if hasattr(self, 'detected_speakers') and self.detected_speakers:
+                for speaker in self.detected_speakers:
+                    speaker_stop = f"\n\n{speaker}:"
+                    if speaker_stop not in stop_sequences:
+                        stop_sequences.append(speaker_stop)
+            
+            # Add System: to stop sequences
+            stop_sequences.append("\n\nSystem:")
+            stop_sequences.append("\n\nA:")
+            
+            # Remove duplicates while preserving order
+            stop_sequences = list(dict.fromkeys(stop_sequences))
+        
+        # Log the request
+        request_filename = self._log_llm_request(
+            messages, 
+            character_config.llm_model, 
+            request_timestamp,
+            character_config.llm_provider,
+            stop_sequences
+        )
+        return messages, character_config, stop_sequences, request_filename
+
+    def get_llm_text_stream(self, messages, character_config, request_timestamp):      
+        ui_session_id = f"session_{request_timestamp}"
+        if character_config.llm_provider == "openai":
+            return self._stream_character_openai_response(messages, character_config, request_timestamp, ui_session_id)
+        elif character_config.llm_provider == "anthropic":
+            return self._stream_character_anthropic_response(messages, character_config, request_timestamp, ui_session_id)
+        elif character_config.llm_provider == "bedrock":
+            return self._stream_character_bedrock_response(messages, character_config, request_timestamp, ui_session_id)
+        else:
+            raise ValueError(f"Unknown llm provider {character_config.llm_provider}")
+    
+    async def _get_llm_output_helper(self):
+        request_filename = None
+        completed = True
+        character_config = None
+        next_speaker = None
+        original_config = None
+        try:
+            print("Playing thinking sound")
+            await self.thinking_sound.play()
+            next_speaker = await self.character_manager.select_next_speaker(
+                self._get_conversation_history_for_director()
+            )
+             
+            request_timestamp = time.time()
+            messages, character_config, stop_sequences, request_filename = self.get_llm_context(next_speaker, request_timestamp)
+            original_config = self._set_character_voice(character_config)
+            print("Got context")
+            print(messages)
+            text_stream = self.get_llm_text_stream(messages, character_config, request_timestamp)
+
+
+            async def stop_thinking_for_generation():
+                await self.thinking_sound.interrupt()
+                if hasattr(self, 'ui_server'):
+                    await self.ui_server.broadcast_speaker_status(
+                        thinking_sound=False,
+                        is_speaking=True,  # Now actually speaking
+                        current_speaker=next_speaker
+                    )
+            speak_text = self.tts.speak_text(
+                text_stream,
+                stop_thinking_for_generation
+            )
+            self.speak_text_task = asyncio.create_task(speak_text)
+            print("waiting for speak text")
+            await self.speak_text_task
+            print("done with speak text")
+            
+
+        except asyncio.CancelledError:
+            completed = False
+            await self.thinking_sound.interrupt()
+            await self.tts.interrupt()
+            if self.speak_text_task:
+                self.speak_text_task.cancel()
+                await self.speak_text_task
+                self.speak_text_task = None
+            print("Canceled get llm output")
+            raise
+        except Exception as e:
+            import traceback
+            print(traceback.print_exc())
+            print("error in get llm output")
+        finally:
+            print("finalizae get llm output")
+            if original_config is not None:
+                self._restore_voice_config(original_config)
+            assistant_response = self.tts.generated_text
+            # Log the response
+            if assistant_response.strip():
+                if character_config is not None and request_filename is not None:
+                    response_timestamp = time.time()
+                    self._log_llm_response(
+                        assistant_response,
+                        request_filename,
+                        response_timestamp,
+                        was_interrupted=not completed,
+                        error=None,
+                        provider=character_config.llm_provider
+                    )
+                    status = "completed" if completed else "interrupted"
+                    assistant_turn = ConversationTurn(
+                        role="assistant",
+                        content=assistant_response,
+                        timestamp=datetime.now(),
+                        status=status,
+                        character=next_speaker
+                    )
+                    self._add_turn_to_history(assistant_turn)
+                    # For multi-character mode, log with character name prefix (no brackets)
+                    self._log_conversation_turn("assistant", f"{next_speaker}: {assistant_response}")
+
+
+
+    async def _interrupt_llm_output(self):
+        try:
+            if self.llm_output_task:
+                print("Cancelling old llm output")
+                self.llm_output_task.cancel()
+                await self.llm_output_task
+                self.llm_output_task = None
+        except asyncio.CancelledError:
+            pass # intentional
+    async def _get_llm_output(self):
+        await self._interrupt_llm_output()        
+        self.llm_output_task = asyncio.create_task(self._get_llm_output_helper())
+
+        
+    
     async def _on_utterance_complete(self, result, skip_processing: bool = False):
         """Handle completed utterances from STT."""
         # Use speaker name if available from voice fingerprinting, otherwise fall back to speaker ID
+        
+        # Broadcast final transcription
+        ui_speaker_name = result.speaker_name
+        if hasattr(self, 'ui_server'):
+            await self.ui_server.broadcast_transcription(
+                speaker=ui_speaker_name,
+                text=result.text,
+                is_final=True,
+                is_edit= result.is_edit,
+                message_id = result.message_id
+            )
+        
+        user_turn = ConversationTurn(
+            role="user",
+            content=result.text,
+            timestamp=datetime.fromtimestamp(result.timestamp) if isinstance(result.timestamp, (int, float)) else datetime.now(),
+            status="pending",
+            speaker_id=result.speaker_id,
+            speaker_name=result.speaker_name,
+            metadata= {"message_id": result.message_id}
+        )
+        self._add_turn_to_history(user_turn)
+        self._log_conversation_turn("user", result.text, speaker_name=result.speaker_name)
+
+        if self.config.conversation.director_enabled:
+            print("Getting llm output")
+            await self._get_llm_output()
+
+        return
+
+
+
         if result.speaker_name:
             speaker_info = f" ({result.speaker_name})"
             ui_speaker_name = result.speaker_name
@@ -1577,14 +1810,27 @@ class UnifiedVoiceConversation:
             self.logger.debug(f"Utterance added to history")
     
     async def _on_interim_result(self, result):
-        """Handle interim results for showing progress and immediate interruption."""
-        # Determine speaker name for UI
+
         if result.speaker_name:
             ui_speaker_name = result.speaker_name
         elif result.speaker_id is not None:
             ui_speaker_name = f"Speaker {result.speaker_id}"
         else:
             ui_speaker_name = "USER"
+        
+        # Broadcast to UI
+        if hasattr(self, 'ui_server'):
+            await self.ui_server.broadcast_transcription(
+                speaker=ui_speaker_name,
+                text=result.text,
+                is_interim=True
+            )
+        
+        await self._interrupt_llm_output()            
+        return
+        
+        """Handle interim results for showing progress and immediate interruption."""
+        # Determine speaker name for UI
         
         # Show interim results based on configuration
         if self.show_interim:
@@ -1890,7 +2136,7 @@ class UnifiedVoiceConversation:
                      if turn.role not in {"system"}),
                     None
                 )
-                if not last_turn or last_turn.role != "user":
+                if False and (not last_turn or last_turn.role != "user"):
                     print("🚫 Skipping LLM generation - last message not from user")
                     for turn in self.state.conversation_history:
                         if turn.role == "user" and turn.status == "processing":

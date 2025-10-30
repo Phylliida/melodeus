@@ -215,7 +215,7 @@ class AsyncSTTStreamer:
         if len(transcript) > 0:
             self.current_turn_history.append((time.time(), transcript))
         if turn_idx == self.prev_turn_idx and len(transcript) > 0 and self.has_meaningful_change(transcript, self.current_turn_autosent_transcript):
-            ms_until_autosend = 700
+            ms_until_autosend = 500
             # if we took longer than that and still the same, autosend
             oldest_time_still_same = time.time()
             for old_time, old_transcript in self.current_turn_history[::-1]:
@@ -280,7 +280,7 @@ class AsyncSTTStreamer:
 
         if transcript and not send_message and not edit_message and self.last_sent_message_uuid is None:
             self.most_recent_turn_text = transcript
-
+            
             stt_result = STTResult(
                 text = transcript,
                 confidence = 1.0,
