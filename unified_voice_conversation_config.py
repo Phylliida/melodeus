@@ -1220,11 +1220,11 @@ class UnifiedVoiceConversation:
         self.stt.on(STTEventType.INTERIM_RESULT, self._on_interim_result)
         
         # Handle speech events
-        self.stt.on(STTEventType.SPEECH_STARTED, self._on_speech_started)
-        self.stt.on(STTEventType.SPEECH_ENDED, self._on_speech_ended)
+        #self.stt.on(STTEventType.SPEECH_STARTED, self._on_speech_started)
+        #self.stt.on(STTEventType.SPEECH_ENDED, self._on_speech_ended)
         
         # Handle speaker changes
-        self.stt.on(STTEventType.SPEAKER_CHANGE, self._on_speaker_change)
+        #self.stt.on(STTEventType.SPEAKER_CHANGE, self._on_speaker_change)
         
         # Handle errors
         self.stt.on(STTEventType.ERROR, self._on_error)
@@ -1564,15 +1564,15 @@ class UnifiedVoiceConversation:
                     self._add_turn_to_history(assistant_turn)
                     # For multi-character mode, log with character name prefix (no brackets)
                     self._log_conversation_turn("assistant", f"{next_speaker}: {assistant_response}")
-
-                    await self.ui_server.broadcast(UIMessage(
-                        type="ai_stream_correction",
-                        data={
-                            "session_id": ui_session_id,
-                            "corrected_text": assistant_response,
-                            "was_interrupted": completed
-                        }
-                    ))
+                    if not completed: # update ui if interrupted
+                        await self.ui_server.broadcast(UIMessage(
+                            type="ai_stream_correction",
+                            data={
+                                "session_id": ui_session_id,
+                                "corrected_text": assistant_response,
+                                "was_interrupted": completed
+                            }
+                        ))
 
 
     async def _interrupt_llm_output(self):
