@@ -1540,7 +1540,7 @@ class UnifiedVoiceConversation:
             print("finalizae get llm output")
             if original_config is not None:
                 self._restore_voice_config(original_config)
-            assistant_response = self.tts.generated_text
+            assistant_response = self.tts.generated_text + ("" if completed else " [Interrupted by user]"),
             # Log the response
             if assistant_response.strip():
                 if character_config is not None and request_filename is not None:
@@ -1568,7 +1568,7 @@ class UnifiedVoiceConversation:
                         type="ai_stream_correction",
                         data={
                             "session_id": ui_session_id,
-                            "corrected_text": assistant_response + ("" if completed else "[Interrupted by user]"),
+                            "corrected_text": assistant_response,
                             "was_interrupted": not completed
                         }
                     ))
