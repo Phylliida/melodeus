@@ -1570,7 +1570,7 @@ class UnifiedVoiceConversation:
                         data={
                             "session_id": ui_session_id,
                             "corrected_text": assistant_response,
-                            "was_interrupted": True
+                            "was_interrupted": completed
                         }
                     ))
 
