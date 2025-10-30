@@ -227,8 +227,7 @@ class AsyncTTSStreamer:
                             resampled = _resample(float_audio, self.config.sample_rate, shared_sample_rate())
                             if len(resampled) > 0:
                                 audio_datas.append(resampled)
-                                if data["alignment"]:
-                                    segment_alignments.append((len(resampled), data["alignment"]))
+                                segment_alignments.append((len(resampled), data["alignment"]))
                         elif data.get("isFinal"):
                             break # done
                     
@@ -238,17 +237,18 @@ class AsyncTTSStreamer:
                     # see when it'll actually be played
                     current_time = time.time()
                     buffered_duration = audio_stream.get_buffered_duration()
+                    audio_stream.write(concat_data)
                     play_start_time = current_time + buffered_duration
                     for buffer_len, alignment in segment_alignments:
-                        alignment_data = AlignmentData(
-                            start_time_played=play_start_time,
-                            chars=alignment['chars'],
-                            chars_start_times_ms=alignment['charStartTimesMs']
-                        )
-                        alignments.append(alignment_data)
+                        if alignment is not None: # sometimes we get no alignments but still audio data
+                            alignment_data = AlignmentData(
+                                start_time_played=play_start_time,
+                                chars=alignment['chars'],
+                                chars_start_times_ms=alignment['charStartTimesMs']
+                            )
+                            alignments.append(alignment_data)
                         play_start_time += buffer_len/float(shared_sample_rate())
 
-                    audio_stream.write(concat_data)
 
                     await websocket.close()
                     
@@ -333,14 +333,11 @@ class AsyncTTSStreamer:
                 played_chars = [alignment.chars for alignment in alignments[:end_alignment_i]] + [alignments[end_alignment_i].chars[:end_char_i_in_alignment_i]]
                 played_text = " ".join(["".join(chars) for chars in played_chars])
                 # do some fuzzy matching to handle the loss of things like *
-                print("Interrupting with this text")
-                print(played_text)
-                print("Original text")
-                print(self.generated_text)
+                #print(self.generated_text)
                 offset_in_original_text = trimmed_end(self.generated_text, played_text)
                 self.generated_text = self.generated_text[:offset_in_original_text]
-                print(f"Fuzzy matched to position {offset_in_original_text}")
-                print(self.generated_text)
+                #print(f"Fuzzy matched to position {offset_in_original_text}")
+                #print(self.generated_text)
 
             # interrupt audio, this clears the buffers
             interrupt_playback()
