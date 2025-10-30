@@ -142,7 +142,7 @@ def _noisy_prefix_end(filtered_a: str, filtered_b: str) -> int | None:
 
     return last_match + 1
 
-def trimmed_end(a: str, b: str, ignore="*\n\r\t #@\\/.,?!-+[]()&%$"):
+def trimmed_end(a: str, b: str, ignore="*\n\r\t #@\\/.,?!-+[]()&%$:"):
     ignore_set = set(ignore)
     filtered_a, idx_map_a = _collapse(a, ignore_set)
     filtered_b, _ = _collapse(b, ignore_set)

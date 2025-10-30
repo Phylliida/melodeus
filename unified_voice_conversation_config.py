@@ -504,7 +504,21 @@ class UnifiedVoiceConversation:
     def _add_turn_to_history(self, turn: ConversationTurn):
         """Add a turn to conversation history and sync with context."""
         # Add to local history
-        self.state.conversation_history.append(turn)
+
+        # check if we are editing an existing message
+        editing_i = None
+        if turn.metadata and turn.metadata.get("message_id", None):
+            message_id = turn.metadata['message_id']
+            for i, prev_turn in list(enumerate(self.state.conversation_history))[::-1][:10]:
+                if prev_turn.metadata and prev_turn.metadata.get("message_id", None) == message_id:
+                    editing_i = i
+                    break
+            
+
+        if editing_i:
+            self.state.conversation_history[editing_i] = turn
+        else:
+            self.state.conversation_history.append(turn)
         
         # Sync entire history TO context (don't use context.add_turn to avoid sync issues)
         self._sync_history_to_context()
@@ -1419,7 +1433,9 @@ class UnifiedVoiceConversation:
             await self.ui_server.broadcast_transcription(
                 speaker=ui_speaker_name,
                 text=result.text,
-                is_final=True
+                is_final=True,
+                is_edit= result.is_edit,
+                message_id = result.message_id
             )
         
         # Capture image if camera is enabled
@@ -1518,6 +1534,8 @@ class UnifiedVoiceConversation:
                                 appended_to_existing = True
                                 print(f"➕ Appended to existing utterance: '{result.text}' → Full: '{turn.content}'")
                                 break
+        if result.is_edit:
+            appended_to_existing = False
         
         if not appended_to_existing:
             # Create new turn
@@ -1544,7 +1562,8 @@ class UnifiedVoiceConversation:
                 timestamp=datetime.fromtimestamp(result.timestamp) if isinstance(result.timestamp, (int, float)) else datetime.now(),
                 status="pending",
                 speaker_id=result.speaker_id,
-                speaker_name=result.speaker_name
+                speaker_name=result.speaker_name,
+                metadata= {"message_id": result.message_id}
             )
             self._add_turn_to_history(user_turn)
             self._log_conversation_turn("user", content, speaker_name=result.speaker_name)

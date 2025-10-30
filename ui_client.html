@@ -719,6 +719,7 @@
                         </div>
                     ` : ''}
                 `;
+                msg.id = data.message_id;
                 transcript.appendChild(msg);
                 
                 // Auto-delete ignored interruption messages after 3 seconds
@@ -754,6 +755,7 @@
                     <div class="speaker-name">${data.speaker}</div>
                     <div class="message-content"></div>
                 `;
+                msg.id = data.message_id;
                 transcript.appendChild(msg);
                 currentMessages[data.session_id] = msg;
                 messageCount++;

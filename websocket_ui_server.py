@@ -577,7 +577,8 @@ class VoiceUIServer:
         ))
         
     async def broadcast_transcription(self, speaker: str, text: str, 
-                                    is_final: bool = False, is_interim: bool = False):
+                                    is_final: bool = False, is_interim: bool = False, is_edit: bool = False,
+                                    message_id = None):
         """Broadcast transcription update."""
         message_data = {
             "speaker": speaker,
@@ -589,12 +590,21 @@ class VoiceUIServer:
         
         # Add message ID for final messages so they can be edited/deleted
         if is_final and not is_interim:
-            message_data["message_id"] = str(uuid.uuid4())
-            
-        await self.broadcast(UIMessage(
-            type="transcription",
-            data=message_data
-        ))
+            message_data["message_id"] = str(uuid.uuid4()) if not message_id else message_id
+        
+        if is_edit:
+            # Broadcast the edit to all clients
+            update_data = {
+                "id": message_id,
+                "new_text": text,
+                "edited": True
+            }
+            await self.broadcast(UIMessage("message_edited", update_data))
+        else:
+            await self.broadcast(UIMessage(
+                type="transcription",
+                data=message_data
+            ))
         
     async def broadcast_ai_stream(self, speaker: str, text: str, 
                                  is_complete: bool = False, session_id: str = ""):

@@ -18,7 +18,7 @@ import logging
 from collections import defaultdict
 from mel_aec_audio import shared_sample_rate, _resample
 import wave
-import wespeaker
+#import wespeaker
 
 
 # Try to import NeMo
