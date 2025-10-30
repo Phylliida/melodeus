@@ -1564,15 +1564,14 @@ class UnifiedVoiceConversation:
                     self._add_turn_to_history(assistant_turn)
                     # For multi-character mode, log with character name prefix (no brackets)
                     self._log_conversation_turn("assistant", f"{next_speaker}: {assistant_response}")
-                    if not completed: # update ui if interrupted
-                        await self.ui_server.broadcast(UIMessage(
-                            type="ai_stream_correction",
-                            data={
-                                "session_id": ui_session_id,
-                                "corrected_text": assistant_response,
-                                "was_interrupted": completed
-                            }
-                        ))
+                    await self.ui_server.broadcast(UIMessage(
+                        type="ai_stream_correction",
+                        data={
+                            "session_id": ui_session_id,
+                            "corrected_text": assistant_response,
+                            "was_interrupted": not completed
+                        }
+                    ))
 
 
     async def _interrupt_llm_output(self):
