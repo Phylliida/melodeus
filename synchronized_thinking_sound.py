@@ -39,7 +39,7 @@ class SynchronizedThinkingSoundPlayer:
 
         silence = np.zeros(int(self.sample_rate * silence_duration), dtype=np.float32)
 
-        self.audio_frames = np.concatenate([silence, silence, silence, silence] + [silence, pulse]*100)
+        self.audio_frames = np.concatenate([silence, silence, silence, silence] + [silence, silence]*100)
 
     async def _play_helper(self):
         try:

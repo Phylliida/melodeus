@@ -1472,8 +1472,7 @@ class UnifiedVoiceConversation:
         )
         return messages, character_config, stop_sequences, request_filename
 
-    def get_llm_text_stream(self, messages, character_config, request_timestamp):      
-        ui_session_id = f"session_{request_timestamp}"
+    def get_llm_text_stream(self, messages, character_config, request_timestamp, ui_session_id):      
         if character_config.llm_provider == "openai":
             return self._stream_character_openai_response(messages, character_config, request_timestamp, ui_session_id)
         elif character_config.llm_provider == "anthropic":
@@ -1489,6 +1488,8 @@ class UnifiedVoiceConversation:
         character_config = None
         next_speaker = None
         original_config = None
+        request_timestamp = time.time()
+        ui_session_id = f"session_{request_timestamp}"
         try:
             print("Playing thinking sound")
             await self.thinking_sound.play()
@@ -1496,12 +1497,11 @@ class UnifiedVoiceConversation:
                 self._get_conversation_history_for_director()
             )
              
-            request_timestamp = time.time()
             messages, character_config, stop_sequences, request_filename = self.get_llm_context(next_speaker, request_timestamp)
             original_config = self._set_character_voice(character_config)
             print("Got context")
             print(messages)
-            text_stream = self.get_llm_text_stream(messages, character_config, request_timestamp)
+            text_stream = self.get_llm_text_stream(messages, character_config, request_timestamp, ui_session_id)
 
 
             async def stop_thinking_for_generation():
@@ -1565,6 +1565,14 @@ class UnifiedVoiceConversation:
                     # For multi-character mode, log with character name prefix (no brackets)
                     self._log_conversation_turn("assistant", f"{next_speaker}: {assistant_response}")
 
+                    await self.ui_server.broadcast(UIMessage(
+                        type="ai_stream_correction",
+                        data={
+                            "session_id": ui_session_id,
+                            "corrected_text": assistant_response,
+                            "was_interrupted": True
+                        }
+                    ))
 
 
     async def _interrupt_llm_output(self):
@@ -3822,12 +3830,22 @@ class UnifiedVoiceConversation:
         except Exception as e:
             print(f"Error cleaning up camera: {e}")
         
+        try:
+            await self._interrupt_llm_output()
+        except Exception as e:
+            print(f"Error interrupting llm output: {e}")
+        
         # Clean up TTS
         try:
             await self.tts.cleanup()
         except Exception as e:
             print(f"Error cleaning up TTS: {e}")
             
+        try:
+            await self._interrupt_llm_output()
+        except Exception as e:
+            print(f"Error interrupting llm output: {e}")
+        
         # Clean up UI server
         try:
             await self.ui_server.stop()
@@ -3839,6 +3857,11 @@ class UnifiedVoiceConversation:
             await self.thinking_sound.cleanup()
         except Exception as e:
             print(f"Error cleaning up thinking sound: {e}")
+        
+        try:
+            await self._interrupt_llm_output()
+        except Exception as e:
+            print(f"Error interrupting llm output: {e}")
         
         # Clean up audio connection
         try:
