@@ -81,6 +81,7 @@ class TitaNetVoiceFingerprinter:
         self.sample_rate = 16000
         self.debug_save_audio = debug_save_audio
         self.debug_counter = 0
+        self.debug_dir = Path("testouput")
         
         # Configuration
         self.confidence_threshold = speakers_config.recognition.confidence_threshold

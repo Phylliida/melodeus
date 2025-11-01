@@ -30,6 +30,8 @@ from echo_filter import EchoFilter
 from context_manager import ContextManager
 from mel_aec_audio import stop_stream # needed for shutdown
 
+INTERRUPTED_STR = "[Interrupted by user]"
+
 @dataclass
 class ConversationTurn:
     """Represents a single turn in the conversation."""
@@ -1461,7 +1463,6 @@ class UnifiedVoiceConversation:
             
             # Remove duplicates while preserving order
             stop_sequences = list(dict.fromkeys(stop_sequences))
-        
         # Log the request
         request_filename = self._log_llm_request(
             messages, 
@@ -1482,7 +1483,7 @@ class UnifiedVoiceConversation:
         else:
             raise ValueError(f"Unknown llm provider {character_config.llm_provider}")
     
-    async def _get_llm_output_helper(self):
+    async def _get_llm_output_helper(self, speaker=None):
         request_filename = None
         completed = True
         character_config = None
@@ -1493,9 +1494,12 @@ class UnifiedVoiceConversation:
         try:
             print("Playing thinking sound")
             await self.thinking_sound.play()
-            next_speaker = await self.character_manager.select_next_speaker(
-                self._get_conversation_history_for_director()
-            )
+            if speaker is None:
+                next_speaker = await self.character_manager.select_next_speaker(
+                    self._get_conversation_history_for_director()
+                )
+            else:
+                next_speaker = speaker
              
             messages, character_config, stop_sequences, request_filename = self.get_llm_context(next_speaker, request_timestamp)
             original_config = self._set_character_voice(character_config)
@@ -1514,7 +1518,9 @@ class UnifiedVoiceConversation:
                     )
             speak_text = self.tts.speak_text(
                 text_stream,
-                stop_thinking_for_generation
+                stop_thinking_for_generation,
+                self.osc_client,
+                self.config.osc.speaking_start_address
             )
             self.speak_text_task = asyncio.create_task(speak_text)
             print("waiting for speak text")
@@ -1540,9 +1546,11 @@ class UnifiedVoiceConversation:
             print("finalizae get llm output")
             if original_config is not None:
                 self._restore_voice_config(original_config)
-            assistant_response = self.tts.generated_text + ("" if completed else " [Interrupted by user]"),
+            assistant_response = self.tts.generated_text
             # Log the response
-            if assistant_response.strip():
+            if len(assistant_response.strip()) > 0:
+                assistant_response += ("" if completed else INTERRUPTED_STR)
+                assistant_response = assistant_response.strip()
                 if character_config is not None and request_filename is not None:
                     response_timestamp = time.time()
                     self._log_llm_response(
@@ -1569,9 +1577,19 @@ class UnifiedVoiceConversation:
                         data={
                             "session_id": ui_session_id,
                             "corrected_text": assistant_response,
-                            "was_interrupted": not completed
+                            "was_interrupted": False
                         }
                     ))
+            else:
+                await self.ui_server.broadcast(UIMessage(
+                    type="ai_stream_correction",
+                    data={
+                        "session_id": ui_session_id,
+                        "corrected_text": "",
+                        "was_interrupted": False
+                    }
+                ))
+
 
 
     async def _interrupt_llm_output(self):
@@ -1583,9 +1601,9 @@ class UnifiedVoiceConversation:
                 self.llm_output_task = None
         except asyncio.CancelledError:
             pass # intentional
-    async def _get_llm_output(self):
+    async def _get_llm_output(self, speaker=None):
         await self._interrupt_llm_output()        
-        self.llm_output_task = asyncio.create_task(self._get_llm_output_helper())
+        self.llm_output_task = asyncio.create_task(self._get_llm_output_helper(speaker))
 
         
     
@@ -1832,8 +1850,8 @@ class UnifiedVoiceConversation:
                 text=result.text,
                 is_interim=True
             )
-        
-        await self._interrupt_llm_output()            
+        if self.config.conversation.interruptions_enabled:
+           await self._interrupt_llm_output()            
         return
         
         """Handle interim results for showing progress and immediate interruption."""
@@ -3289,6 +3307,9 @@ class UnifiedVoiceConversation:
                 conversation_parts.extend(char_history_parts)
             
             for turn in raw_history:
+                if turn.get("content").strip() == "" or turn.get("content").strip() == INTERRUPTED_STR:
+                    print(f"Ignoring turn {repr(turn)}")
+                    continue
                 formatted_text = self._format_turn_for_prefill(
                     turn.get("role"),
                     turn.get("content"),

@@ -73,7 +73,7 @@ class STTConfig:
     # Audio input device
     input_device_name: Optional[str] = None  # None = default device, or specify device name
     # Speaker identification settings
-    enable_speaker_id: bool = False
+    enable_speaker_id: bool = True
     speaker_profiles_path: Optional[str] = None
     # Custom vocabulary/keywords for better recognition
     keywords: Optional[List[Tuple[str, float]]] = None  # List of (word, weight) tuples
@@ -159,7 +159,7 @@ class AsyncSTTStreamer:
             keyterms = [word for word, _ in self.config.keywords if word]
             if keyterms:
                 params["keyterm"] = " ".join(keyterms)
-
+        params["keyterm"] = "Haiku Sonnet Claude Opus"
         return params
     
 
@@ -215,7 +215,7 @@ class AsyncSTTStreamer:
         if len(transcript) > 0:
             self.current_turn_history.append((time.time(), transcript))
         if turn_idx == self.prev_turn_idx and len(transcript) > 0 and self.has_meaningful_change(transcript, self.current_turn_autosent_transcript):
-            ms_until_autosend = 500
+            ms_until_autosend = 750
             # if we took longer than that and still the same, autosend
             oldest_time_still_same = time.time()
             for old_time, old_transcript in self.current_turn_history[::-1]:
@@ -401,7 +401,8 @@ class AsyncSTTStreamer:
                         model="flux-general-en",
                         encoding="linear16",
                         sample_rate="16000",
-                        eot_timeout_ms="500") as connection:
+                        eot_timeout_ms="500",
+                        keyterm=params['keyterm']) as connection:
                         connection.on(EventType.OPEN, self._on_open)
                         connection.on(EventType.MESSAGE, self._handle_socket_message)
                         connection.on(EventType.ERROR, self._handle_socket_error)

@@ -183,7 +183,33 @@ class AsyncTTSStreamer:
         settings_str = "_".join(f"{k}:{v}" for k, v in sorted(voice_settings.items()))
         return f"{voice_id}_{settings_str}"
 
-    async def _speak_text_helper(self, text_generator: AsyncGenerator[str, None], first_audio_callback) -> bool:
+    async def _osc_emit_helper(self, osc_client, osc_client_address):
+        try:
+            prev_offset = 0
+            appended_text = ""
+            while True:
+                offset_in_original_text = self.get_current_index_in_text()
+                if prev_offset < offset_in_original_text:
+                    match = re.search(r"\w+\b", self.generated_text[prev_offset:])
+                    if match:
+                        new_text = self.generated_text[prev_offset:prev_offset+match.end()]
+                        prev_offset = prev_offset+match.end()
+                    else:
+                        prev_offset = len(self.generated_text)
+                        new_text = self.generated_text[prev_offset:]
+                    for word in re.sub(r"\s+", " ", new_text).split(" "):
+                        if len(word.strip()) > 0:
+                            print(f"sent message {word}")
+                            osc_client.send_message(f'/message',f'{word}')
+                await asyncio.sleep(0.02)
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:
+            print(traceback.print_exc())
+            print("Error in osc emit")
+
+
+    async def _speak_text_helper(self, text_generator: AsyncGenerator[str, None], first_audio_callback, osc_client, osc_client_address) -> bool:
         """
         Speak the given text (task that can be canceled)
         
@@ -195,13 +221,16 @@ class AsyncTTSStreamer:
         """
         current_voice = None
         websocket = None
-        alignments = []
+        self.alignments = []
         self.generated_text = ""
+        osc_emit_task = None
+        start_time_played = None
         try:
+            osc_emit_task = asyncio.create_task(self._osc_emit_helper(osc_client, osc_client_address))
             audio_stream = ensure_stream_started()
             audios = []
             async def flush_websocket(websocket):
-                nonlocal first_audio_callback, alignments
+                nonlocal first_audio_callback, start_time_played
                 if websocket is not None:
                     await websocket.send(json.dumps({
                         "text": "", # final message
@@ -222,6 +251,8 @@ class AsyncTTSStreamer:
                             if not first_audio_callback is None:
                                 await first_audio_callback()
                                 first_audio_callback = None
+                            if start_time_played is None:
+                                start_time_played = time.time()
 
                             float_audio = int16_bytes_to_float(audio_data)
                             resampled = _resample(float_audio, self.config.sample_rate, shared_sample_rate())
@@ -246,7 +277,7 @@ class AsyncTTSStreamer:
                                 chars=alignment['chars'],
                                 chars_start_times_ms=alignment['charStartTimesMs']
                             )
-                            alignments.append(alignment_data)
+                            self.alignments.append(alignment_data)
                         play_start_time += buffer_len/float(shared_sample_rate())
 
 
@@ -306,35 +337,16 @@ class AsyncTTSStreamer:
                 
         except asyncio.CancelledError:
             print(f"Cancelled tts, interrupting playback")
-            # compute where it was interrupted at
-
+            # not enough audio played and interrupted, make empty
+            if start_time_played is None or time.time() - start_time_played < 2.0:
+                self.generated_text = ""
             # no audio played yet, empty text
-            if len(alignments) == 0:
+            elif len(self.alignments) == 0:
                 self.generated_text = ""
             else:
                 # AI Alignment TM
                 # (computes where in the text it was interrupted and trims context to that)
-                current_time = time.time()
-                end_alignment_i = 0 # if none have been played, don't include any
-                end_char_i_in_alignment_i = 0 # if no characters have been played, don't include any
-                for alignmentI, alignment in list(enumerate(alignments))[::-1]:
-                    # find the latest thing that is already started playing
-                    if alignment.start_time_played < current_time:
-                        end_alignment_i = alignmentI
-                        millis_since_start_time = (current_time-alignment.start_time_played)*1000
-                        # find the latest char that has already played
-                        end_char_i_in_alignment_i = 0 # default to first (if none in array)
-                        for charI, (char, char_ms) in list(enumerate(zip(alignment.chars, alignment.chars_start_times_ms)))[::-1]:
-                            if char_ms < millis_since_start_time:
-                                end_char_i_in_alignment_i = charI+1
-                                break
-                        break
-                    
-                played_chars = [alignment.chars for alignment in alignments[:end_alignment_i]] + [alignments[end_alignment_i].chars[:end_char_i_in_alignment_i]]
-                played_text = " ".join(["".join(chars) for chars in played_chars])
-                # do some fuzzy matching to handle the loss of things like *
-                #print(self.generated_text)
-                offset_in_original_text = trimmed_end(self.generated_text, played_text)
+                offset_in_original_text = self.get_current_index_in_text()
                 self.generated_text = self.generated_text[:offset_in_original_text]
                 #print(f"Fuzzy matched to position {offset_in_original_text}")
                 #print(self.generated_text)
@@ -346,6 +358,12 @@ class AsyncTTSStreamer:
             print(f"TTS error")
             print(traceback.print_exc())
         finally:
+            if osc_emit_task:
+                try:
+                    osc_emit_task.cancel()
+                    await osc_emit_task
+                except asyncio.CancelledError:
+                    pass # intentional
             # close websocket
             if websocket:
                 try:
@@ -355,12 +373,39 @@ class AsyncTTSStreamer:
                     print(traceback.print_exc())
                 
 
-    async def speak_text(self, text_generator: AsyncGenerator[str, None], first_audio_callback):
+    def get_current_index_in_text(self):
+        if len(self.alignments) == 0:
+            return 0
+        # AI Alignment TM
+        # (computes where in the text it was interrupted and trims context to that)
+        current_time = time.time()
+        end_alignment_i = 0 # if none have been played, don't include any
+        end_char_i_in_alignment_i = 0 # if no characters have been played, don't include any
+        for alignmentI, alignment in list(enumerate(self.alignments))[::-1]:
+            # find the latest thing that is already started playing
+            if alignment.start_time_played < current_time:
+                end_alignment_i = alignmentI
+                millis_since_start_time = (current_time-alignment.start_time_played)*1000
+                # find the latest char that has already played
+                end_char_i_in_alignment_i = 0 # default to first (if none in array)
+                for charI, (char, char_ms) in list(enumerate(zip(alignment.chars, alignment.chars_start_times_ms)))[::-1]:
+                    if char_ms < millis_since_start_time:
+                        end_char_i_in_alignment_i = charI+1
+                        break
+                break
+            
+        played_chars = [alignment.chars for alignment in self.alignments[:end_alignment_i]] + [self.alignments[end_alignment_i].chars[:end_char_i_in_alignment_i]]
+        played_text = " ".join(["".join(chars) for chars in played_chars])
+        # do some fuzzy matching to handle the loss of things like *
+        #print(self.generated_text)
+        return trimmed_end(self.generated_text, played_text)
+
+    async def speak_text(self, text_generator: AsyncGenerator[str, None], first_audio_callback, osc_client, osc_client_address):
         # interrupt (if already running)
         await self.interrupt()
 
         # start the task (this way it's cancellable and we don't need to spam checks)
-        self.speak_task = asyncio.create_task(self._speak_text_helper(text_generator, first_audio_callback))
+        self.speak_task = asyncio.create_task(self._speak_text_helper(text_generator, first_audio_callback, osc_client, osc_client_address))
 
         # wait for it to finish
         await self.speak_task

@@ -299,6 +299,9 @@ class VoiceUIServer:
         """Handle triggering a specific speaker to respond."""
         if not self.conversation:
             return
+
+        await self.conversation._get_llm_output(speaker)
+        return
             
         # Prevent duplicate triggers
         import time

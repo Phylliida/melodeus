@@ -70,7 +70,7 @@ def _load_auto_gain_settings() -> AutoGainSettings:
     ratio_min_raw = _env_float("AEC_GAIN_RATIO_MIN", 0.3333333333)
     ratio_min = max(0.1, min(ratio_min_raw, 1.0)) if math.isfinite(ratio_min_raw) else 0.3333333333
     min_gain = max(1e-6, _env_float("AEC_MIN_GAIN", 0.1))
-    max_gain_candidate = _env_float("AEC_MAX_GAIN", 3.0)
+    max_gain_candidate = _env_float("AEC_MAX_GAIN", 0.8)
     max_gain = max(min_gain, max_gain_candidate if math.isfinite(max_gain_candidate) else 20.0)
     target = target if target > 0.0 and math.isfinite(target) else 0.2
     return AutoGainSettings(
@@ -113,7 +113,7 @@ def _coerce_optional_bool(value: Optional[Any]) -> Optional[bool]:
 
 _auto_gain_enabled_env = _coerce_optional_bool(os.getenv("AEC_ENABLE_AUTO_GAIN"))
 if _auto_gain_enabled_env is not None:
-    _AUTO_GAIN_ENABLED = _auto_gain_enabled_env
+    _AUTO_GAIN_ENABLED = _auto_gain_enabled_env and False
 
 
 def _reset_auto_gain() -> None:
