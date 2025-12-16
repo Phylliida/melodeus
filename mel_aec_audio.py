@@ -472,15 +472,11 @@ async def write_playback_float(audio: np.ndarray, source_rate: int) -> int:
 
 async def interrupt_playback() -> None:
     """Interrupt the shared output stream immediately if it is running."""
-    with _stream_lock:
-        stream = _shared_stream
-        started = _stream_started
-    if stream and started:
-        try:
-            if hasattr(stream[0], "interrupt"):
-                stream[0].interrupt()
-        except Exception as exc:
-            print(f"⚠️ Unable to interrupt mel-aec playback: {exc}")
+    stream, output_producer = await ensure_stream_started()
+    try:
+        output_producer.interrupt_all_streams()
+    except Exception as exc:
+        print(f"⚠️ Unable to interrupt mel-aec playback: {exc}")
 
 
 

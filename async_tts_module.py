@@ -224,10 +224,18 @@ class AsyncTTSStreamer:
         self.alignments = []
         self.generated_text = ""
         osc_emit_task = None
+        max_audio_seconds = 60*30
         start_time_played = None
         try:
             osc_emit_task = asyncio.create_task(self._osc_emit_helper(osc_client, osc_client_address))
-            audio_stream = ensure_stream_started()
+            audio_stream, output_producer = await ensure_stream_started()
+            output_stream = output_producer.begin_audio_stream(
+                1, # 1 input channel, it's just speech audio
+                {0: 0}, # map to channel 0, can be adjusted if desired
+                max_audio_seconds,
+                self.config.sample_rate,
+                RESAMPLER_QUALITY,
+            )
             audios = []
             async def flush_websocket(websocket):
                 nonlocal first_audio_callback, start_time_played
@@ -255,10 +263,9 @@ class AsyncTTSStreamer:
                                 start_time_played = time.time()
 
                             float_audio = int16_bytes_to_float(audio_data)
-                            resampled = _resample(float_audio, self.config.sample_rate, shared_sample_rate())
-                            if len(resampled) > 0:
-                                audio_datas.append(resampled)
-                                segment_alignments.append((len(resampled), data["alignment"]))
+                            if len(float_audio) > 0:
+                                audio_datas.append(float_audio)
+                                segment_alignments.append((len(float_audio), data["alignment"]))
                         elif data.get("isFinal"):
                             break # done
                     
@@ -268,7 +275,7 @@ class AsyncTTSStreamer:
                     # see when it'll actually be played
                     current_time = time.time()
                     buffered_duration = audio_stream.get_buffered_duration()
-                    audio_stream.write(concat_data)
+                    output_stream.queue_audio(concat_data)
                     play_start_time = current_time + buffered_duration
                     for buffer_len, alignment in segment_alignments:
                         if alignment is not None: # sometimes we get no alignments but still audio data
