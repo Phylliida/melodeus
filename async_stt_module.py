@@ -22,7 +22,7 @@ from deepgram.extensions.types.sockets import (
     ListenV2TurnInfoEvent,
 )
 
-from mel_aec_audio import ensure_stream_started, prepare_capture_chunk
+from mel_aec_audio import ensure_stream_started, read_capture_chunk
 from titanet_voice_fingerprinting import (
     TitaNetVoiceFingerprinter,
     WordTiming
@@ -88,11 +88,9 @@ class AsyncSTTStreamer:
         self.speakers_config = speakers_config
         # Deepgram client
         self.deepgram = AsyncDeepgramClient(api_key=config.api_key)
-        self.audio_queue = queue.Queue(maxsize=1280)
         self.listening = False
         self.num_audio_frames_recieved = 0
         stream = ensure_stream_started()
-        stream.set_input_callback(self._handle_audio_capture)
         self.audio_task = None
         self.websocket_task = None
         self._turn_transcripts: Dict[int, str] = {}
@@ -322,19 +320,9 @@ class AsyncSTTStreamer:
         """Handle Deepgram connection open."""
         print("🔗 Deepgram STT connection closed")
     
-
-    def _handle_audio_capture(self, audio_data) -> None:
-        try:
-            if self.listening:
-                self.audio_queue.put_nowait(audio_data)
-        except Exception as prep_error:
-            print(f"⚠️  Failed to prepare capture chunk")
-            print(traceback.print_exc())
-    
     async def create_audio_task(self, connection):
         try:
             self.listening = False
-            self.clear_audio_queue()
             self.listening = True
             self.prev_turn_idx = None
             self.prev_transcript = ""
@@ -343,18 +331,9 @@ class AsyncSTTStreamer:
             self.current_turn_history = []
             self.current_turn_autosent_transcript = None
             self.last_sent_message_uuid = None
+
             while True:
-                waitingAmount = self.audio_queue.qsize()
-                if waitingAmount > 500:
-                    print(f"Warning: {waitingAmount} audio in queue, we are falling behind")
-                try:
-                    audio_data = self.audio_queue.get_nowait()
-                except queue.Empty:
-                    # poll
-                    await asyncio.sleep(0.05)
-                    continue
-                
-                pcm_bytes = prepare_capture_chunk(audio_data, self.config.sample_rate)
+                pcm_bytes = await read_capture_chunk()
                 if self.voice_fingerprinter is not None:
                     audio_np = np.frombuffer(pcm_bytes, dtype=np.int16).astype(np.float32) / 32768.0
                     self.voice_fingerprinter.add_audio_chunk(
@@ -423,12 +402,6 @@ class AsyncSTTStreamer:
         finally:
             self.websocket_task = None
 
-    def clear_audio_queue(self):
-        while True:
-            try:
-                self.audio_queue.get_nowait()
-            except queue.Empty:
-                break
 
     async def pause(self):
         await self.stop_listening()

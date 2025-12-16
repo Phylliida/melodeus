@@ -130,7 +130,7 @@ def _noisy_prefix_end(filtered_a: str, filtered_b: str) -> int | None:
     last_match = -1
 
     while i < len(filtered_b):
-        if op and op.src_pos == i and op.dst_pos == j:
+        if op and op.src_pos == i and op.dest_pos == j:
             if op.tag in {"delete", "replace"}:
                 return None
             j += 1               # insertion in filtered_a

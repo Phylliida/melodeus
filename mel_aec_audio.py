@@ -7,6 +7,7 @@ Utility functions handle float/int16 conversion and sample-rate
 resampling for the STT (Deepgram) and TTS (ElevenLabs) pipelines.
 """
 
+import asyncio
 import math
 import os
 import threading
@@ -17,7 +18,7 @@ import resampy
 import numpy as np
 from scipy import signal
 
-from audio_aec import AudioStream
+import melaec3
 
 
 @dataclass(frozen=True)
@@ -31,12 +32,20 @@ class StreamSettings:
     aec_filter_length: int = 2048
     input_device: Optional[str] = None
     output_device: Optional[str] = None
+    # Additional tuning knobs mirrored from melaec3's listen.py
+    history_len: int = 100            # chunks to hold for alignment
+    calibration_packets: int = 20     # packets to gather before emitting audio
+    audio_buffer_seconds: int = 20    # buffered audio duration
+    resampler_quality: int = 5        # Speex resampler quality
+    frame_size_millis: int = 3        # target frame duration (ms) for output
+    frame_size_samples: int = 160     # output frame size in samples (~10ms @ 16 kHz)
 
 _DEFAULT_STREAM_SETTINGS = StreamSettings()
 _stream_lock = threading.Lock()
 _stream_settings: StreamSettings = _DEFAULT_STREAM_SETTINGS
-_shared_stream: Optional[AudioStream] = None
+
 _stream_started = False
+_shared_stream: Optional[tuple[melaec3.AecStream, melaec3.OutputStreamAlignerProducer]] = None
 _MISSING = object()
 
 
@@ -241,14 +250,8 @@ def configure_audio_stream(
 
         # Tear down any existing stream so the next access picks up new settings
         if _shared_stream is not None:
-            try:
-                if _stream_started:
-                    _shared_stream.stop()
-            except Exception:
-                pass
-            finally:
-                _shared_stream = None
-                _stream_started = False
+            _shared_stream = None
+            _stream_started = False
 
         _stream_settings = new_settings
         _reset_auto_gain()
@@ -308,50 +311,86 @@ def _current_settings() -> StreamSettings:
         return _stream_settings
 
 
-def _get_shared_stream() -> AudioStream:
-    """Return the singleton AudioStream instance, creating it on demand."""
-    global _shared_stream
+async def _get_shared_stream() -> tuple[melaec3.AecStream, melaec3.OutputStreamAlignerProducer]:
+    """Return the singleton melaec3 AecStream and its output producer, creating them on demand."""
+    global _shared_stream, _stream_started
+    with _stream_lock:
+        existing = _shared_stream
+        cfg = _stream_settings
+    if existing is not None:
+        return existing
+
+    aec = melaec3.AecConfig(
+        target_sample_rate=cfg.sample_rate,
+        frame_size=cfg.frame_size_samples,
+        filter_length=cfg.aec_filter_length,
+    )
+    stream = melaec3.AecStream(aec)
+
+    inp_cfg = await melaec3.InputDeviceConfig.from_default(
+        host=None,
+        device_name=cfg.input_device or "default",
+        history_len=cfg.history_len,
+        calibration_packets=cfg.calibration_packets,
+        audio_buffer_seconds=cfg.audio_buffer_seconds,
+        resampler_quality=cfg.resampler_quality,
+    )
+    out_cfg = await melaec3.OutputDeviceConfig.from_default(
+        host=None,
+        device_name=cfg.output_device or "default",
+        history_len=cfg.history_len,
+        calibration_packets=cfg.calibration_packets,
+        audio_buffer_seconds=cfg.audio_buffer_seconds,
+        resampler_quality=cfg.resampler_quality,
+        frame_size_millis=cfg.frame_size_millis,
+    )
+
+    await stream.add_input_device(inp_cfg)
+    output_producer = await stream.add_output_device(out_cfg)
+
     with _stream_lock:
         if _shared_stream is None:
-            settings = _stream_settings
-            _shared_stream = AudioStream(
-                sample_rate=settings.sample_rate,
-                channels=settings.channels,
-                buffer_size=settings.buffer_size,
-                enable_aec=settings.enable_aec,
-                aec_filter_length=settings.aec_filter_length,
-                input_device=settings.input_device,
-                output_device=settings.output_device,
-            )
+            _shared_stream = (stream, output_producer)
+            _stream_started = True
             print(
-                "🎚️ mel-aec stream initialized "
-                f"@ {settings.sample_rate}Hz, buffer={settings.buffer_size} samples, "
-                f"channels={settings.channels}, AEC={'on' if settings.enable_aec else 'off'}, "
-                f"input={settings.input_device or 'default'}, "
-                f"output={settings.output_device or 'default'}"
+                "🎚️ melaec3 stream initialized "
+                f"@ {cfg.sample_rate}Hz, frame={cfg.frame_size_samples} samples, "
+                f"channels={cfg.channels}, input={cfg.input_device or 'default'}, "
+                f"output={cfg.output_device or 'default'}"
             )
         return _shared_stream
 
 
-def ensure_stream_started() -> AudioStream:
+async def ensure_stream_started() -> tuple[melaec3.AecStream, melaec3.OutputStreamAlignerProducer]:
     """Start the duplex stream exactly once and return it."""
     global _stream_started
-    stream = _get_shared_stream()
-    with _stream_lock:
-        if not _stream_started:
-            stream.start()
-            _stream_started = True
+    stream = await _get_shared_stream()
     return stream
+
+
+async def create_stream(
+    channels: int,
+    channel_map: dict[int, list[int]],
+    audio_buffer_seconds: int,
+    sample_rate: int,
+    resampler_quality: int,
+) -> melaec3.StreamProducer:
+    """
+    Create an output stream on the shared AEC stream that callers can write to.
+    """
+    stream, producer = await ensure_stream_started()
+    return producer.begin_audio_stream(
+        channels,
+        channel_map,
+        audio_buffer_seconds,
+        sample_rate,
+        resampler_quality,
+    )
 
 
 def stop_stream():
     """Stop the shared stream (used during shutdown)."""
     global _stream_started
-    with _stream_lock:
-        if _shared_stream and _stream_started:
-            _shared_stream.stop()
-            _stream_started = False
-            _reset_auto_gain()
 
 
 def shared_sample_rate() -> int:
@@ -408,51 +447,50 @@ def _resample(audio: np.ndarray, src_rate: int, dst_rate: int) -> np.ndarray:
     return resampy.resample(audio, src_rate, dst_rate)
 
 
-def write_playback_pcm(pcm_bytes: bytes, source_rate: int) -> int:
+async def write_playback_pcm(pcm_bytes: bytes, source_rate: int) -> int:
     """
     Write PCM16 playback data (e.g. ElevenLabs chunks) into the shared stream.
 
     Returns the number of samples written to the mel-aec stream.
     """
-    stream = ensure_stream_started()
+    stream, _ = await ensure_stream_started()
     target_rate = shared_sample_rate()
     float_audio = int16_bytes_to_float(pcm_bytes)
     resampled = _resample(float_audio, source_rate, target_rate)
     return stream.write(resampled)
 
 
-def write_playback_float(audio: np.ndarray, source_rate: int) -> int:
+async def write_playback_float(audio: np.ndarray, source_rate: int) -> int:
     """
     Write float32 audio into the shared stream, resampling if needed.
     """
-    stream = ensure_stream_started()
+    stream, _ = await ensure_stream_started()
     target_rate = shared_sample_rate()
     resampled = _resample(audio, source_rate, target_rate)
     return stream.write(resampled)
 
 
-def interrupt_playback() -> None:
+async def interrupt_playback() -> None:
     """Interrupt the shared output stream immediately if it is running."""
     with _stream_lock:
         stream = _shared_stream
         started = _stream_started
     if stream and started:
         try:
-            stream.interrupt()
+            if hasattr(stream[0], "interrupt"):
+                stream[0].interrupt()
         except Exception as exc:
             print(f"⚠️ Unable to interrupt mel-aec playback: {exc}")
 
 
-def read_capture_chunk(target_samples: int, target_rate: int) -> bytes:
+
+async def read_capture_chunk() -> bytes:
     """
     Read microphone audio from the shared stream and return PCM16 bytes
     at the desired sample rate (Deepgram expects 16 kHz).
     """
     settings = _current_settings()
-    stream = ensure_stream_started()
-    # Request enough samples from the shared stream to satisfy the target chunk.
-    samples_needed = max(
-        int(math.ceil(target_samples * settings.sample_rate / target_rate)), settings.buffer_size
-    )
-    float_audio = stream.read(samples_needed)
+    stream, output_producer = await ensure_stream_started()
+    buf_bytes, started_micros, ended_micros = await stream.update()
+    float_audio = np.frombuffer(buf_bytes, dtype=np.float32)
     return prepare_capture_chunk(float_audio, target_samples, target_rate)
