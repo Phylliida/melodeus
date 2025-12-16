@@ -1,6 +1,10 @@
 <!doctype html>
 <meta charset="utf-8">
 <title>melodeus</title>
+<div style="display:flex;align-items:center;gap:8px;margin-bottom:8px">
+  <div id="ws" style="width:16px;height:16px;border-radius:50%;background:#f33;box-shadow:0 0 6px #f33"></div>
+  <span>websocket</span>
+</div>
 <label>target sample rate <input id="rate" type="number" value="48000"></label>
 <label>frame size <input id="frame" type="number" value="160"></label>
 <label>filter length <input id="filter" type="number" value="2048"></label>
@@ -22,4 +26,4 @@
   </div>
   <div id="added"></div>
 </div>
-<script type="module" src="/melodeus.js"></script>
+<script type="module" src="/js/melodeus.js"></script>

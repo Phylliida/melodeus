@@ -106,3 +106,29 @@ el("init").onclick = () =>
 
 el("in-add").onclick = () => addDevice("in", "inputs").catch(console.error)
 el("out-add").onclick = () => addDevice("out", "outputs").catch(console.error)
+const wsPort = 8134;
+const dot = () => el("ws")
+const paint = (c) => (dot().style.background = c)
+const url = () => `${location.protocol === "https:" ? "wss" : "ws"}://${location.hostname}:${wsPort}`
+const ping = (ws, miss = 0) =>
+  miss >= 3 ? ws.close() : ws.readyState === WebSocket.OPEN && (ws.send("ping"), setTimeout(() => ping(ws, miss + 1), 200))
+const connect = () => {
+  console.log("Connecting to ws");
+  const ws = new WebSocket(url())
+  ws.onopen = () => {
+    console.log("Connected to ws");
+    paint("#3f3");
+  };
+  ws.onmessage = () => {
+    console.log("message to ws");
+    paint("#3f3");
+  }
+  const stop = () => {
+    console.log("Error ws");
+    paint("#f33");
+  };
+  ws.onclose = stop
+  ws.onerror = stop
+}
+connect()
+

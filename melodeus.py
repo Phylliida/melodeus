@@ -1,5 +1,10 @@
+import asyncio
+import errno
+from os import getenv
 from pathlib import Path
+import threading
 from flask import Flask, jsonify, request
+import websockets
 import melaec3
 
 root = Path(__file__).parent
@@ -10,7 +15,30 @@ CALIBRATION = 20
 AUDIO_BUF = 20
 RESAMPLE_Q = 5
 DEFAULT_FRAME = 160
+WS_PORT = int(getenv("MELODEUS_WS_PORT", "8134"))
 
+connections = set()
+async def websocketServer(websocket):
+    connections.add(websocket)
+    client_addr = None
+    try:
+        print(f"🔌 UI client connected from {client_addr}")
+        while True:
+            client_addr = websocket.remote_address
+            await websocket.send("200")
+    except websockets.exceptions.ConnectionClosed:
+        connections.remove(websocket)
+        pass
+    finally:
+        print(f"🔌 UI client disconnected from {client_addr}")
+
+async def serve_websocket():
+    await websockets.serve(websocketServer, "0.0.0.0", WS_PORT)
+    await asyncio.Event().wait()
+
+def start_ws():
+    ws_thread = threading.Thread(target=lambda: asyncio.run(serve_websocket()), daemon=True)
+    ws_thread.start()
 
 def read(name: str) -> str:
     return root.joinpath(name).read_text()
@@ -70,7 +98,6 @@ def find_config(kind: str, host: str, device: str, rate: int, ch: int, fmt: str)
             ):
                 return cfg
     return None
-
 
 @app.get("/")
 def index():
@@ -169,4 +196,5 @@ def remove_device():
 
 
 if __name__ == "__main__":
-    app.run(debug=True)
+    start_ws()
+    app.run(host="0.0.0.0", port="5000", debug=False)
