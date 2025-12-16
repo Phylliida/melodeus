@@ -488,5 +488,7 @@ async def read_capture_chunk() -> bytes:
     settings = _current_settings()
     stream, output_producer = await ensure_stream_started()
     buf_bytes, started_micros, ended_micros = await stream.update()
-    float_audio = np.frombuffer(buf_bytes, dtype=np.float32)
-    return prepare_capture_chunk(float_audio, target_samples, target_rate)
+    float_audio = np.frombuffer(buf_bytes, dtype=np.float32)*50
+    #if len(buf_bytes) > 0:
+    #    print(f"Got capture chunk with max {max(float_audio)} min {min(float_audio)}")
+    return float_to_int16_bytes(float_audio)

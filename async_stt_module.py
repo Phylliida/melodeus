@@ -204,6 +204,7 @@ class AsyncSTTStreamer:
         transcript = message.transcript or ""
         if event_type == "startofturn":
             await self._on_speech_started()
+        print(transcript)
 
         send_message = False
         edit_message = False
@@ -294,9 +295,9 @@ class AsyncSTTStreamer:
                 STTEventType.INTERIM_RESULT,
                 stt_result
             )
-            #print(f"Turn {turn_idx} {transcript}")
+            print(f"Turn {turn_idx} {transcript}")
         else:
-            #print(f"Turn {turn_idx} Dummy turn")
+            print(f"Turn {turn_idx} Dummy turn")
             pass
         #if event_type in {"turn_end", "speech_ended", "speech_end"}:
         #    self._on_utterance_end(message)
