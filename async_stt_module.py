@@ -204,7 +204,8 @@ class AsyncSTTStreamer:
         transcript = message.transcript or ""
         if event_type == "startofturn":
             await self._on_speech_started()
-        print(transcript)
+        if transcript.strip() != "":
+            print(transcript)
 
         send_message = False
         edit_message = False

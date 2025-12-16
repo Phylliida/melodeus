@@ -1,0 +1,25 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>melodeus</title>
+<label>target sample rate <input id="rate" type="number" value="48000"></label>
+<label>frame size <input id="frame" type="number" value="160"></label>
+<label>filter length <input id="filter" type="number" value="2048"></label>
+<button id="init">init aec</button>
+<div id="devices" style="display:none">
+  <div>
+    input device <select id="in-dev"></select>
+    ch <select id="in-ch"></select>
+    rate <select id="in-rate"></select>
+    fmt <select id="in-fmt"></select>
+    <button id="in-add">add input</button>
+  </div>
+  <div>
+    output device <select id="out-dev"></select>
+    ch <select id="out-ch"></select>
+    rate <select id="out-rate"></select>
+    fmt <select id="out-fmt"></select>
+    <button id="out-add">add output</button>
+  </div>
+  <div id="added"></div>
+</div>
+<script type="module" src="/melodeus.js"></script>
