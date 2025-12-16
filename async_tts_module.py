@@ -226,19 +226,14 @@ class AsyncTTSStreamer:
         osc_emit_task = None
         max_audio_seconds = 60*30
         start_time_played = None
+        output_stream = None
         try:
             osc_emit_task = asyncio.create_task(self._osc_emit_helper(osc_client, osc_client_address))
             audio_stream, output_producer = await ensure_stream_started()
-            output_stream = output_producer.begin_audio_stream(
-                1, # 1 input channel, it's just speech audio
-                {0: 0}, # map to channel 0, can be adjusted if desired
-                max_audio_seconds,
-                self.config.sample_rate,
-                RESAMPLER_QUALITY,
-            )
+            output_stream = None
             audios = []
             async def flush_websocket(websocket):
-                nonlocal first_audio_callback, start_time_played
+                nonlocal first_audio_callback, start_time_played, output_stream
                 if websocket is not None:
                     await websocket.send(json.dumps({
                         "text": "", # final message
@@ -258,6 +253,14 @@ class AsyncTTSStreamer:
                             # call callback (this will stop the "thinking" sound)
                             if not first_audio_callback is None:
                                 await first_audio_callback()
+                                # need to construct this after first_audio_callback because that interrupts all playing ones
+                                output_stream = output_producer.begin_audio_stream(
+                                    1, # 1 input channel, it's just speech audio
+                                    {0: [0]}, # map to channel 0, can be adjusted if desired
+                                    int(max_audio_seconds),
+                                    self.config.sample_rate,
+                                    5, # resampler quality
+                                )
                                 first_audio_callback = None
                             if start_time_played is None:
                                 start_time_played = time.time()
@@ -274,7 +277,7 @@ class AsyncTTSStreamer:
 
                     # see when it'll actually be played
                     current_time = time.time()
-                    buffered_duration = audio_stream.get_buffered_duration()
+                    buffered_duration = output_stream.num_queued_samples / self.config.sample_rate
                     output_stream.queue_audio(concat_data)
                     play_start_time = current_time + buffered_duration
                     for buffer_len, alignment in segment_alignments:
@@ -339,7 +342,7 @@ class AsyncTTSStreamer:
                 current_voice = None
 
             # wait for buffered audio to drain (polling)
-            while audio_stream.get_buffered_duration() > 0:
+            while output_stream.num_queued_samples > 0:
                 await asyncio.sleep(0.05)
                 
         except asyncio.CancelledError:
@@ -359,12 +362,14 @@ class AsyncTTSStreamer:
                 #print(self.generated_text)
 
             # interrupt audio, this clears the buffers
-            interrupt_playback()
+            await interrupt_playback()
             raise
         except Exception as e:
             print(f"TTS error")
             print(traceback.print_exc())
         finally:
+            if not output_stream is None:
+                output_producer.end_audio_stream(output_stream)
             if osc_emit_task:
                 try:
                     osc_emit_task.cancel()

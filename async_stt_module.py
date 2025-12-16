@@ -297,7 +297,7 @@ class AsyncSTTStreamer:
             )
             print(f"Turn {turn_idx} {transcript}")
         else:
-            print(f"Turn {turn_idx} Dummy turn")
+            #print(f"Turn {turn_idx} Dummy turn")
             pass
         #if event_type in {"turn_end", "speech_ended", "speech_end"}:
         #    self._on_utterance_end(message)

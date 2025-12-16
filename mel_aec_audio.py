@@ -11,7 +11,9 @@ import asyncio
 import math
 import os
 import threading
+import wave
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any, Optional
 import resampy
 
@@ -46,6 +48,11 @@ _stream_settings: StreamSettings = _DEFAULT_STREAM_SETTINGS
 
 _stream_started = False
 _shared_stream: Optional[tuple[melaec3.AecStream, melaec3.OutputStreamAlignerProducer]] = None
+_capture_wav_path = Path(__file__).parent / "capture_debug.wav"
+_capture_wav_writer: Optional[wave.Wave_write] = None
+_capture_wav_rate: Optional[int] = None
+_capture_wav_channels: Optional[int] = None
+_capture_wav_lock = threading.Lock()
 _MISSING = object()
 
 
@@ -97,6 +104,11 @@ _auto_gain_lock = threading.Lock()
 global _auto_gain_value
 _auto_gain_value = float(np.clip(1.0, _AUTO_GAIN_SETTINGS.min_gain, _AUTO_GAIN_SETTINGS.max_gain))
 _AUTO_GAIN_ENABLED = True
+_capture_wav_path = Path(__file__).parent / "capture_debug.wav"
+_capture_wav_writer: Optional[wave.Wave_write] = None
+_capture_wav_rate: Optional[int] = None
+_capture_wav_channels: Optional[int] = None
+_capture_wav_lock = threading.Lock()
 
 
 def _normalize_device_name(name: Optional[Any]) -> Optional[str]:
@@ -131,6 +143,52 @@ def _reset_auto_gain() -> None:
         _auto_gain_value = float(
             np.clip(1.0, _AUTO_GAIN_SETTINGS.min_gain, _AUTO_GAIN_SETTINGS.max_gain)
         )
+
+
+def _close_capture_writer() -> None:
+    """Close any active capture wav writer, ignoring errors."""
+    global _capture_wav_writer, _capture_wav_rate, _capture_wav_channels
+    with _capture_wav_lock:
+        if _capture_wav_writer is not None:
+            try:
+                _capture_wav_writer.close()
+            except Exception:
+                pass
+        _capture_wav_writer = None
+        _capture_wav_rate = None
+        _capture_wav_channels = None
+
+
+def _append_capture_wav(pcm_bytes: bytes, sample_rate: int, channels: int) -> None:
+    """Append captured PCM16 bytes to a debug wav file."""
+    if not pcm_bytes:
+        return
+    # Clamp channels to at least mono to avoid wave errors.
+    ch = max(1, int(channels) if channels else 1)
+    with _capture_wav_lock:
+        global _capture_wav_writer, _capture_wav_rate, _capture_wav_channels
+        if (
+            _capture_wav_writer is None
+            or _capture_wav_rate != sample_rate
+            or _capture_wav_channels != ch
+        ):
+            if _capture_wav_writer is not None:
+                try:
+                    _capture_wav_writer.close()
+                except Exception:
+                    pass
+                _capture_wav_writer = None
+                _capture_wav_rate = None
+                _capture_wav_channels = None
+            _capture_wav_path.parent.mkdir(parents=True, exist_ok=True)
+            writer = wave.open(str(_capture_wav_path), "wb")
+            writer.setnchannels(ch)
+            writer.setsampwidth(2)  # PCM16
+            writer.setframerate(sample_rate)
+            _capture_wav_writer = writer
+            _capture_wav_rate = sample_rate
+            _capture_wav_channels = ch
+        _capture_wav_writer.writeframes(pcm_bytes)
 
 
 def current_auto_gain() -> float:
@@ -252,6 +310,7 @@ def configure_audio_stream(
         if _shared_stream is not None:
             _shared_stream = None
             _stream_started = False
+            _close_capture_writer()
 
         _stream_settings = new_settings
         _reset_auto_gain()
@@ -319,7 +378,7 @@ async def _get_shared_stream() -> tuple[melaec3.AecStream, melaec3.OutputStreamA
         cfg = _stream_settings
     if existing is not None:
         return existing
-
+    print(f"Using aec sample rate {cfg.sample_rate}")
     aec = melaec3.AecConfig(
         target_sample_rate=cfg.sample_rate,
         frame_size=cfg.frame_size_samples,
@@ -390,7 +449,18 @@ async def create_stream(
 
 def stop_stream():
     """Stop the shared stream (used during shutdown)."""
-    global _stream_started
+    global _stream_started, _shared_stream
+    with _stream_lock:
+        stream = _shared_stream
+        _shared_stream = None
+        _stream_started = False
+    if stream:
+        try:
+            if hasattr(stream[0], "clear_callback"):
+                stream[0].clear_callback()
+        except Exception:
+            pass
+    _close_capture_writer()
 
 
 def shared_sample_rate() -> int:
@@ -488,7 +558,7 @@ async def read_capture_chunk() -> bytes:
     settings = _current_settings()
     stream, output_producer = await ensure_stream_started()
     buf_bytes, started_micros, ended_micros = await stream.update()
-    float_audio = np.frombuffer(buf_bytes, dtype=np.float32)*50
-    #if len(buf_bytes) > 0:
-    #    print(f"Got capture chunk with max {max(float_audio)} min {min(float_audio)}")
-    return float_to_int16_bytes(float_audio)
+    float_audio = np.frombuffer(buf_bytes, dtype=np.float32) * 50
+    pcm_bytes = float_to_int16_bytes(float_audio)
+    _append_capture_wav(pcm_bytes, settings.sample_rate, settings.channels)
+    return pcm_bytes

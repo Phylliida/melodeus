@@ -43,20 +43,33 @@ class SynchronizedThinkingSoundPlayer:
         self.audio_frames = np.concatenate([silence, pulse]*100)
 
     async def _play_helper(self):
+        audio_stream, output_producer = await ensure_stream_started()
+        output_stream = None
         try:
-            audio_stream = ensure_stream_started()
+            output_stream = output_producer.begin_audio_stream(
+                1, # 1 input channel, it's just ping audio
+                {0: [0]}, # map to channel 0, can be adjusted if desired
+                int(len(self.audio_frames)*2/self.sample_rate),
+                self.sample_rate,
+                5, # resampler quality
+            )
             while True:
-                audio_stream.write(self.audio_frames)
+                output_stream.queue_audio(self.audio_frames)
                 # wait for buffered audio to drain (polling)
                 # leave 0.5 second so we have time to populate it with new audio
-                while audio_stream.get_buffered_duration() > 0.5:
+                while output_stream.num_queued_samples > 0:
                     await asyncio.sleep(0.05)
         except asyncio.CancelledError:
-            interrupt_playback()
+            print("Interrupted thinking sound player")
+            await interrupt_playback()
             raise
         except Exception as e:
             print(f"thinking sound error")
             print(traceback.print_exc())
+        finally:
+            if not output_stream is None:
+                output_producer.end_audio_stream(output_stream)
+
        
     async def play(self):
         # interrupt (if already running)
