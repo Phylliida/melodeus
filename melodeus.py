@@ -5,6 +5,7 @@ from pathlib import Path
 import threading
 import base64, json
 import wave, array
+import json as jsonlib
 from flask import Flask, jsonify, request
 import websockets
 import melaec3
@@ -20,6 +21,7 @@ TARGET_RATE = 16000
 DEFAULT_FRAME = 160
 DEFAULT_FILTER = 1600
 WS_PORT = int(getenv("MELODEUS_WS_PORT", "8134"))
+STATE_FILE = root / "last_devices.json"
 
 connections = set()
 global outputs
@@ -86,6 +88,18 @@ def start_ws():
 
 def read(name: str) -> str:
     return root.joinpath(name).read_text()
+
+def read_state():
+    try:
+        return jsonlib.loads(STATE_FILE.read_text())
+    except Exception:
+        return {}
+
+def write_state(state: dict):
+    try:
+        STATE_FILE.write_text(jsonlib.dumps(state))
+    except Exception as e:
+        print("failed to write state", e)
 
 def load_sample():
     path = root.parent / "pure-rust-aec" / "examples" / "example_talking.wav"
@@ -211,6 +225,9 @@ async def add_device():
             print("Added output device")
             output_device = await stream.add_output_device(cfg)
             outputs[(host, device, rate, ch, fmt)] = output_device
+        st = read_state()
+        st[kind] = payload
+        write_state(st)
     return jsonify(
         ok=True,
         added={
@@ -306,6 +323,10 @@ async def set_gain():
             return jsonify(error="aec not initialized"), 400
         stream.input_gain = gain
     return jsonify(ok=True, gain=gain)
+
+@app.get("/last")
+def last():
+    return jsonify(read_state())
 
 @app.post("/calibrate")
 async def calibrate():

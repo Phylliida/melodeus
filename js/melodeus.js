@@ -7,6 +7,7 @@ const setOpts = (sel, items) => {
 const label = (d) => `${d.host}/${d.device}`
 let devices = { inputs: [], outputs: [] }
 let added = []
+let last = {}
 
 const refresh = (prefix, key) => {
   const dev = devices[key][Number(el(`${prefix}-dev`).value) || 0]
@@ -17,20 +18,34 @@ const refresh = (prefix, key) => {
 
 const populate = (data) => {
   devices = data
-  setOpts(
-    el("in-dev"),
-    data.inputs.map((d, i) => [i, label(d)])
-  )
-  setOpts(
-    el("out-dev"),
-    data.outputs.map((d, i) => [i, label(d)])
-  )
+  const inOpts = data.inputs.map((d, i) => [i, label(d)])
+  const outOpts = data.outputs.map((d, i) => [i, label(d)])
+  setOpts(el("in-dev"), inOpts)
+  setOpts(el("out-dev"), outOpts)
+  const pick = (kind, opts) => {
+    const saved = last[kind]
+    if (!saved) return 0
+    const idx = opts.findIndex(([, lbl]) => lbl === `${saved.host}/${saved.device}`)
+    return idx >= 0 ? idx : 0
+  }
+  el("in-dev").value = pick("input", inOpts)
+  el("out-dev").value = pick("output", outOpts)
   refresh("in", "inputs")
   refresh("out", "outputs")
+  const setSel = (prefix, key) => {
+    const saved = last[key]
+    if (!saved) return
+    el(`${prefix}-ch`).value = saved.channels
+    el(`${prefix}-rate`).value = saved.sample_rate
+    el(`${prefix}-fmt`).value = saved.sample_format
+  }
+  setSel("in", "input")
+  setSel("out", "output")
   return data
 }
 
 const fetchDevices = () => fetch("/devices").then((r) => r.json()).then(populate)
+const fetchLast = () => fetch("/last").then((r) => r.json()).then((d) => (last = d || {}))
 
 el("in-dev").onchange = () => refresh("in", "inputs")
 el("out-dev").onchange = () => refresh("out", "outputs")
@@ -176,7 +191,9 @@ const setGain = (g) =>
     body: JSON.stringify({ gain: g }),
   }).catch(console.error)
 el("gain").oninput = (e) => setGain(Number(e.target.value) || 1)
-setGain(Number(el("gain").value) || 1)
+Promise.all([fetchLast(), fetchDevices()])
+  .then(() => setGain(Number(el("gain").value) || 1))
+  .catch(console.error)
 const connect = () => {
   const ws = new WebSocket(url())
   ws.onopen = () => paint("#3f3")
