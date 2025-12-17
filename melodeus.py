@@ -4,6 +4,7 @@ from os import getenv
 from pathlib import Path
 import threading
 import base64, json
+import wave, array
 from flask import Flask, jsonify, request
 import websockets
 import melaec3
@@ -15,12 +16,16 @@ HISTORY_LEN = 100
 CALIBRATION = 20
 AUDIO_BUF = 20
 RESAMPLE_Q = 5
+TARGET_RATE = 16000
 DEFAULT_FRAME = 160
+DEFAULT_FILTER = 1600
 WS_PORT = int(getenv("MELODEUS_WS_PORT", "8134"))
 
 connections = set()
+global outputs
 outputs = {}
-
+play_streams = []
+stream_lock = threading.Lock()
 def enc(buf: bytes) -> str:
     return base64.b64encode(bytes(buf)).decode()
 
@@ -40,13 +45,17 @@ async def pump_debug():
     while True:
         if stream:
             try:
-                i, o, a, _, _ = await stream.update_debug()
+                with stream_lock:
+                    i, o, a, _, _ = await stream.update_debug()
+                    rate = stream.config.target_sample_rate
+                    in_ch = stream.num_input_channels
+                    out_ch = stream.num_output_channels
                 await asyncio.sleep(0.001) # yield so ws can go
                 payload = {
                     "type": "debug",
-                    "rate": stream.config.target_sample_rate,
-                    "in_ch": stream.num_input_channels,
-                    "out_ch": stream.num_output_channels,
+                    "rate": rate,
+                    "in_ch": in_ch,
+                    "out_ch": out_ch,
                     "input": enc(i),
                     "output": enc(o),
                     "aec": enc(a),
@@ -78,10 +87,30 @@ def start_ws():
 def read(name: str) -> str:
     return root.joinpath(name).read_text()
 
+def load_sample():
+    path = root.parent / "pure-rust-aec" / "examples" / "example_talking.wav"
+    with wave.open(str(path), "rb") as w:
+        rate = w.getframerate()
+        ch = w.getnchannels()
+        if w.getsampwidth() != 2:
+            raise ValueError("sample must be 16-bit")
+        buf = w.readframes(w.getnframes())
+    data = array.array("h")
+    data.frombytes(buf)
+    if ch > 1:
+        data = array.array("h", (data[i * ch] for i in range(len(data) // ch)))
+    return rate, data
+
 
 def build_stream(rate: int, frame: int, length: int) -> melaec3.AecStream:
     cfg = melaec3.AecConfig(target_sample_rate=rate, frame_size=frame, filter_length=length)
     return melaec3.AecStream(cfg)
+
+try:
+    stream = build_stream(TARGET_RATE, DEFAULT_FRAME, DEFAULT_FILTER)
+except Exception as e:
+    stream = None
+    print("failed to pre-init aec", e)
 
 
 def grab_int(payload: dict, key: str) -> int:
@@ -138,22 +167,6 @@ def find_config(kind: str, host: str, device: str, rate: int, ch: int, fmt: str)
 def index():
     return read("melodeus.html")
 
-
-@app.post("/aec")
-def init_aec():
-    global stream
-    outputs.clear()
-    payload = request.get_json(silent=True) or {}
-    try:
-        rate = grab_int(payload, "target_sample_rate")
-        frame = grab_int(payload, "frame_size")
-        length = grab_int(payload, "filter_length")
-    except ValueError as err:
-        return jsonify(error=f"invalid {err.args[0]}"), 400
-    stream = build_stream(rate, frame, length)
-    return jsonify(target_sample_rate=rate, frame_size=frame, filter_length=length)
-
-
 @app.get("/devices")
 def devices():
     ins = melaec3.get_supported_input_configs(
@@ -174,8 +187,6 @@ def devices():
 
 @app.post("/device")
 async def add_device():
-    if stream is None:
-        return jsonify(error="aec not initialized"), 400
     payload = request.get_json(silent=True) or {}
     kind = payload.get("kind")
     if kind not in {"input", "output"}:
@@ -191,10 +202,15 @@ async def add_device():
     cfg = find_config(kind, host, device, rate, ch, fmt)
     if cfg is None:
         return jsonify(error="config not found"), 404
-    if kind == "input":
-        await stream.add_input_device(cfg)
-    else:
-        outputs[(host, device, rate, ch, fmt)] = await stream.add_output_device(cfg)
+    with stream_lock:
+        if stream is None:
+            return jsonify(error="aec not initialized"), 400
+        if kind == "input":
+            await stream.add_input_device(cfg)
+        else:
+            print("Added output device")
+            output_device = await stream.add_output_device(cfg)
+            outputs[(host, device, rate, ch, fmt)] = output_device
     return jsonify(
         ok=True,
         added={
@@ -209,9 +225,7 @@ async def add_device():
 
 
 @app.delete("/device")
-def remove_device():
-    if stream is None:
-        return jsonify(error="aec not initialized"), 400
+async def remove_device():
     payload = request.get_json(silent=True) or {}
     kind = payload.get("kind")
     host = payload.get("host")
@@ -224,12 +238,85 @@ def remove_device():
     cfg = find_config(kind, host, device, int(rate), int(ch), str(fmt))
     if cfg is None:
         return jsonify(error="config not found"), 404
-    if kind == "input":
-        stream.remove_input_device(cfg)
-    else:
-        stream.remove_output_device(cfg)
-        outputs.pop((host, device, int(rate), int(ch), str(fmt)), None)
+    with stream_lock:
+        if stream is None:
+            return jsonify(error="aec not initialized"), 400
+        if kind == "input":
+            stream.remove_input_device(cfg)
+        else:
+            stream.remove_output_device(cfg)
+            outputs.pop((host, device, int(rate), int(ch), str(fmt)), None)
     return jsonify(ok=True, removed=payload)
+
+
+def schedule_end(producer, stream, seconds: float):
+    def end():
+        try:
+            producer.end_audio_stream(stream)
+        except Exception:
+            pass
+        try:
+            play_streams.remove(stream)
+        except ValueError:
+            pass
+    threading.Timer(seconds, end).start()
+
+
+@app.post("/play")
+async def play_sample():
+    if stream is None or not outputs:
+        return jsonify(error="no outputs"), 400
+    payload = request.get_json(silent=True) or {}
+    try:
+        gain = float(payload.get("gain", 1.0))
+    except Exception:
+        gain = 1.0
+    gain = max(0.0, min(50.0, gain))
+    rate, raw = load_sample()
+    floats = [max(-1.0, min(1.0, (v / 32768.0) * gain)) for v in raw]
+    sent = []
+    with stream_lock:
+        for prod in outputs.values():
+            try:
+                stream_prod = prod.begin_audio_stream(
+                    1,
+                    {0: [0]},
+                    AUDIO_BUF,
+                    rate,
+                    RESAMPLE_Q,
+                )
+                stream_prod.queue_audio(floats)
+                play_streams.append(stream_prod)
+                schedule_end(prod, stream_prod, len(floats) / rate + 1)
+                sent.append(getattr(prod, "device_name", "out"))
+            except Exception as e:
+                print("play err", e)
+    return jsonify(ok=True, sent=sent, gain=gain)
+
+
+@app.post("/gain")
+async def set_gain():
+    payload = request.get_json(silent=True) or {}
+    try:
+        gain = float(payload.get("gain", 1.0))
+    except Exception:
+        return jsonify(error="invalid gain"), 400
+    with stream_lock:
+        if stream is None:
+            return jsonify(error="aec not initialized"), 400
+        stream.input_gain = gain
+    return jsonify(ok=True, gain=gain)
+
+@app.post("/calibrate")
+async def calibrate():
+    with stream_lock:
+        if stream is None:
+            return jsonify(error="aec not initialized"), 400
+        try:
+            await stream.calibrate(list(outputs.values()), False)
+        except Exception as e:
+            return jsonify(error=str(e)), 500
+    return jsonify(ok=True)
 
 
 if __name__ == "__main__":

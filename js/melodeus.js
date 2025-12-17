@@ -1,16 +1,4 @@
 const el = (id) => document.getElementById(id)
-const payload = () => ({
-  target_sample_rate: el("rate").value,
-  frame_size: el("frame").value,
-  filter_length: el("filter").value,
-})
-const init = () =>
-  fetch("/aec", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(payload()),
-  }).then(async (r) => (r.ok ? r.json() : Promise.reject(await r.json())))
-
 const setOpts = (sel, items) => {
   sel.innerHTML = ""
   items.forEach(([v, l]) => sel.add(new Option(l, v)))
@@ -98,14 +86,18 @@ const removeDevice = (idx) => {
   }).catch(console.error)
 }
 
-el("init").onclick = () =>
-  init()
-    .then(fetchDevices)
-    .then(() => (el("devices").style.display = "block"))
-    .catch((e) => console.error(e))
+fetchDevices().then(() => (el("devices").style.display = "block")).catch(console.error)
 
 el("in-add").onclick = () => addDevice("in", "inputs").catch(console.error)
 el("out-add").onclick = () => addDevice("out", "outputs").catch(console.error)
+el("play").onclick = () =>
+  fetch("/play", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ gain: Number(el("play-gain").value) || 1 }),
+  }).catch(console.error)
+el("cal").onclick = () =>
+  fetch("/calibrate", { method: "POST" }).catch(console.error)
 const wsPort = 8134
 const dot = () => el("ws")
 const paint = (c) => (dot().style.background = c)
@@ -139,8 +131,6 @@ const cap = (prev, next, rate) => {
   return out
 }
 const capAll = (prev, next, rate) => next.map((n, i) => cap(prev[i] || new Float32Array(), n, rate))
-const mult = (arrs, g) =>
-  g === 1 ? arrs : arrs.map((a) => { const o = new Float32Array(a.length); for (let i = 0; i < a.length; i++) o[i] = a[i] * g; return o })
 const draw = (c, data) => {
   if (!c) return
   const ctx = c.getContext("2d")
@@ -170,16 +160,23 @@ const render = (boxId, arrs) => {
 }
 const waves = { input: [], output: [], aec: [] }
 const onDebug = (d) => {
-  const rate = Number(d.rate) || Number(el("rate").value) || 48000
-  const g = Number(el("gain").value) || 0
-  waves.output = capAll(waves.output, mult(split16(new Int16Array(buf(d.output)), d.out_ch || 1), g), rate)
-  waves.input = capAll(waves.input, mult(split16(new Int16Array(buf(d.input)), d.in_ch || 1), g), rate)
-  waves.aec = capAll(waves.aec, mult(splitf(new Float32Array(buf(d.aec)), d.in_ch || 1), g), rate)
+  const rate = Number(d.rate) || 16000
+  waves.output = capAll(waves.output, splitf(new Float32Array(buf(d.output)), d.out_ch || 1), rate)
+  waves.input = capAll(waves.input, splitf(new Float32Array(buf(d.input)), d.in_ch || 1), rate)
+  waves.aec = capAll(waves.aec, splitf(new Float32Array(buf(d.aec)), d.in_ch || 1), rate)
   el("waves").style.display = "block"
   render("wave-out", waves.output)
   render("wave-in", waves.input)
   render("wave-aec", waves.aec)
 }
+const setGain = (g) =>
+  fetch("/gain", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ gain: g }),
+  }).catch(console.error)
+el("gain").oninput = (e) => setGain(Number(e.target.value) || 1)
+setGain(Number(el("gain").value) || 1)
 const connect = () => {
   const ws = new WebSocket(url())
   ws.onopen = () => paint("#3f3")
