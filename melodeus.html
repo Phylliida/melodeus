@@ -8,6 +8,7 @@
 <label>target sample rate <input id="rate" type="number" value="48000"></label>
 <label>frame size <input id="frame" type="number" value="160"></label>
 <label>filter length <input id="filter" type="number" value="2048"></label>
+<label>gain <input id="gain" type="range" min="0" max="50" value="1"></label>
 <button id="init">init aec</button>
 <div id="devices" style="display:none">
   <div>
@@ -25,5 +26,10 @@
     <button id="out-add">add output</button>
   </div>
   <div id="added"></div>
+</div>
+<div id="waves" style="display:none;margin-top:8px">
+  <div>output</div><div id="wave-out"></div>
+  <div>input</div><div id="wave-in"></div>
+  <div>aec</div><div id="wave-aec"></div>
 </div>
 <script type="module" src="/js/melodeus.js"></script>

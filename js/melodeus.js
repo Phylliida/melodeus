@@ -106,29 +106,93 @@ el("init").onclick = () =>
 
 el("in-add").onclick = () => addDevice("in", "inputs").catch(console.error)
 el("out-add").onclick = () => addDevice("out", "outputs").catch(console.error)
-const wsPort = 8134;
+const wsPort = 8134
 const dot = () => el("ws")
 const paint = (c) => (dot().style.background = c)
 const url = () => `${location.protocol === "https:" ? "wss" : "ws"}://${location.hostname}:${wsPort}`
-const ping = (ws, miss = 0) =>
-  miss >= 3 ? ws.close() : ws.readyState === WebSocket.OPEN && (ws.send("ping"), setTimeout(() => ping(ws, miss + 1), 200))
-const connect = () => {
-  console.log("Connecting to ws");
-  const ws = new WebSocket(url())
-  ws.onopen = () => {
-    console.log("Connected to ws");
-    paint("#3f3");
-  };
-  ws.onmessage = () => {
-    console.log("message to ws");
-    paint("#3f3");
+const buf = (s) => Uint8Array.from(atob(s || ""), (c) => c.charCodeAt(0)).buffer
+const split16 = (a, ch) => {
+  if (!ch) return []
+  const f = Math.floor(a.length / ch)
+  return Array.from({ length: ch }, (_, c) => {
+    const out = new Float32Array(f)
+    for (let i = 0; i < f; i++) out[i] = a[i * ch + c] / 32768
+    return out
+  })
+}
+const splitf = (a, ch) => {
+  if (!ch) return []
+  const f = Math.floor(a.length / ch)
+  return Array.from({ length: ch }, (_, c) => {
+    const out = new Float32Array(f)
+    for (let i = 0; i < f; i++) out[i] = a[i * ch + c]
+    return out
+  })
+}
+const cap = (prev, next, rate) => {
+  const max = Math.max(1, Math.floor(rate * 2))
+  const len = Math.min(max, prev.length + next.length)
+  const out = new Float32Array(len)
+  const keep = Math.max(0, len - next.length)
+  if (keep) out.set(prev.slice(prev.length - keep))
+  out.set(next.slice(next.length - Math.min(next.length, len)), keep)
+  return out
+}
+const capAll = (prev, next, rate) => next.map((n, i) => cap(prev[i] || new Float32Array(), n, rate))
+const mult = (arrs, g) =>
+  g === 1 ? arrs : arrs.map((a) => { const o = new Float32Array(a.length); for (let i = 0; i < a.length; i++) o[i] = a[i] * g; return o })
+const draw = (c, data) => {
+  if (!c) return
+  const ctx = c.getContext("2d")
+  if (!ctx) return
+  ctx.clearRect(0, 0, c.width, c.height)
+  if (!data.length) return
+  const mid = c.height / 2
+  const step = Math.max(1, Math.floor(data.length / c.width))
+  ctx.beginPath()
+  for (let x = 0, i = 0; x < c.width && i < data.length; x++, i += step) {
+    const y = mid - data[i] * (mid * 0.9)
+    x ? ctx.lineTo(x, y) : ctx.moveTo(x, y)
   }
-  const stop = () => {
-    console.log("Error ws");
-    paint("#f33");
-  };
+  ctx.stroke()
+}
+const render = (boxId, arrs) => {
+  const box = el(boxId)
+  if (!box) return
+  while (box.children.length > arrs.length) box.lastChild.remove()
+  while (box.children.length < arrs.length) {
+    const c = document.createElement("canvas")
+    c.width = 640
+    c.height = 80
+    box.appendChild(c)
+  }
+  arrs.forEach((a, i) => draw(box.children[i], a))
+}
+const waves = { input: [], output: [], aec: [] }
+const onDebug = (d) => {
+  const rate = Number(d.rate) || Number(el("rate").value) || 48000
+  const g = Number(el("gain").value) || 0
+  waves.output = capAll(waves.output, mult(split16(new Int16Array(buf(d.output)), d.out_ch || 1), g), rate)
+  waves.input = capAll(waves.input, mult(split16(new Int16Array(buf(d.input)), d.in_ch || 1), g), rate)
+  waves.aec = capAll(waves.aec, mult(splitf(new Float32Array(buf(d.aec)), d.in_ch || 1), g), rate)
+  el("waves").style.display = "block"
+  render("wave-out", waves.output)
+  render("wave-in", waves.input)
+  render("wave-aec", waves.aec)
+}
+const connect = () => {
+  const ws = new WebSocket(url())
+  ws.onopen = () => paint("#3f3")
+  ws.onmessage = (ev) => {
+    try {
+      const data = JSON.parse(ev.data)
+      if (data.type === "debug") onDebug(data)
+    } catch (e) {}
+    paint("#3f3")
+  }
+  const stop = () => paint("#f33")
   ws.onclose = stop
   ws.onerror = stop
 }
+paint("#ff0")
 connect()
-

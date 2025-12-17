@@ -3,6 +3,7 @@ import errno
 from os import getenv
 from pathlib import Path
 import threading
+import base64, json
 from flask import Flask, jsonify, request
 import websockets
 import melaec3
@@ -18,22 +19,56 @@ DEFAULT_FRAME = 160
 WS_PORT = int(getenv("MELODEUS_WS_PORT", "8134"))
 
 connections = set()
+outputs = {}
+
+def enc(buf: bytes) -> str:
+    return base64.b64encode(bytes(buf)).decode()
+
+
+async def broadcast(msg: str):
+    dead = []
+    for ws in list(connections):
+        try:
+            await ws.send(msg)
+        except Exception:
+            dead.append(ws)
+    for ws in dead:
+        connections.discard(ws)
+
+
+async def pump_debug():
+    while True:
+        if stream:
+            try:
+                i, o, a, _, _ = await stream.update_debug()
+                await asyncio.sleep(0.001) # yield so ws can go
+                payload = {
+                    "type": "debug",
+                    "rate": stream.config.target_sample_rate,
+                    "in_ch": stream.num_input_channels,
+                    "out_ch": stream.num_output_channels,
+                    "input": enc(i),
+                    "output": enc(o),
+                    "aec": enc(a),
+                }
+                await broadcast(json.dumps(payload))
+            except Exception as e:
+                print("debug err", e)
+                await asyncio.sleep(0.05)
+        else:
+            await asyncio.sleep(0.05)
+
+
 async def websocketServer(websocket):
     connections.add(websocket)
-    client_addr = None
     try:
-        print(f"🔌 UI client connected from {client_addr}")
-        while True:
-            client_addr = websocket.remote_address
-            await websocket.send("200")
-    except websockets.exceptions.ConnectionClosed:
-        connections.remove(websocket)
-        pass
+        await websocket.wait_closed()
     finally:
-        print(f"🔌 UI client disconnected from {client_addr}")
+        connections.discard(websocket)
 
 async def serve_websocket():
     await websockets.serve(websocketServer, "0.0.0.0", WS_PORT)
+    asyncio.create_task(pump_debug())
     await asyncio.Event().wait()
 
 def start_ws():
@@ -107,6 +142,7 @@ def index():
 @app.post("/aec")
 def init_aec():
     global stream
+    outputs.clear()
     payload = request.get_json(silent=True) or {}
     try:
         rate = grab_int(payload, "target_sample_rate")
@@ -137,7 +173,7 @@ def devices():
 
 
 @app.post("/device")
-def add_device():
+async def add_device():
     if stream is None:
         return jsonify(error="aec not initialized"), 400
     payload = request.get_json(silent=True) or {}
@@ -156,9 +192,9 @@ def add_device():
     if cfg is None:
         return jsonify(error="config not found"), 404
     if kind == "input":
-        stream.add_input_device(cfg)
+        await stream.add_input_device(cfg)
     else:
-        stream.add_output_device(cfg)
+        outputs[(host, device, rate, ch, fmt)] = await stream.add_output_device(cfg)
     return jsonify(
         ok=True,
         added={
@@ -192,6 +228,7 @@ def remove_device():
         stream.remove_input_device(cfg)
     else:
         stream.remove_output_device(cfg)
+        outputs.pop((host, device, int(rate), int(ch), str(fmt)), None)
     return jsonify(ok=True, removed=payload)
 
 
