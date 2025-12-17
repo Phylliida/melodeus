@@ -150,8 +150,12 @@ const draw = (c, data) => {
   if (!c) return
   const ctx = c.getContext("2d")
   if (!ctx) return
+  const color = getComputedStyle(document.documentElement).getPropertyValue("--wave-accent").trim() || "#7dd3fc"
   ctx.clearRect(0, 0, c.width, c.height)
   if (!data.length) return
+  ctx.strokeStyle = color
+  ctx.lineWidth = 1.5
+  ctx.lineJoin = "round"
   const mid = c.height / 2
   const step = Math.max(1, Math.floor(data.length / c.width))
   ctx.beginPath()
@@ -168,7 +172,9 @@ const render = (boxId, arrs) => {
   while (box.children.length < arrs.length) {
     const c = document.createElement("canvas")
     c.width = 640
-    c.height = 80
+    c.height = 40
+    c.style.width = "100%"
+    c.style.height = "48px"
     box.appendChild(c)
   }
   arrs.forEach((a, i) => draw(box.children[i], a))

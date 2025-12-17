@@ -1,34 +1,413 @@
 <!doctype html>
-<meta charset="utf-8">
-<title>melodeus</title>
-<div style="display:flex;align-items:center;gap:8px;margin-bottom:8px">
-  <div id="ws" style="width:16px;height:16px;border-radius:50%;background:#f33;box-shadow:0 0 6px #f33"></div>
-  <span>websocket</span>
-</div>
-<label>gain <input id="gain" type="range" min="0" max="50" value="1"></label>
-<label>play gain <input id="play-gain" type="range" min="0" max="50" value="1"></label>
-<button id="play">play sample</button>
-<button id="cal">calibrate</button>
-<div id="devices" style="display:none">
-  <div>
-    input device <select id="in-dev"></select>
-    ch <select id="in-ch"></select>
-    rate <select id="in-rate"></select>
-    fmt <select id="in-fmt"></select>
-    <button id="in-add">add input</button>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>melodeus</title>
+  <style>
+    :root {
+      --bg: #050915;
+      --panel: rgba(16, 22, 40, 0.9);
+      --panel-strong: rgba(20, 30, 52, 0.9);
+      --text: #e7edf7;
+      --muted: #9fb3d1;
+      --accent: #7dd3fc;
+      --accent-2: #a6f3d6;
+      --border: rgba(255, 255, 255, 0.08);
+      --shadow: 0 12px 40px rgba(0, 0, 0, 0.45);
+      --wave-accent: #7dd3fc;
+    }
+
+    * {
+      box-sizing: border-box;
+    }
+
+    body {
+      margin: 0;
+      font-family: "Space Grotesk", "Segoe UI", sans-serif;
+      background:
+        radial-gradient(120% 120% at 15% 20%, rgba(125, 211, 252, 0.1), transparent),
+        radial-gradient(100% 100% at 80% 0%, rgba(166, 243, 214, 0.1), transparent),
+        #050915;
+      color: var(--text);
+      min-height: 100vh;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      padding: 28px;
+    }
+
+    .layout {
+      width: min(1100px, 100%);
+      margin: 0 auto;
+      display: flex;
+      flex-direction: column;
+      gap: 16px;
+    }
+
+    .panel {
+      background: var(--panel);
+      border: 1px solid var(--border);
+      border-radius: 16px;
+      padding: 16px 18px;
+      box-shadow: var(--shadow);
+      backdrop-filter: blur(6px);
+    }
+
+    h1, h2 {
+      margin: 0;
+      letter-spacing: 0.3px;
+    }
+
+    h1 {
+      font-size: 28px;
+    }
+
+    h2 {
+      font-size: 18px;
+      color: var(--text);
+    }
+
+    .eyebrow {
+      text-transform: uppercase;
+      letter-spacing: 0.16em;
+      font-size: 11px;
+      color: var(--accent);
+      margin-bottom: 4px;
+    }
+
+    .muted {
+      color: var(--muted);
+      font-size: 13px;
+    }
+
+    .label {
+      font-weight: 700;
+      color: var(--text);
+      letter-spacing: 0.02em;
+    }
+
+    .status-row {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+      flex-wrap: wrap;
+    }
+
+    .title-block {
+      display: flex;
+      flex-direction: column;
+      gap: 4px;
+    }
+
+    .ws-block {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      background: var(--panel-strong);
+      padding: 10px 12px;
+      border-radius: 12px;
+      border: 1px solid var(--border);
+      box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.04);
+    }
+
+    #ws.ws-dot {
+      width: 16px;
+      height: 16px;
+      border-radius: 50%;
+      background: linear-gradient(135deg, var(--accent), #45b5f4);
+      box-shadow:
+        0 0 0 6px rgba(125, 211, 252, 0.08),
+        0 0 12px rgba(125, 211, 252, 0.7);
+    }
+
+    .controls-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+      gap: 12px;
+    }
+
+    .slider {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+      padding: 12px;
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      background: var(--panel-strong);
+    }
+
+    .slider input[type="range"] {
+      width: 180px;
+      accent-color: var(--accent);
+    }
+
+    .actions {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 10px;
+      margin-top: 12px;
+    }
+
+    button {
+      border: 1px solid transparent;
+      background: linear-gradient(135deg, var(--accent), var(--accent-2));
+      color: #04121c;
+      padding: 10px 16px;
+      border-radius: 12px;
+      font-weight: 700;
+      cursor: pointer;
+      transition: transform 0.1s ease, box-shadow 0.2s ease, opacity 0.2s ease;
+      box-shadow: 0 8px 20px rgba(125, 211, 252, 0.35);
+    }
+
+    button:hover {
+      transform: translateY(-1px);
+      opacity: 0.95;
+    }
+
+    button:active {
+      transform: translateY(0);
+      box-shadow: 0 4px 10px rgba(0, 0, 0, 0.4);
+    }
+
+    button.ghost {
+      background: transparent;
+      color: var(--text);
+      border: 1px solid var(--border);
+      box-shadow: none;
+    }
+
+    label {
+      display: flex;
+      flex-direction: column;
+      gap: 4px;
+      color: var(--text);
+      font-size: 14px;
+    }
+
+    select, input[type="range"] {
+      background: var(--panel);
+      border: 1px solid var(--border);
+      color: var(--text);
+      padding: 8px 10px;
+      border-radius: 10px;
+      font-size: 14px;
+    }
+
+    select {
+      width: 100%;
+    }
+
+    .section-head {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 8px;
+      flex-wrap: wrap;
+      margin-bottom: 10px;
+    }
+
+    .pill {
+      padding: 6px 10px;
+      border-radius: 999px;
+      border: 1px solid var(--border);
+      background: var(--panel-strong);
+      font-size: 12px;
+      color: var(--muted);
+      text-transform: uppercase;
+      letter-spacing: 0.08em;
+    }
+
+    .pill.accent {
+      border-color: rgba(125, 211, 252, 0.4);
+      color: var(--accent);
+    }
+
+    .device-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(320px, 1fr));
+      gap: 12px;
+    }
+
+    .device-col {
+      display: flex;
+      flex-direction: column;
+      gap: 10px;
+      padding: 12px;
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      background: var(--panel-strong);
+    }
+
+    .select-row {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(120px, 1fr));
+      gap: 8px;
+      align-items: end;
+    }
+
+    #added {
+      margin-top: 12px;
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+    }
+
+    #added > div {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 8px;
+      padding: 10px 12px;
+      border-radius: 10px;
+      background: var(--panel-strong);
+      border: 1px solid var(--border);
+      font-size: 14px;
+    }
+
+    #waves {
+      display: none;
+    }
+
+    #devices {
+      display: none;
+    }
+
+    .wave-grid {
+      display: flex;
+      flex-direction: column;
+      gap: 14px;
+    }
+
+    .wave-col {
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+    }
+
+    .wave-title {
+      font-weight: 700;
+      color: var(--muted);
+      text-transform: uppercase;
+      letter-spacing: 0.08em;
+      font-size: 12px;
+    }
+
+    .wave-stack {
+      display: flex;
+      flex-direction: column;
+      gap: 6px;
+    }
+
+    canvas {
+      width: 100%;
+      height: 48px;
+      border-radius: 10px;
+      background: linear-gradient(135deg, rgba(125, 211, 252, 0.12), rgba(10, 16, 30, 0.9));
+      border: 1px solid var(--border);
+      box-shadow:
+        inset 0 1px 0 rgba(255, 255, 255, 0.05),
+        0 8px 20px rgba(0, 0, 0, 0.25);
+    }
+  </style>
+</head>
+<body>
+  <div class="layout">
+    <header class="panel status-row">
+      <div class="title-block">
+        <div class="eyebrow">melodeus</div>
+        <h1>Realtime console</h1>
+        <div class="muted">Monitor and tune the audio pipeline in dark mode.</div>
+      </div>
+      <div class="ws-block">
+        <div id="ws" class="ws-dot"></div>
+        <div>
+          <div class="label">WebSocket</div>
+          <small class="muted">live status</small>
+        </div>
+      </div>
+    </header>
+
+    <section class="panel">
+      <div class="section-head">
+        <h2>Controls</h2>
+        <span class="pill">Gains &amp; actions</span>
+      </div>
+      <div class="controls-grid">
+        <label class="slider">
+          <div>
+            <div class="label">Gain</div>
+            <div class="muted">Input capture boost</div>
+          </div>
+          <input id="gain" type="range" min="0" max="50" value="1">
+        </label>
+        <label class="slider">
+          <div>
+            <div class="label">Play gain</div>
+            <div class="muted">Sample playback loudness</div>
+          </div>
+          <input id="play-gain" type="range" min="0" max="50" value="1">
+        </label>
+      </div>
+      <div class="actions">
+        <button id="play" class="ghost">Play sample</button>
+        <button id="cal">Calibrate</button>
+      </div>
+    </section>
+
+    <section class="panel" id="devices" style="display:none">
+      <div class="section-head">
+        <h2>Devices</h2>
+        <span class="pill">Available endpoints</span>
+      </div>
+      <div class="device-grid">
+        <div class="device-col">
+          <div class="label">Input device</div>
+          <div class="select-row">
+            <label>device <select id="in-dev"></select></label>
+            <label>ch <select id="in-ch"></select></label>
+            <label>rate <select id="in-rate"></select></label>
+            <label>fmt <select id="in-fmt"></select></label>
+          </div>
+          <button id="in-add">Add input</button>
+        </div>
+        <div class="device-col">
+          <div class="label">Output device</div>
+          <div class="select-row">
+            <label>device <select id="out-dev"></select></label>
+            <label>ch <select id="out-ch"></select></label>
+            <label>rate <select id="out-rate"></select></label>
+            <label>fmt <select id="out-fmt"></select></label>
+          </div>
+          <button id="out-add">Add output</button>
+        </div>
+      </div>
+      <div id="added"></div>
+    </section>
+
+    <section class="panel" id="waves" style="display:none">
+      <div class="section-head">
+        <h2>Waveforms</h2>
+        <span class="pill accent">Live debug</span>
+      </div>
+      <div class="wave-grid">
+        <div class="wave-col">
+          <div class="wave-title">Output</div>
+          <div id="wave-out" class="wave-stack"></div>
+        </div>
+        <div class="wave-col">
+          <div class="wave-title">Input</div>
+          <div id="wave-in" class="wave-stack"></div>
+        </div>
+        <div class="wave-col">
+          <div class="wave-title">AEC</div>
+          <div id="wave-aec" class="wave-stack"></div>
+        </div>
+      </div>
+    </section>
   </div>
-  <div>
-    output device <select id="out-dev"></select>
-    ch <select id="out-ch"></select>
-    rate <select id="out-rate"></select>
-    fmt <select id="out-fmt"></select>
-    <button id="out-add">add output</button>
-  </div>
-  <div id="added"></div>
-</div>
-<div id="waves" style="display:none;margin-top:8px">
-  <div>output</div><div id="wave-out" style="display:flex;flex-direction:column;gap:4px"></div>
-  <div>input</div><div id="wave-in" style="display:flex;flex-direction:column;gap:4px"></div>
-  <div>aec</div><div id="wave-aec" style="display:flex;flex-direction:column;gap:4px"></div>
-</div>
-<script type="module" src="/js/melodeus.js"></script>
+  <script type="module" src="/js/melodeus.js"></script>
+</body>
+</html>
