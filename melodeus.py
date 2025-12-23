@@ -1,11 +1,12 @@
 import asyncio
 import errno
-from os import getenv
-from pathlib import Path
-import threading
 import base64, json
 import wave, array
 import json as jsonlib
+import atexit
+import threading
+from os import getenv
+from pathlib import Path
 from flask import Flask, jsonify, request
 import websockets
 import melaec3
@@ -22,14 +23,66 @@ DEFAULT_FRAME = 160
 DEFAULT_FILTER = 1600
 WS_PORT = int(getenv("MELODEUS_WS_PORT", "8134"))
 STATE_FILE = root / "last_devices.json"
+RECORD_AEC = getenv("MELODEUS_RECORD_AEC", "0") == "1"
+AEC_WAV_PATH = Path(getenv("MELODEUS_RECORD_PATH", str(root / "aec_recording.wav")))
 
 connections = set()
 global outputs
 outputs = {}
 play_streams = []
 stream_lock = threading.Lock()
+aec_lock = threading.Lock()
+aec_writer = None
+aec_writer_channels = None
+
+
+
 def enc(buf: bytes) -> str:
     return base64.b64encode(bytes(buf)).decode()
+
+def close_aec_writer():
+    global aec_writer, aec_writer_channels
+    if aec_writer:
+        try:
+            aec_writer.close()
+        except Exception:
+            pass
+    aec_writer = None
+    aec_writer_channels = None
+
+
+atexit.register(close_aec_writer)
+def record_aec_audio(aec_bytes: bytes, sample_rate: int, channels: int):
+    """
+    Append AEC output to a WAV file (16-bit PCM). Enabled via MELODEUS_RECORD_AEC=1.
+    """
+    if not RECORD_AEC or not aec_bytes:
+        return
+    if len(aec_bytes) % 4 != 0:
+        return
+    ch = max(1, channels)
+    floats = array.array("f")
+    floats.frombytes(aec_bytes)
+    if len(floats) % ch != 0:
+        ch = 1  # fallback to mono if counts don't line up
+    ints = array.array(
+        "h",
+        (
+            max(-32768, min(32767, int(max(-1.0, min(1.0, s)) * 32767.0)))
+            for s in floats
+        ),
+    )
+    global aec_writer, aec_writer_channels
+    if aec_writer is None or aec_writer_channels != ch:
+        close_aec_writer()
+        AEC_WAV_PATH.parent.mkdir(parents=True, exist_ok=True)
+        w = wave.open(str(AEC_WAV_PATH), "wb")
+        w.setnchannels(ch)
+        w.setsampwidth(2)  # 16-bit PCM
+        w.setframerate(sample_rate)
+        aec_writer = w
+        aec_writer_channels = ch
+    aec_writer.writeframes(ints.tobytes())
 
 
 async def broadcast(msg: str):
@@ -45,10 +98,10 @@ async def broadcast(msg: str):
 
 async def pump_debug():
     while True:
-        if stream:
+                if stream:
             try:
                 with stream_lock:
-                    i, o, a, _, _ = await stream.update_debug()
+                    i, o, a, _, _, vad = await stream.update_debug_vad()
                     rate = stream.config.target_sample_rate
                     in_ch = stream.num_input_channels
                     out_ch = stream.num_output_channels
@@ -62,6 +115,7 @@ async def pump_debug():
                     "output": enc(o),
                     "aec": enc(a),
                 }
+                record_aec_audio(a, rate, in_ch or 1)
                 await broadcast(json.dumps(payload))
             except Exception as e:
                 print("debug err", e)
