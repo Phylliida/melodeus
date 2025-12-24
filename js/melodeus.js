@@ -8,6 +8,10 @@ const label = (d) => `${d.host}/${d.device}`
 let devices = { inputs: [], outputs: [] }
 let added = []
 let last = {}
+const themeColor = (name, fallback) => {
+  const val = getComputedStyle(document.documentElement).getPropertyValue(name)
+  return (val && val.trim()) || fallback
+}
 
 const refresh = (prefix, key) => {
   const dev = devices[key][Number(el(`${prefix}-dev`).value) || 0]
@@ -111,8 +115,12 @@ el("play").onclick = () =>
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ gain: Number(el("play-gain").value) || 1 }),
   }).catch(console.error)
-el("cal").onclick = () =>
-  fetch("/calibrate", { method: "POST" }).catch(console.error)
+el("cal").onclick = () => {
+  showOverlay(true)
+  fetch("/calibrate", { method: "POST" })
+    .catch(console.error)
+    .finally(() => showOverlay(false))
+}
 const wsPort = 8134
 const dot = () => el("ws")
 const paint = (c) => (dot().style.background = c)
@@ -136,36 +144,54 @@ const splitf = (a, ch) => {
     return out
   })
 }
-const cap = (prev, next, rate) => {
+const capTyped = (prev, next, rate, Ctor) => {
   const max = Math.max(1, Math.floor(rate * 2))
   const len = Math.min(max, prev.length + next.length)
-  const out = new Float32Array(len)
+  const out = new Ctor(len)
   const keep = Math.max(0, len - next.length)
   if (keep) out.set(prev.slice(prev.length - keep))
-  out.set(next.slice(next.length - Math.min(next.length, len)), keep)
+  const copyLen = Math.min(next.length, len - keep)
+  out.set(next.slice(next.length - copyLen), keep)
   return out
 }
-const capAll = (prev, next, rate) => next.map((n, i) => cap(prev[i] || new Float32Array(), n, rate))
-const draw = (c, data) => {
+const capAll = (prev, next, rate, Ctor) => next.map((n, i) => capTyped(prev[i] || new Ctor(), n, rate, Ctor))
+const draw = (c, data, mask) => {
   if (!c) return
   const ctx = c.getContext("2d")
   if (!ctx) return
-  const color = getComputedStyle(document.documentElement).getPropertyValue("--wave-accent").trim() || "#7dd3fc"
   ctx.clearRect(0, 0, c.width, c.height)
   if (!data.length) return
-  ctx.strokeStyle = color
-  ctx.lineWidth = 1.5
-  ctx.lineJoin = "round"
   const mid = c.height / 2
   const step = Math.max(1, Math.floor(data.length / c.width))
+  const idle = themeColor("--wave-accent", "#7dd3fc")
+  const speech = themeColor("--accent-2", "#a6f3d6")
+  let lastState = mask?.length ? Boolean(mask[0]) : false
+  let started = false
+  ctx.lineWidth = 1.5
+  ctx.lineJoin = "round"
+  ctx.strokeStyle = lastState ? speech : idle
   ctx.beginPath()
   for (let x = 0, i = 0; x < c.width && i < data.length; x++, i += step) {
+    const idx = Math.min(mask?.length ? mask.length - 1 : 0, Math.floor(i))
+    const state = mask?.length ? Boolean(mask[idx]) : false
+    if (state !== lastState && started) {
+      ctx.stroke()
+      ctx.beginPath()
+      ctx.strokeStyle = state ? speech : idle
+      started = false
+    }
     const y = mid - data[i] * (mid * 0.9)
-    x ? ctx.lineTo(x, y) : ctx.moveTo(x, y)
+    if (!started) {
+      ctx.moveTo(x, y)
+      started = true
+    } else {
+      ctx.lineTo(x, y)
+    }
+    lastState = state
   }
-  ctx.stroke()
+  if (started) ctx.stroke()
 }
-const render = (boxId, arrs) => {
+const render = (boxId, arrs, masks = []) => {
   const box = el(boxId)
   if (!box) return
   while (box.children.length > arrs.length) box.lastChild.remove()
@@ -177,18 +203,29 @@ const render = (boxId, arrs) => {
     c.style.height = "48px"
     box.appendChild(c)
   }
-  arrs.forEach((a, i) => draw(box.children[i], a))
+  arrs.forEach((a, i) => draw(box.children[i], a, masks[i]))
 }
 const waves = { input: [], output: [], aec: [] }
+const masks = { input: [], output: [], aec: [] }
 const onDebug = (d) => {
   const rate = Number(d.rate) || 16000
-  waves.output = capAll(waves.output, splitf(new Float32Array(buf(d.output)), d.out_ch || 1), rate)
-  waves.input = capAll(waves.input, splitf(new Float32Array(buf(d.input)), d.in_ch || 1), rate)
-  waves.aec = capAll(waves.aec, splitf(new Float32Array(buf(d.aec)), d.in_ch || 1), rate)
+  const outChunks = splitf(new Float32Array(buf(d.output)), d.out_ch || 1)
+  const inChunks = splitf(new Float32Array(buf(d.input)), d.in_ch || 1)
+  const aecChunks = splitf(new Float32Array(buf(d.aec)), d.in_ch || 1)
+  waves.output = capAll(waves.output, outChunks, rate, Float32Array)
+  waves.input = capAll(waves.input, inChunks, rate, Float32Array)
+  waves.aec = capAll(waves.aec, aecChunks, rate, Float32Array)
+  const vadFlags = Array.isArray(d.vad) ? d.vad : []
+  const aecMasks = aecChunks.map((chunk, idx) => {
+    const m = new Uint8Array(chunk.length)
+    if (vadFlags[idx]) m.fill(1)
+    return m
+  })
+  masks.aec = capAll(masks.aec, aecMasks, rate, Uint8Array)
   el("waves").style.display = "block"
   render("wave-out", waves.output)
   render("wave-in", waves.input)
-  render("wave-aec", waves.aec)
+  render("wave-aec", waves.aec, masks.aec)
 }
 const setGain = (g) =>
   fetch("/gain", {
@@ -196,9 +233,33 @@ const setGain = (g) =>
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ gain: g }),
   }).catch(console.error)
-el("gain").oninput = (e) => setGain(Number(e.target.value) || 1)
+const clampGain = (v) => {
+  const n = Number(v)
+  if (!Number.isFinite(n)) return 1
+  return Math.max(0, Math.min(50, n))
+}
+const applyGain = (val) => {
+  const g = clampGain(val)
+  el("gain").value = g
+  const text = el("gain-text")
+  if (text) text.value = g
+  setGain(g)
+}
+el("gain").oninput = (e) => applyGain(e.target.value)
+const gainText = el("gain-text")
+if (gainText) {
+  gainText.onchange = (e) => applyGain(e.target.value)
+  gainText.onkeyup = (e) => {
+    if (e.key === "Enter") applyGain(e.target.value)
+  }
+}
+const overlay = el("overlay")
+const showOverlay = (on) => {
+  if (!overlay) return
+  overlay.style.display = on ? "flex" : "none"
+}
 Promise.all([fetchLast(), fetchDevices()])
-  .then(() => setGain(Number(el("gain").value) || 1))
+  .then(() => applyGain(el("gain").value))
   .catch(console.error)
 const connect = () => {
   const ws = new WebSocket(url())

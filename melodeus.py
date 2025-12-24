@@ -20,10 +20,12 @@ AUDIO_BUF = 20
 RESAMPLE_Q = 5
 TARGET_RATE = 16000
 DEFAULT_FRAME = 160
+DEFAULT_OUTPUT_FRAME = 16
 DEFAULT_FILTER = 1600
 WS_PORT = int(getenv("MELODEUS_WS_PORT", "8134"))
 STATE_FILE = root / "last_devices.json"
 RECORD_AEC = getenv("MELODEUS_RECORD_AEC", "0") == "1"
+RECORD_AEC = "1"
 AEC_WAV_PATH = Path(getenv("MELODEUS_RECORD_PATH", str(root / "aec_recording.wav")))
 
 connections = set()
@@ -98,7 +100,7 @@ async def broadcast(msg: str):
 
 async def pump_debug():
     while True:
-                if stream:
+        if stream:
             try:
                 with stream_lock:
                     i, o, a, _, _, vad = await stream.update_debug_vad()
@@ -114,6 +116,7 @@ async def pump_debug():
                     "input": enc(i),
                     "output": enc(o),
                     "aec": enc(a),
+                    "vad": vad,
                 }
                 record_aec_audio(a, rate, in_ch or 1)
                 await broadcast(json.dumps(payload))
@@ -216,7 +219,7 @@ def find_config(kind: str, host: str, device: str, rate: int, ch: int, fmt: str)
             num_calibration_packets=CALIBRATION,
             audio_buffer_seconds=AUDIO_BUF,
             resampler_quality=RESAMPLE_Q,
-            frame_size=DEFAULT_FRAME,
+            frame_size=DEFAULT_OUTPUT_FRAME,
         )
     )
     for devs in groups:
@@ -248,7 +251,7 @@ def devices():
         num_calibration_packets=CALIBRATION,
         audio_buffer_seconds=AUDIO_BUF,
         resampler_quality=RESAMPLE_Q,
-        frame_size=DEFAULT_FRAME,
+        frame_size=DEFAULT_OUTPUT_FRAME,
     )
     return jsonify(inputs=pack(ins), outputs=pack(outs))
 
