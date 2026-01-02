@@ -6,7 +6,16 @@ from deepgram.extensions.types.sockets import (
     ListenV2TurnInfoEvent,
 )
 import traceback
-
+import numpy as np
+import asyncio
+from typing import Any
+import time
+import datetime
+import uuid
+from titanet_voice_fingerprinting import (
+    TitaNetVoiceFingerprinter,
+    WordTiming
+)
 
 def float_to_int16_bytes(audio: np.ndarray) -> bytes:
     """Convert float32 samples in [-1, 1] to signed 16-bit PCM bytes."""
@@ -14,6 +23,24 @@ def float_to_int16_bytes(audio: np.ndarray) -> bytes:
         return b""
     clipped = np.clip(audio, -1.0, 1.0)
     return (clipped * 32767.0).astype(np.int16).tobytes()
+
+
+@dataclass
+class STTResult:
+    """Result from speech-to-text recognition."""
+    text: str
+    confidence: float
+    is_final: bool
+    is_edit: bool
+    message_id: str
+    speaker_id: Optional[int] = None
+    speaker_name: Optional[str] = None
+    timestamp: datetime = field(default_factory=datetime.now)
+    raw_data: Optional[Dict[str, Any]] = None
+
+class CallbackEventType(StrEnum):
+    ADD_CALLBACK = "add callback"
+    REMOVE_CALLBACK = "remove callback"
 
 class AsyncSTT(object):
     def __init__(self, deepgram_api_key, audio_system):
@@ -28,8 +55,11 @@ class AsyncSTT(object):
         self.current_turn_history = []
         self.current_turn_autosent_transcript = None
         self.last_sent_message_uuid = None
+        self.callbacks = []
+        self.num_audio_frames_recieved = 0
+        self.callback_queue = asyncio.Queue(maxsize=0)
         self.deepgram_task = asyncio.create_task(self.deepgram_processor())
-        
+        return self
 
     async def __aexit__(self, exc_type, exc, tb):
         self.deepgram_task.cancel()
@@ -46,7 +76,7 @@ class AsyncSTT(object):
         while True:
             try:
                 deepgram = AsyncDeepgramClient(api_key=self.deepgram_api_key)
-                async with self.deepgram.listen.v2.connect(
+                async with deepgram.listen.v2.connect(
                     model="flux-general-en",
                     encoding="linear16",
                     sample_rate="16000",
@@ -56,7 +86,7 @@ class AsyncSTT(object):
                     connection.on(EventType.MESSAGE, self.deepgram_on_message)
                     connection.on(EventType.ERROR, self.deepgram_error)
                     connection.on(EventType.CLOSE, self.deepgram_close)
-                    def audio_callback(audio_input_data, audio_output_data, aec_input_data, channel_vads):
+                    async def audio_callback(audio_input_data, audio_output_data, aec_input_data, channel_vads):
                         # if we have any input channels available and aec detected something, mix them
                         # alternatively we could run deepgram per channel but that would be more expensive
                         if len(aec_input_data) > 0 and len(aec_input_data[0]) > 0 and any(channel_vads):
@@ -76,6 +106,9 @@ class AsyncSTT(object):
                                 self.num_audio_frames_recieved += len(audio_np)
                             
                             await connection.send_media(mixed_data_pcm)
+                            
+
+
                     self.audio_system.add_callback(audio_callback)
                     await connection.start_listening()
                     self.audio_system.remove_callback(audio_callback)
@@ -86,6 +119,28 @@ class AsyncSTT(object):
                 print("Error in deepgram")
                 print(traceback.print_exc())
 
+    def add_callback(self, callback):
+        self.callback_queue.put((CallbackEventType.ADD_CALLBACK, callback))
+
+    def remove_callback(self, callback):
+        self.callback_queue.put((CallbackEventType.REMOVE_CALLBACK, callback))
+
+    def _update_callbacks(self):
+        callback_message_type = None
+        callback = None
+        try:
+            callback_message_type, callback = self.callback_queue.get_nowait()
+        except asyncio.QueueEmpty:
+            pass
+        else:
+            self.callback_queue.task_done() # weird stuff callback queue wants
+        if callback_message_type is not None:
+            match callback_message_type:
+                case ProcessingEvent.ADD_CALLBACK:
+                    self.callbacks.append(callback)
+                case ProcessingEvent.REMOVE_CALLBACK:
+                    if callback in self.callbacks:
+                        self.callbacks.remove(callback)
 
     def deepgram_on_open(self, *args, **kwargs):
         """Handle Deepgram connection open."""
@@ -95,7 +150,7 @@ class AsyncSTT(object):
         """Dispatch Deepgram websocket messages to the appropriate handlers."""
         try:
             if isinstance(message, ListenV2TurnInfoEvent):
-                await self.deepgram_turn(stt_state, message)
+                await self.deepgram_turn(message)
             elif isinstance(message, ListenV2FatalErrorEvent):
                 print(f"❌ Deepgram fatal error ({message.code}): {message.description}")
             elif isinstance(message, ListenV2ConnectedEvent):
@@ -104,6 +159,14 @@ class AsyncSTT(object):
         except Exception as dispatch_error:
             print(f"⚠️  Failed to process Deepgram message:")
             print(traceback.print_exc())
+
+    async def _emit_stt(self, stt):
+        self._update_callbacks()
+        for callback in self.callbacks:
+            if asyncio.iscoroutinefunction(callback):
+                await callback(stt)
+            else:
+                callback(stt)
 
     async def deepgram_turn(self, message: ListenV2TurnInfoEvent):
         event_type = (message.event or "").lower()
@@ -172,8 +235,7 @@ class AsyncSTT(object):
                 timestamp = datetime.now(),
                 message_id = message_uuid,
             )
-            await self._emit_event(
-                STTEventType.UTTERANCE_COMPLETE,
+            await self._emit_stt(
                 stt_result
             )
         if turn_idx != self.prev_turn_idx:
@@ -200,8 +262,7 @@ class AsyncSTT(object):
                 is_edit = False
             ) 
 
-            await self._emit_event(
-                STTEventType.INTERIM_RESULT,
+            await self._emit_stt(
                 stt_result
             )
             print(f"Turn {turn_idx} {transcript}")
@@ -211,6 +272,14 @@ class AsyncSTT(object):
         #if event_type in {"turn_end", "speech_ended", "speech_end"}:
         #    self._on_utterance_end(message)
 
+
+    def has_meaningful_change(self, a, b):
+        if a is None or b is None: return True
+        ignore=set("*\n\r\t #@\\/.,?!-+[]()&%$:")
+        # only send edited if it actually changed content (we don't care about punctuation diffs)
+        a_cleaned, _ = _collapse(a, ignore)
+        b_cleaned, _ = _collapse(b, ignore)
+        return a_cleaned.lower() != b_cleaned.lower()
 
     async def deepgram_error(self, error: Exception):
         """Handle errors emitted by the Deepgram websocket client."""

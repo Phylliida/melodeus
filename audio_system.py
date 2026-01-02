@@ -78,8 +78,8 @@ class AudioSystem(object):
             self.output_devices = {}
             self.processing_queue_send = asyncio.Queue(maxsize=0)
             self.processing_queue_recieve = asyncio.Queue(maxsize=0)
-            self.processing_task = asyncio.create_task(self.audio_processing_task())
             self.callbacks = []
+            self.processing_task = asyncio.create_task(self.audio_processing_task())
             if self.resume:
                 await self.load_cached_config()
         except Exception as e:
