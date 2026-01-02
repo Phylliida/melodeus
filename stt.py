@@ -8,6 +8,9 @@ from deepgram.extensions.types.sockets import (
 import traceback
 
 class AsyncSTT(object):
+    def __init__(self, deepgram_api_key, audio_system):
+        self.deepgram_api_key = deepgram_api_key
+        self.audio_system = audio_system
 
     async def __aenter__(self):
         self.prev_turn_idx = None
@@ -21,8 +24,8 @@ class AsyncSTT(object):
     async def __aexit__(self, exc_type, exc, tb):
         
 
-    async def initialize_deepgram(self, api_key):
-        deepgram = AsyncDeepgramClient(api_key=config.api_key)
+    async def start_stt_process(self):
+        deepgram = AsyncDeepgramClient(api_key=self.deepgram_api_key)
         async with self.deepgram.listen.v2.connect(
             model="flux-general-en",
             encoding="linear16",
@@ -34,7 +37,12 @@ class AsyncSTT(object):
             connection.on(EventType.ERROR, self.deepgram_error)
             connection.on(EventType.CLOSE, self.deepgram_close)
             await connection.start_listening()
+            def callback(audio_input_data, audio_output_data, aec_input_data, channel_vads):
 
+            await "sleep forever"
+
+    async def initialize_deepgram(self, api_key):
+        
 
     def deepgram_on_open(self, *args, **kwargs):
         """Handle Deepgram connection open."""

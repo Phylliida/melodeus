@@ -35,18 +35,26 @@ class AudioSystemState:
     input_devices: List[dict] = field(default_factory=list)
     output_devices: List[dict] = field(default_factory=list)
 
-    def to_json(self) -> str:
+    def to_dict(self) -> dict:
         return {
             'input_devices': [cfg.to_dict() for cfg in self.input_devices],
             'output_devices': [cfg.to_dict() for cfg in self.output_devices]
         }
+    def to_json(self) -> str:
+        return json.dumps(self.to_dict())
 
     @classmethod
-    def from_json(cls, raw: str) -> "AudioSystemState":
-        res = cls(**json.loads(raw))
+    def from_dict(self, dict_values) -> "AudioSystemState":
+        res = cls(**dict_values)
         res.input_devices = [InputDeviceConfig.from_dict(cfg) for cfg in res.input_devices]
         res.output_devices = [OutputDeviceConfig.from_dict(cfg) for cfg in res.output_devices]
         return res
+
+    @classmethod
+    def from_json(cls, raw: str) -> "AudioSystemState":
+        dict_values = json.loads(raw)
+        return cls.from_dict(dict_values)
+        
 
 class ProcessingEvent(StrEnum):
     CALIBRATE = "calibrate"
@@ -74,9 +82,8 @@ class AudioSystem(object):
             self.callbacks = []
             if self.resume:
                 await self.load_cached_config()
-
         except Exception as e:
-            print("Failed to pre-init aec")
+            print("Failed to initialize audio system")
             print(traceback.print_exc())
         return self
 
@@ -148,21 +155,23 @@ class AudioSystem(object):
     async def load_cached_config(self):
         self.state = AudioSystemState()
         try:
-            self.state = AudioSystemState.from_json(STATE_FILE.read_text())
-        except Exception:
-            pass
-        for input_device_config in self.state.input_devices:
+            old_state = AudioSystemState.from_json(STATE_FILE.read_text())
+        except:
+            print("Failed to load previous audio system data, starting fresh")
+            print(traceback.print_exc())
+            return
+        for input_device_config in old_state.input_devices:
             await self.add_input_device(input_device_config)
-        for output_device_config in self.state.output_devices:
+        for output_device_config in old_state.output_devices:
             await self.add_output_device(output_device_config)
     
     def write_cached_config(self):
         try:
-            STATE_FILE.write_text(jsonlib.dumps(self.state.to_json()))
+            STATE_FILE.write_text(self.state.to_json())
         except Exception as e:
             print("failed to write state", e)
 
-    async def get_supported_device_configs(self):
+    def get_supported_device_configs(self):
         ins = melaec3.get_supported_input_configs(
             history_len=HISTORY_LEN,
             num_calibration_packets=CALIBRATION_PACKETS,
@@ -184,32 +193,32 @@ class AudioSystem(object):
 
     async def add_input_device(self, device_config):
         if device_config not in self.state.input_devices:
-            await self.stream.add_input_device(device_config)
-            self.state.input_devices.append(device_config)
+            await self.stream.add_input_device(device_config.clone_config())
+            self.state.input_devices.append(device_config.clone_config())
             self.write_cached_config()
     
     async def remove_input_device(self, device_config):
         if device_config in self.state.input_devices:
-            await self.stream.remove_input_device(device_config)
-            self.state.input_devices.remove(device_config)
+            await self.stream.remove_input_device(device_config.clone_config())
+            self.state.input_devices.remove(device_config.clone_config())
             self.write_cached_config()
     
     async def add_output_device(self, device_config):
         if device_config not in self.state.output_devices:
-            output_device = await self.stream.add_output_device(device_config)
-            self.output_devices[device_config] = output_device
-            self.state.output_devices.append(device_config)
+            output_device = await self.stream.add_output_device(device_config.clone_config())
+            self.output_devices[device_config.clone_config()] = output_device
+            self.state.output_devices.append(device_config.clone_config())
             self.write_cached_config()
     
     async def remove_output_device(self, device_config):
         if device_config in self.state.output_devices:
-            await self.stream.remove_output_device(device_config)
+            await self.stream.remove_output_device(device_config.clone_config())
             if device_config in self.output_devices:
-                del self.output_devices[device_config]
-            self.state.output_devices.remove(device_config)
+                del self.output_devices[device_config.clone_config()]
+            self.state.output_devices.remove(device_config.clone_config())
             self.write_cached_config()
     
-    async def get_connected_output_devices(self):
+    def get_connected_output_devices(self):
         return [config.clone_config() for config in self.output_devices.keys()]
 
     async def begin_audio_stream(self, output_device, channels, channel_map, audio_buffer_seconds, sample_rate, resampler_quality):
