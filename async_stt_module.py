@@ -315,9 +315,6 @@ class AsyncSTTStreamer:
                     print(f"Sync callback error for {event_type}")
                     print(traceback.print_exc())
 
-    def _on_utterance_end(self, message: ListenV2TurnInfoEvent):
-        pass
-
     def _on_close(self, *args, **kwargs):
         """Handle Deepgram connection open."""
         print("🔗 Deepgram STT connection closed")
