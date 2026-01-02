@@ -7,6 +7,14 @@ from deepgram.extensions.types.sockets import (
 )
 import traceback
 
+
+def float_to_int16_bytes(audio: np.ndarray) -> bytes:
+    """Convert float32 samples in [-1, 1] to signed 16-bit PCM bytes."""
+    if audio.size == 0:
+        return b""
+    clipped = np.clip(audio, -1.0, 1.0)
+    return (clipped * 32767.0).astype(np.int16).tobytes()
+
 class AsyncSTT(object):
     def __init__(self, deepgram_api_key, audio_system):
         self.deepgram_api_key = deepgram_api_key
@@ -20,29 +28,64 @@ class AsyncSTT(object):
         self.current_turn_history = []
         self.current_turn_autosent_transcript = None
         self.last_sent_message_uuid = None
+        self.deepgram_task = asyncio.create_task(self.deepgram_processor())
+        
 
     async def __aexit__(self, exc_type, exc, tb):
-        
+        self.deepgram_task.cancel()
+        try:
+            await self.deepgram_task
+        except asyncio.CancelledError:
+            pass # intentional
+        except:
+            print(f"Error in deepgram task cancel")
+            print(traceback.print_exc())
+        del self.deepgram_task
 
-    async def start_stt_process(self):
-        deepgram = AsyncDeepgramClient(api_key=self.deepgram_api_key)
-        async with self.deepgram.listen.v2.connect(
-            model="flux-general-en",
-            encoding="linear16",
-            sample_rate="16000",
-            eot_timeout_ms="500",
-            keyterm=params['keyterm']) as connection:
-            connection.on(EventType.OPEN, self.deepgram_on_open)
-            connection.on(EventType.MESSAGE, self.deepgram_on_message)
-            connection.on(EventType.ERROR, self.deepgram_error)
-            connection.on(EventType.CLOSE, self.deepgram_close)
-            await connection.start_listening()
-            def callback(audio_input_data, audio_output_data, aec_input_data, channel_vads):
+    async def deepgram_processor(self):
+        while True:
+            try:
+                deepgram = AsyncDeepgramClient(api_key=self.deepgram_api_key)
+                async with self.deepgram.listen.v2.connect(
+                    model="flux-general-en",
+                    encoding="linear16",
+                    sample_rate="16000",
+                    eot_timeout_ms="500",
+                    keyterm=params['keyterm']) as connection:
+                    connection.on(EventType.OPEN, self.deepgram_on_open)
+                    connection.on(EventType.MESSAGE, self.deepgram_on_message)
+                    connection.on(EventType.ERROR, self.deepgram_error)
+                    connection.on(EventType.CLOSE, self.deepgram_close)
+                    def audio_callback(audio_input_data, audio_output_data, aec_input_data, channel_vads):
+                        # if we have any input channels available and aec detected something, mix them
+                        # alternatively we could run deepgram per channel but that would be more expensive
+                        if len(aec_input_data) > 0 and len(aec_input_data[0]) > 0 and any(channel_vads):
+                            mixed_data = np.zeros(len(aec_input_data[0]))
+                            for i in range(len(channel_vads)):
+                                vad = channel_vads[i]
+                                if vad:
+                                    mixed_data += np.array(aec_input_data[i])
+                            mixed_data_pcm = float_to_int16_bytes(mixed_data)
+                            if self.voice_fingerprinter is not None:
+                                self.voice_fingerprinter.add_audio_chunk(
+                                    mixed_data,
+                                    self.num_audio_frames_recieved,
+                                    self.config.sample_rate,
+                                )
+                                # increment frame count
+                                self.num_audio_frames_recieved += len(audio_np)
+                            
+                            await connection.send_media(mixed_data_pcm)
+                    self.audio_system.add_callback(audio_callback)
+                    await connection.start_listening()
+                    self.audio_system.remove_callback(audio_callback)
+            except asyncio.CancelledError:
+                print("Deepgram processs canceled")
+                break
+            except:
+                print("Error in deepgram")
+                print(traceback.print_exc())
 
-            await "sleep forever"
-
-    async def initialize_deepgram(self, api_key):
-        
 
     def deepgram_on_open(self, *args, **kwargs):
         """Handle Deepgram connection open."""
