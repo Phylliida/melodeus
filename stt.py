@@ -10,6 +10,7 @@ import traceback
 import numpy as np
 import asyncio
 from dataclasses import dataclass, field
+from config_loader import STTConfig
 import sys
 if sys.version_info >= (3, 11):
     from enum import StrEnum
@@ -23,9 +24,11 @@ from titanet_voice_fingerprinting import (
     TitaNetVoiceFingerprinter,
     WordTiming
 )
+from asysnc_callback_manager import AsyncCallbackManager
 
 # hardcoded for deepgram and other stuff
 SAMPLE_RATE = 16000
+
 
 # with a of like "*wow hi there* I like bees" and b of "wow hi there i like" this will give us index of end of like inside a
 def _collapse(s: str, ignore: set[str]):
@@ -59,20 +62,17 @@ class STTResult:
     timestamp: datetime = field(default_factory=datetime.now)
     raw_data: Optional[Dict[str, Any]] = None
 
-class CallbackEventType(StrEnum):
-    ADD_CALLBACK = "add callback"
-    REMOVE_CALLBACK = "remove callback"
-
 class AsyncSTT(object):
-    def __init__(self, deepgram_api_key, keyterm, enable_speaker_id, audio_system):
-        self.deepgram_api_key = deepgram_api_key
-        self.keyterm = keyterm
+    def __init__(self, audio_system, config: STTConfig):
+        self.deepgram_api_key = config.deepgram_api_key
+        self.keyterm = config.keyterm
         self.audio_system = audio_system
         self.voice_fingerprinter = None
-        if enable_speaker_id:
+        self.stt_callbacks = AsyncCallbackManager()
+        if config.enable_speaker_id:
             try:
                 # Enable debug audio saving if debug_speaker_data is enabled
-                self.voice_fingerprinter = TitaNetVoiceFingerprinter(speakers_config, debug_save_audio=False)
+                self.voice_fingerprinter = TitaNetVoiceFingerprinter(config.speaker_id, debug_save_audio=False)
                 print(f"🤖 TitaNet voice fingerprinting enabled")
             except Exception as e:
                 print(f"⚠️  TitaNet voice fingerprinting failed to initialize: {e}")
@@ -94,6 +94,12 @@ class AsyncSTT(object):
             print(f"Error in deepgram task cancel")
             print(traceback.print_exc())
         del self.deepgram_task
+
+    async def add_callback(self, callback):
+        await self.stt_callbacks.add_callback(callback)
+
+    async def remove_callback(self, callback):
+        await self.stt_callbacks.remove_callback(callback)
 
     async def deepgram_processor(self):
         self.connection = None
@@ -119,7 +125,6 @@ class AsyncSTT(object):
                     
                     await connection.send_media(mixed_data_pcm)
             except:
-        await self.audio_system.add_callback(audio_callback)
         while True:
             try:
                 self.prev_turn_idx = None
@@ -158,29 +163,6 @@ class AsyncSTT(object):
                 await self.audio_system.remove_callback(audio_callback)
 
 
-    async def add_callback(self, callback):
-        await self.callback_queue.put((CallbackEventType.ADD_CALLBACK, callback))
-
-    async def remove_callback(self, callback):
-        await self.callback_queue.put((CallbackEventType.REMOVE_CALLBACK, callback))
-
-    def _update_callbacks(self):
-        callback_message_type = None
-        callback = None
-        try:
-            callback_message_type, callback = self.callback_queue.get_nowait()
-        except asyncio.QueueEmpty:
-            pass
-        else:
-            self.callback_queue.task_done() # weird stuff callback queue wants
-        if callback_message_type is not None:
-            match callback_message_type:
-                case CallbackEventType.ADD_CALLBACK:
-                    self.callbacks.append(callback)
-                case CallbackEventType.REMOVE_CALLBACK:
-                    if callback in self.callbacks:
-                        self.callbacks.remove(callback)
-
     def deepgram_on_open(self, *args, **kwargs):
         """Handle Deepgram connection open."""
         print("🔗 Deepgram STT connection opened")
@@ -199,13 +181,7 @@ class AsyncSTT(object):
             print(traceback.print_exc())
 
     async def _emit_stt(self, stt):
-        self._update_callbacks()
-        for callback in self.callbacks:
-            if asyncio.iscoroutinefunction(callback):
-                await callback(stt)
-            else:
-                callback(stt)
-
+        await self.stt_callbacks(stt)
     async def deepgram_turn(self, message: ListenV2TurnInfoEvent):
         event_type = (message.event or "").lower()
         turn_idx = message.turn_index

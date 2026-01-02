@@ -12,6 +12,7 @@ else:
 import json as jsonlib
 import traceback
 import asyncio
+from asysnc_callback_manager import AsyncCallbackManager
 
 # these are hardcoded to make aec3 happy
 TARGET_RATE = 16000
@@ -19,48 +20,14 @@ DEFAULT_FRAME = 160
 DEFAULT_FILTER = 1600
 
 # We could change these, but no need to
-DEFAULT_OUTPUT_FRAME = 16
-HISTORY_LEN = 100
-CALIBRATION_PACKETS = 20
-AUDIO_BUF_SECONDS = 20
-RESAMPLE_QUALITY = 5
-
-
 root = Path(__file__).parent
 STATE_FILE = root / "last_devices.json"
 
 
-@dataclass(slots=True)
-class AudioSystemState:
-    input_devices: List[dict] = field(default_factory=list)
-    output_devices: List[dict] = field(default_factory=list)
-
-    def to_dict(self) -> dict:
-        return {
-            'input_devices': [cfg.to_dict() for cfg in self.input_devices],
-            'output_devices': [cfg.to_dict() for cfg in self.output_devices]
-        }
-    def to_json(self) -> str:
-        return json.dumps(self.to_dict())
-
-    @classmethod
-    def from_dict(self, dict_values) -> "AudioSystemState":
-        res = cls(**dict_values)
-        res.input_devices = [InputDeviceConfig.from_dict(cfg) for cfg in res.input_devices]
-        res.output_devices = [OutputDeviceConfig.from_dict(cfg) for cfg in res.output_devices]
-        return res
-
-    @classmethod
-    def from_json(cls, raw: str) -> "AudioSystemState":
-        dict_values = json.loads(raw)
-        return cls.from_dict(dict_values)
-        
 
 class ProcessingEvent(StrEnum):
     CALIBRATE = "calibrate"
     CALIBRATE_DONE = "calibrate done"
-    ADD_CALLBACK = "add callback"
-    REMOVE_CALLBACK = "remove callback"
 
 class AudioSystem(object):
 
@@ -78,7 +45,7 @@ class AudioSystem(object):
             self.output_devices = {}
             self.processing_queue_send = asyncio.Queue(maxsize=0)
             self.processing_queue_recieve = asyncio.Queue(maxsize=0)
-            self.callbacks = []
+            self.callbacks = AsyncCallbackManager()
             self.processing_task = asyncio.create_task(self.audio_processing_task())
             if self.resume:
                 await self.load_cached_config()
@@ -109,10 +76,10 @@ class AudioSystem(object):
         await self.processing_queue_recieve.get()
 
     async def add_callback(self, callback):
-        await self.processing_queue_send.put((ProcessingEvent.ADD_CALLBACK, callback))
+        await self.callbacks.add_callback(callback)
     
     async def remove_callback(self, callback):
-        await self.processing_queue_send.put((ProcessingEvent.REMOVE_CALLBACK, callback))
+        await self.callbacks.remove_callback(callback)
     
     async def audio_processing_task(self):
         try:
@@ -131,19 +98,10 @@ class AudioSystem(object):
                             await self.stream.calibrate(list(self.output_devices.values()), False)
                             # let it know we finished calibration
                             await self.processing_queue_recieve.put(ProcessingEvent.CALIBRATE_DONE)
-                        case ProcessingEvent.ADD_CALLBACK:
-                            self.callbacks.append(processing_message_data)
-                        case ProcessingEvent.REMOVE_CALLBACK:
-                            if processing_message_data in self.callbacks:
-                                self.callbacks.remove(processing_message_data)
                         case _:
                             print(f"Unknown processing message {processing_message}")
                 input_data, output_data, aec_data, _, _, vad = await self.stream.update_debug_vad()  
-                for callback in self.callbacks:
-                    if asyncio.iscoroutinefunction(callback):
-                        await callback(input_data, output_data, aec_data, vad)
-                    else:
-                        callback(input_data, output_data, aec_data, vad)
+                await self.callbacks(input_data, output_data, aec_data, vad)
         except asyncio.CancelledError:
           raise
         except Exception as e:

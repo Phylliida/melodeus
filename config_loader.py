@@ -1,0 +1,78 @@
+
+
+import yaml
+import os
+from dataclasses import dataclass, field
+from typing import Optional, Dict, Any, List
+from pathlib import Path
+from copy import deepcopy
+
+
+@dataclass(slots=True)
+class AudioSystemState:
+    input_devices: List[dict] = field(default_factory=list)
+    output_devices: List[dict] = field(default_factory=list)
+
+    def to_dict(self) -> dict:
+        return {
+            'input_devices': [cfg.to_dict() for cfg in self.input_devices],
+            'output_devices': [cfg.to_dict() for cfg in self.output_devices]
+        }
+    def to_json(self) -> str:
+        return json.dumps(self.to_dict())
+
+    @classmethod
+    def from_dict(self, dict_values) -> "AudioSystemState":
+        res = cls(**dict_values)
+        res.input_devices = [InputDeviceConfig.from_dict(cfg) for cfg in res.input_devices]
+        res.output_devices = [OutputDeviceConfig.from_dict(cfg) for cfg in res.output_devices]
+        return res
+
+    @classmethod
+    def from_json(cls, raw: str) -> "AudioSystemState":
+        dict_values = json.loads(raw)
+        return cls.from_dict(dict_values)
+        
+@dataclass
+class AudioSystemConfig:
+    """Configuration for audio system."""
+    state: AudioSystemState = field(default_factory: AudioSystemState)
+    output_frame_size: int = 16
+    history_len: int = 100
+    calibration_packets: int = 20
+    audio_buf_seconds: int = 20
+    resample_quality: int = 5
+
+
+@dataclass
+class SpeakerProfile:
+    """Configuration for a known speaker."""
+    name: str = ""
+    description: str = ""
+    reference_audio: Optional[str] = None  # Path to reference audio file (30+ seconds)
+
+@dataclass
+class SpeakerRecognitionConfig:
+    """Configuration for speaker recognition settings."""
+    confidence_threshold: float = 0.7
+    learning_mode: bool = True
+    max_speakers: int = 4
+    voice_fingerprint_length: int = 128
+
+@dataclass
+class SpeakersConfig:
+    """Configuration for speaker identification and voice fingerprinting."""
+    profiles: Dict[str, SpeakerProfile] = field(default_factory=dict)
+    recognition: SpeakerRecognitionConfig = field(default_factory=SpeakerRecognitionConfig)
+
+@dataclass
+class STTConfig:
+    """Configuration for text to speech and voice fingerprinting."""
+    deepgram_api_key: str = ""
+    keyterm: str = ""
+    enable_speaker_id: bool = False
+    speaker_id: SpeakersConfig = field(default_factory=SpeakersConfig)
+
+@dataclass
+class MelodeusConfig:
+    stt: STTConfig = field(default_factory=STTConfig)
