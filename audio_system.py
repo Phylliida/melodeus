@@ -34,8 +34,8 @@ class AudioSystem(object):
     '''
     resume restarts audio system with same devices and settings as before
     '''
-    def __init__(self, resume=True):
-        self.resume = resume
+    def __init__(self, config: AudioSystemConfig):
+        self.config = config
     
     async def __aenter__(self):
         try:
@@ -47,8 +47,7 @@ class AudioSystem(object):
             self.processing_queue_recieve = asyncio.Queue(maxsize=0)
             self.callbacks = AsyncCallbackManager()
             self.processing_task = asyncio.create_task(self.audio_processing_task())
-            if self.resume:
-                await self.load_cached_config()
+            await self.load_cached_config()
         except Exception as e:
             print("Failed to initialize audio system")
             print(traceback.print_exc())
@@ -110,17 +109,11 @@ class AudioSystem(object):
         finally:
             pass
 
-    async def load_cached_config(self):
-        self.state = AudioSystemState()
-        try:
-            old_state = AudioSystemState.from_json(STATE_FILE.read_text())
-        except:
-            print("Failed to load previous audio system data, starting fresh")
-            print(traceback.print_exc())
-            return
-        for input_device_config in old_state.input_devices:
+    async def load_cached_config(self, config):
+        self.config = copy.deepcopy(config)
+        for input_device_config in config.loaded_devices.input_devices:
             await self.add_input_device(input_device_config)
-        for output_device_config in old_state.output_devices:
+        for output_device_config in config.loaded_devices.output_devices:
             await self.add_output_device(output_device_config)
     
     def write_cached_config(self):

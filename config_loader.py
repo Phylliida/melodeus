@@ -36,13 +36,12 @@ class AudioSystemState:
 @dataclass
 class AudioSystemConfig:
     """Configuration for audio system."""
-    state: AudioSystemState = field(default_factory: AudioSystemState)
-    output_frame_size: int = 16
-    history_len: int = 100
-    calibration_packets: int = 20
-    audio_buf_seconds: int = 20
-    resample_quality: int = 5
-
+    loaded_devices: AudioSystemState = field(default_factory: AudioSystemState)
+    output_device_frame_size: int = 16   # frame size (samples); keep very small (~1–2 ms) to avoid skips and allow quick interruption
+    history_len: int = 100        # chunks buffered for alignment when frames drop or clocks drift; ~100 is typical
+    calibration_packets: int = 20 # packets gathered before emitting audio; higher improves timing but slows startup
+    audio_buf_seconds: int = 20   # seconds of input audio buffered; only a few seconds are usually needed
+    resample_quality: int = 5     # Speex resampler quality level
 
 @dataclass
 class SpeakerProfile:
