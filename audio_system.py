@@ -88,18 +88,15 @@ class AudioSystem(object):
         del self.processing_task
         del self.callbacks
 
-
     async def calibrate(self):
-        # This has a subtle bug where later calls can finish before earlier ones
-        # We'll allow that, but do keep it in mind
         await self.processing_queue_send.put((ProcessingEvent.CALIBRATE, None))
-        await self.processing_queue_recieve.recieve()
+        await self.processing_queue_recieve.get()
 
-    def add_callback(self, callback):
-        self.processing_queue_send.put((ProcessingEvent.ADD_CALLBACK, callback))
+    async def add_callback(self, callback):
+        await self.processing_queue_send.put((ProcessingEvent.ADD_CALLBACK, callback))
     
-    def remove_callback(self, callback):
-        self.processing_queue_send.put((ProcessingEvent.REMOVE_CALLBACK, callback))
+    async def remove_callback(self, callback):
+        await self.processing_queue_send.put((ProcessingEvent.REMOVE_CALLBACK, callback))
     
     async def audio_processing_task(self):
         try:
@@ -117,7 +114,7 @@ class AudioSystem(object):
                         case ProcessingEvent.CALIBRATE:
                             await self.stream.calibrate(list(self.output_devices.values()), False)
                             # let it know we finished calibration
-                            self.processing_queue_recieve.put(ProcessingEvent.CALIBRATE_DONE)
+                            await self.processing_queue_recieve.put(ProcessingEvent.CALIBRATE_DONE)
                         case ProcessingEvent.ADD_CALLBACK:
                             self.callbacks.append(processing_message_data)
                         case ProcessingEvent.REMOVE_CALLBACK:
@@ -142,8 +139,7 @@ class AudioSystem(object):
     def load_cached_config(self):
         self.state = AudioSystemState()
         try:
-            json_data = jsonlib.loads(STATE_FILE.read_text())
-            self.state = AudioSystemState.from_json(json_data)
+            self.state = AudioSystemState.from_json(STATE_FILE.read_text())
         except Exception:
             pass
         for input_device_config in self.state.input_devices:
@@ -203,7 +199,7 @@ class AudioSystem(object):
             self.write_cached_config()
     
     def get_connected_output_devices(self):
-        return [config.clone_config() for config in self.state.output_devices.keys()]
+        return [config.clone_config() for config in self.output_devices.keys()]
 
     def begin_audio_stream(self, output_device, channels, channel_map, audio_buffer_seconds, sample_rate, resampler_quality):
         return self.output_devices[output_device].begin_audio_stream(
@@ -213,6 +209,9 @@ class AudioSystem(object):
             sample_rate,
             resampler_quality
         )
+
+    def interrupt_all_audio_streams(self, output_device):
+        interrupt_all_streams
 
     def end_audio_stream(self, output_device, stream):
         self.output_devices[output_device].end_audio_stream(stream)
