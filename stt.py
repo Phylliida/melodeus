@@ -1,5 +1,6 @@
 
 from deepgram import AsyncDeepgramClient
+from deepgram.core.events import EventType
 from deepgram.extensions.types.sockets import (
     ListenV2ConnectedEvent,
     ListenV2FatalErrorEvent,
@@ -8,7 +9,13 @@ from deepgram.extensions.types.sockets import (
 import traceback
 import numpy as np
 import asyncio
-from typing import Any
+from dataclasses import dataclass, field
+import sys
+if sys.version_info >= (3, 11):
+    from enum import StrEnum
+else:
+    from backports.strenum import StrEnum
+from typing import Any, Dict, Optional
 import time
 from datetime import datetime
 import uuid
@@ -17,6 +24,8 @@ from titanet_voice_fingerprinting import (
     WordTiming
 )
 
+# hardcoded for deepgram and other stuff
+SAMPLE_RATE = 16000
 
 # with a of like "*wow hi there* I like bees" and b of "wow hi there i like" this will give us index of end of like inside a
 def _collapse(s: str, ignore: set[str]):
@@ -55,21 +64,22 @@ class CallbackEventType(StrEnum):
     REMOVE_CALLBACK = "remove callback"
 
 class AsyncSTT(object):
-    def __init__(self, deepgram_api_key, keyterm, audio_system):
+    def __init__(self, deepgram_api_key, keyterm, enable_speaker_id, audio_system):
         self.deepgram_api_key = deepgram_api_key
         self.keyterm = keyterm
         self.audio_system = audio_system
+        self.voice_fingerprinter = None
+        if enable_speaker_id:
+            try:
+                # Enable debug audio saving if debug_speaker_data is enabled
+                self.voice_fingerprinter = TitaNetVoiceFingerprinter(speakers_config, debug_save_audio=False)
+                print(f"🤖 TitaNet voice fingerprinting enabled")
+            except Exception as e:
+                print(f"⚠️  TitaNet voice fingerprinting failed to initialize: {e}")
+                print(traceback.print_exc())
 
     async def __aenter__(self):
-        self.prev_turn_idx = None
-        self.prev_transcript = ""
-        self.prev_audio_window_start = 0
-        self.prev_audio_window_end = 0
-        self.current_turn_history = []
-        self.current_turn_autosent_transcript = None
-        self.last_sent_message_uuid = None
         self.callbacks = []
-        self.num_audio_frames_recieved = 0
         self.callback_queue = asyncio.Queue(maxsize=0)
         self.deepgram_task = asyncio.create_task(self.deepgram_processor())
         return self
@@ -86,51 +96,67 @@ class AsyncSTT(object):
         del self.deepgram_task
 
     async def deepgram_processor(self):
+        self.connection = None
+        async def audio_callback(audio_input_data, audio_output_data, aec_input_data, channel_vads):
+            try:
+                # if we have any input channels available and aec detected something, mix them
+                # alternatively we could run deepgram per channel but that would be more expensive
+                if len(aec_input_data) > 0 and len(aec_input_data[0]) > 0 and any(channel_vads) and self.connection is not None:
+                    mixed_data = np.zeros(len(aec_input_data[0]))
+                    for i in range(len(channel_vads)):
+                        vad = channel_vads[i]
+                        if vad:
+                            mixed_data += np.array(aec_input_data[i])
+                    mixed_data_pcm = float_to_int16_bytes(mixed_data)
+                    if self.voice_fingerprinter is not None:
+                        self.voice_fingerprinter.add_audio_chunk(
+                            mixed_data,
+                            self.num_audio_frames_recieved,
+                            16000,
+                        )
+                        # increment frame count
+                        self.num_audio_frames_recieved += len(mixed_data)
+                    
+                    await connection.send_media(mixed_data_pcm)
+            except:
+        await self.audio_system.add_callback(audio_callback)
         while True:
             try:
+                self.prev_turn_idx = None
+                self.prev_transcript = ""
+                self.prev_audio_window_start = 0
+                self.prev_audio_window_end = 0
+                self.current_turn_history = []
+                self.current_turn_autosent_transcript = None
+                self.last_sent_message_uuid = None
+                self.num_audio_frames_recieved = 0
                 deepgram = AsyncDeepgramClient(api_key=self.deepgram_api_key)
                 async with deepgram.listen.v2.connect(
                     model="flux-general-en",
                     encoding="linear16",
-                    sample_rate="16000",
+                    sample_rate=str(SAMPLE_RATE),
                     eot_timeout_ms="500",
                     keyterm=self.keyterm) as connection:
                     connection.on(EventType.OPEN, self.deepgram_on_open)
                     connection.on(EventType.MESSAGE, self.deepgram_on_message)
                     connection.on(EventType.ERROR, self.deepgram_error)
                     connection.on(EventType.CLOSE, self.deepgram_close)
-                    async def audio_callback(audio_input_data, audio_output_data, aec_input_data, channel_vads):
-                        # if we have any input channels available and aec detected something, mix them
-                        # alternatively we could run deepgram per channel but that would be more expensive
-                        if len(aec_input_data) > 0 and len(aec_input_data[0]) > 0 and any(channel_vads):
-                            mixed_data = np.zeros(len(aec_input_data[0]))
-                            for i in range(len(channel_vads)):
-                                vad = channel_vads[i]
-                                if vad:
-                                    mixed_data += np.array(aec_input_data[i])
-                            mixed_data_pcm = float_to_int16_bytes(mixed_data)
-                            if self.voice_fingerprinter is not None:
-                                self.voice_fingerprinter.add_audio_chunk(
-                                    mixed_data,
-                                    self.num_audio_frames_recieved,
-                                    self.config.sample_rate,
-                                )
-                                # increment frame count
-                                self.num_audio_frames_recieved += len(audio_np)
-                            
-                            await connection.send_media(mixed_data_pcm)
-                            
-
-
-                    self.audio_system.add_callback(audio_callback)
+                    
+                    self.connection = connection
+                    await self.audio_system.add_callback(audio_callback)
                     await connection.start_listening()
-                    self.audio_system.remove_callback(audio_callback)
+                    self.connection = None
+                    await self.audio_system.remove_callback(audio_callback)
             except asyncio.CancelledError:
                 print("Deepgram processs canceled")
                 break
             except:
                 print("Error in deepgram")
                 print(traceback.print_exc())
+            finally:
+                # fine to do this again, only removes if present
+                await self.audio_system.remove_callback(audio_callback)
+
 
     async def add_callback(self, callback):
         await self.callback_queue.put((CallbackEventType.ADD_CALLBACK, callback))
@@ -149,9 +175,9 @@ class AsyncSTT(object):
             self.callback_queue.task_done() # weird stuff callback queue wants
         if callback_message_type is not None:
             match callback_message_type:
-                case ProcessingEvent.ADD_CALLBACK:
+                case CallbackEventType.ADD_CALLBACK:
                     self.callbacks.append(callback)
-                case ProcessingEvent.REMOVE_CALLBACK:
+                case CallbackEventType.REMOVE_CALLBACK:
                     if callback in self.callbacks:
                         self.callbacks.remove(callback)
 
@@ -167,7 +193,6 @@ class AsyncSTT(object):
             elif isinstance(message, ListenV2FatalErrorEvent):
                 print(f"❌ Deepgram fatal error ({message.code}): {message.description}")
             elif isinstance(message, ListenV2ConnectedEvent):
-                # Already handled by EventType.OPEN; nothing additional needed.
                 pass
         except Exception as dispatch_error:
             print(f"⚠️  Failed to process Deepgram message:")
@@ -231,7 +256,7 @@ class AsyncSTT(object):
                     start_time=self.prev_audio_window_start,
                     end_time=self.prev_audio_window_end,
                     confidence=1)
-                user_tag = self.voice_fingerprinter.process_transcript_words(word_timings=[word_timing], sample_rate=self.config.sample_rate)
+                user_tag = self.voice_fingerprinter.process_transcript_words(word_timings=[word_timing], sample_rate=SAMPLE_RATE)
             else:
                 user_tag = "User"
             message_uuid = str(uuid.uuid4()) if send_message else self.last_sent_message_uuid
