@@ -10,12 +10,24 @@ import numpy as np
 import asyncio
 from typing import Any
 import time
-import datetime
+from datetime import datetime
 import uuid
 from titanet_voice_fingerprinting import (
     TitaNetVoiceFingerprinter,
     WordTiming
 )
+
+
+# with a of like "*wow hi there* I like bees" and b of "wow hi there i like" this will give us index of end of like inside a
+def _collapse(s: str, ignore: set[str]):
+    kept = []
+    idx_map = []
+    for idx, ch in enumerate(s):
+        if ch in ignore:
+            continue
+        kept.append(ch)
+        idx_map.append(idx)
+    return "".join(kept), idx_map
 
 def float_to_int16_bytes(audio: np.ndarray) -> bytes:
     """Convert float32 samples in [-1, 1] to signed 16-bit PCM bytes."""
@@ -43,8 +55,9 @@ class CallbackEventType(StrEnum):
     REMOVE_CALLBACK = "remove callback"
 
 class AsyncSTT(object):
-    def __init__(self, deepgram_api_key, audio_system):
+    def __init__(self, deepgram_api_key, keyterm, audio_system):
         self.deepgram_api_key = deepgram_api_key
+        self.keyterm = keyterm
         self.audio_system = audio_system
 
     async def __aenter__(self):
@@ -81,7 +94,7 @@ class AsyncSTT(object):
                     encoding="linear16",
                     sample_rate="16000",
                     eot_timeout_ms="500",
-                    keyterm=params['keyterm']) as connection:
+                    keyterm=self.keyterm) as connection:
                     connection.on(EventType.OPEN, self.deepgram_on_open)
                     connection.on(EventType.MESSAGE, self.deepgram_on_message)
                     connection.on(EventType.ERROR, self.deepgram_error)
@@ -119,11 +132,11 @@ class AsyncSTT(object):
                 print("Error in deepgram")
                 print(traceback.print_exc())
 
-    def add_callback(self, callback):
-        self.callback_queue.put((CallbackEventType.ADD_CALLBACK, callback))
+    async def add_callback(self, callback):
+        await self.callback_queue.put((CallbackEventType.ADD_CALLBACK, callback))
 
-    def remove_callback(self, callback):
-        self.callback_queue.put((CallbackEventType.REMOVE_CALLBACK, callback))
+    async def remove_callback(self, callback):
+        await self.callback_queue.put((CallbackEventType.REMOVE_CALLBACK, callback))
 
     def _update_callbacks(self):
         callback_message_type = None
@@ -287,6 +300,10 @@ class AsyncSTT(object):
         print(f"⚠️ Deepgram websocket error")
         print(error_message)
 
+    def deepgram_close(self, *args, **kwargs):
+        """Handle Deepgram connection open."""
+        print("🔗 Deepgram STT connection closed")
+    
 
 
             
