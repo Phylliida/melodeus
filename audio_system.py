@@ -55,6 +55,12 @@ class ProcessingEvent(StrEnum):
     REMOVE_CALLBACK = "remove callback"
 
 class AudioSystem(object):
+
+    '''
+    resume restarts audio system with same devices and settings as before
+    '''
+    def __init__(self, resume=True):
+        self.resume = resume
     
     async def __aenter__(self):
         try:
@@ -66,6 +72,9 @@ class AudioSystem(object):
             self.processing_queue_recieve = asyncio.Queue(maxsize=0)
             self.processing_task = asyncio.create_task(self.audio_processing_task())
             self.callbacks = []
+            if self.resume:
+                await self.load_cached_config()
+
         except Exception as e:
             print("Failed to pre-init aec")
             print(traceback.print_exc())
@@ -136,16 +145,16 @@ class AudioSystem(object):
         finally:
             pass
 
-    def load_cached_config(self):
+    async def load_cached_config(self):
         self.state = AudioSystemState()
         try:
             self.state = AudioSystemState.from_json(STATE_FILE.read_text())
         except Exception:
             pass
         for input_device_config in self.state.input_devices:
-            self.add_input_device(input_device_config)
+            await self.add_input_device(input_device_config)
         for output_device_config in self.state.output_devices:
-            self.add_output_device(output_device_config)
+            await self.add_output_device(output_device_config)
     
     def write_cached_config(self):
         try:
@@ -153,7 +162,7 @@ class AudioSystem(object):
         except Exception as e:
             print("failed to write state", e)
 
-    def get_supported_device_configs(self):
+    async def get_supported_device_configs(self):
         ins = melaec3.get_supported_input_configs(
             history_len=HISTORY_LEN,
             num_calibration_packets=CALIBRATION_PACKETS,
@@ -175,33 +184,35 @@ class AudioSystem(object):
 
     async def add_input_device(self, device_config):
         if device_config not in self.state.input_devices:
-            await self.stream.add_input_device(device_config.clone_config())
-            self.state.input_devices.append(device_config.clone_config())
+            await self.stream.add_input_device(device_config)
+            self.state.input_devices.append(device_config)
             self.write_cached_config()
     
     async def remove_input_device(self, device_config):
         if device_config in self.state.input_devices:
-            await self.stream.remove_input_device(device_config.clone_config())
-            self.state.input_devices.remove(device_config.clone_config())
+            await self.stream.remove_input_device(device_config)
+            self.state.input_devices.remove(device_config)
             self.write_cached_config()
     
     async def add_output_device(self, device_config):
         if device_config not in self.state.output_devices:
             output_device = await self.stream.add_output_device(device_config)
-            self.output_devices[device_config.clone_config()] = output_device
-            self.state.output_devices.append(device_config.clone_config())
+            self.output_devices[device_config] = output_device
+            self.state.output_devices.append(device_config)
             self.write_cached_config()
     
     async def remove_output_device(self, device_config):
         if device_config in self.state.output_devices:
-            await self.stream.remove_output_device(device_config.clone_config())
-            self.state.output_devices.remove(device_config.clone_config())
+            await self.stream.remove_output_device(device_config)
+            if device_config in self.output_devices:
+                del self.output_devices[device_config]
+            self.state.output_devices.remove(device_config)
             self.write_cached_config()
     
-    def get_connected_output_devices(self):
+    async def get_connected_output_devices(self):
         return [config.clone_config() for config in self.output_devices.keys()]
 
-    def begin_audio_stream(self, output_device, channels, channel_map, audio_buffer_seconds, sample_rate, resampler_quality):
+    async def begin_audio_stream(self, output_device, channels, channel_map, audio_buffer_seconds, sample_rate, resampler_quality):
         return self.output_devices[output_device].begin_audio_stream(
             channels,
             channel_map,
@@ -210,9 +221,9 @@ class AudioSystem(object):
             resampler_quality
         )
 
-    def interrupt_all_audio_streams(self, output_device):
-        interrupt_all_streams
+    async def interrupt_all_audio_streams(self, output_device):
+        self.output_devices[output_device].interrupt_all_streams()
 
-    def end_audio_stream(self, output_device, stream):
+    async def end_audio_stream(self, output_device, stream):
         self.output_devices[output_device].end_audio_stream(stream)
         

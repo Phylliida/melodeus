@@ -8,7 +8,8 @@ from deepgram.extensions.types.sockets import (
 import traceback
 
 class AsyncSTT(object):
-    def __init__(self):
+
+    async def __aenter__(self):
         self.prev_turn_idx = None
         self.prev_transcript = ""
         self.prev_audio_window_start = 0
@@ -17,7 +18,10 @@ class AsyncSTT(object):
         self.current_turn_autosent_transcript = None
         self.last_sent_message_uuid = None
 
-    async def initialize_deepgram(api_key):
+    async def __aexit__(self, exc_type, exc, tb):
+        
+
+    async def initialize_deepgram(self, api_key):
         deepgram = AsyncDeepgramClient(api_key=config.api_key)
         async with self.deepgram.listen.v2.connect(
             model="flux-general-en",
