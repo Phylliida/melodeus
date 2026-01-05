@@ -26,9 +26,9 @@ class AsyncCallbackManager(object):
             self.callback_queue.task_done() # weird stuff callback queue wants
         if callback_message_type is not None:
             match callback_message_type:
-                case ADD_CALLBACK:
+                case "add":
                     self.callbacks.append(callback)
-                case REMOVE_CALLBACK:
+                case "remove":
                     if callback in self.callbacks:
                         self.callbacks.remove(callback)
         for callback in self.callbacks:
