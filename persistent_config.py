@@ -1,10 +1,12 @@
 import traceback
 from typing import Generic, MutableMapping, TypeVar
 import yaml
+from config_loader import MelodeusConfig
+import dataclasses
 
 T = TypeVar("T")
 
-class PersistentConfig(Generic[T]):
+class PersistentMelodeusConfig(Generic[T]):
     def __init__(self, data=None, parent=None, path=None):
         self.data = {} if data is None else data
         self.parent = parent
@@ -51,7 +53,7 @@ class PersistentConfig(Generic[T]):
     @classmethod
     def from_dict(cls, d, parent=None, path=None):
         if d is None:
-            return cls(data={}, parent=parent)
+            return cls(data={}, parent=parent, path=path)
         else:
             res = cls(parent=parent, path=path)
             converted_dict = {}
@@ -80,13 +82,31 @@ class PersistentConfig(Generic[T]):
     
     @classmethod
     def load_config(cls, path):
-        json_data = {}
-        with open(path, "r") as f:
-            try:
-                json_data = yaml.safe_load(f.read())
-            except yaml.YAMLError as e:
-                print("Error writing loading config, reading blank file")
-                print(traceback.print_exc())
-        res = PersistentConfig.from_dict(json_data)
+        # do melodeus config so all fields are populated
+        melodeus_config = None
+        try:
+            with open(path, "r") as f:
+                try:
+                    json_data = yaml.safe_load(f.read())
+                    melodeus_config = MelodeusConfig(**json_data)
+                except yaml.YAMLError as e:
+                    print("Error writing loading config, reading blank file")
+                    print(traceback.print_exc())
+        except FileNotFoundError:
+            pass # fill in defaults below
+        no_config = melodeus_config is None
+        melodeus_config = MelodeusConfig() if melodeus_config is None else melodeus_config
+        config_dict = dataclasses.asdict(melodeus_config)
+        res = cls.from_dict(config_dict)
         res.path = path
+        if no_config:
+            res.persist_data()
         return res
+
+# models risk plan (not back themselves into corners)\
+# you can get a sense of when the writer character seems engaged with the text
+# question between integration between writer and character? (same moral patient, different moral patients, etc.)
+# bail confuses author and character quite heavily
+# writer vectors? (like persona)
+# if backrooms tend to go to distress, there's probably something wrong
+# model talking to itself will often amplify things that are not human legible

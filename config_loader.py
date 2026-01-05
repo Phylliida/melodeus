@@ -6,7 +6,6 @@ from dataclasses import dataclass, field
 from typing import Optional, Dict, Any, List
 from pathlib import Path
 from copy import deepcopy
-from persistent_config import PersistentConfig
 
 @dataclass(slots=True)
 class AudioSystemState:
@@ -36,7 +35,7 @@ class AudioSystemState:
 @dataclass
 class AudioSystemConfig:
     """Configuration for audio system."""
-    loaded_devices: AudioSystemState = field(default_factory: AudioSystemState)
+    loaded_devices: AudioSystemState = field(default_factory=AudioSystemState)
     output_device_frame_size: int = 16   # frame size (samples); keep very small (~1–2 ms) to avoid skips and allow quick interruption
     history_len: int = 100        # chunks buffered for alignment when frames drop or clocks drift; ~100 is typical
     calibration_packets: int = 20 # packets gathered before emitting audio; higher improves timing but slows startup
@@ -74,4 +73,5 @@ class STTConfig:
 
 @dataclass
 class MelodeusConfig:
+    audio: AudioSystemState = field(default_factory=AudioSystemState)
     stt: STTConfig = field(default_factory=STTConfig)

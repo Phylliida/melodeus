@@ -12,7 +12,7 @@ else:
 import json as jsonlib
 import traceback
 import asyncio
-from asysnc_callback_manager import AsyncCallbackManager
+from async_callback_manager import AsyncCallbackManager
 
 # these are hardcoded to make aec3 happy
 TARGET_RATE = 16000
