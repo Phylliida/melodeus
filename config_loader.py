@@ -6,7 +6,7 @@ from dataclasses import dataclass, field
 from typing import Optional, Dict, Any, List
 from pathlib import Path
 from copy import deepcopy
-
+from persistent_config import PersistentConfig
 
 @dataclass(slots=True)
 class AudioSystemState:
