@@ -3,6 +3,7 @@ import json
 import sys
 import melaec3
 from pathlib import Path
+import contextlib
 from typing import List
 from dataclasses import dataclass, field
 if sys.version_info >= (3, 11):
@@ -88,6 +89,7 @@ class AudioSystem(object):
     
     async def audio_processing_task(self):
         try:
+            i = 0
             while True:
                 while not self.processing_queue_send.empty():
                     processing_message, processing_message_data = self.processing_queue_send.get_nowait()
@@ -102,7 +104,9 @@ class AudioSystem(object):
                                 print(f"Unknown processing message {processing_message}")
                 input_data, output_data, aec_data, _, _, vad = await self.stream.update_debug_vad()  
                 await self.callbacks(input_data, output_data, aec_data, vad)
-                await asyncio.sleep(0) # important to give caller chance to call because above things are hungry
+                i += 1
+                if i % 1000 == 0:
+                    await asyncio.sleep(0) # important to give caller chance to call because above things are hungry
         except asyncio.CancelledError:
             raise
         except KeyboardInterrupt:
@@ -111,8 +115,25 @@ class AudioSystem(object):
             print("Error in audio system")
             print(traceback.print_exc())
         finally:
+            await self._shutdown_streams()
             pass
 
+    async def _shutdown_streams(self):
+        """
+        Best-effort stop of active devices so CPAL callbacks halt before the stream is dropped.
+        Leaves state intact so persisted config is not cleared.
+        """
+        if not hasattr(self, "stream"):
+            return
+        # Stop outputs first so any dependent processing halts before inputs.
+        for output_cfg in self.state.output_devices:
+            print(f"removing output {output_cfg}")
+            await self.stream.remove_output_device(output_cfg.clone_config())
+        for input_cfg in self.state.input_devices:
+            print(f"removing input {input_cfg}")
+            await self.stream.remove_input_device(input_cfg.clone_config())
+        self.output_devices.clear()
+    
     async def load_cached_config(self):
         inputs = self.state.input_devices
         for input_device_config in self.state.input_devices:
@@ -149,12 +170,14 @@ class AudioSystem(object):
     async def add_input_device(self, device_config):
         if device_config.clone_config() not in self.state.input_devices:
             await self.stream.add_input_device(device_config.clone_config())
+            print(f"Adding input device {device_config.to_json()}")
             self.state.input_devices.append(device_config.clone_config())
             self.config.persist_data()
     
     async def remove_input_device(self, device_config):
         if device_config.clone_config() in self.state.input_devices:
             await self.stream.remove_input_device(device_config.clone_config())
+            print(f"Removing input device {device_config.to_json()}")
             self.state.input_devices.remove(device_config.clone_config())
             self.config.persist_data()
     

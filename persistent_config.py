@@ -18,11 +18,9 @@ class PersistentMelodeusConfig(Generic[T]):
 
     def __setitem__(self, key, value):
         self.data[key] = value
-        self.persist_data()
 
     def __delitem__(self, key):
         del self.data[key]
-        self.persist_data()
     
     def __getattr__(self, key):
         try:
@@ -36,12 +34,10 @@ class PersistentMelodeusConfig(Generic[T]):
             object.__setattr__(self, key, value)
             return
         self.data[key] = value
-        self.persist_data()
     
     def __delattr__(self, key):
         try:
             del self.data[key]
-            self.persist_data()
         except KeyError:
             raise AttributeError(f"{type(self).__name__!s} has no attribute {key}") from None
     

@@ -5,6 +5,9 @@ from audio_system import AudioSystem
 from melaec3 import InputDeviceConfig, OutputDeviceConfig
 import melaec3
 import asyncio
+import signal
+import threading
+from werkzeug.serving import make_server
 
 root = Path(__file__).parent
 app = Flask(__name__, static_folder=str(root), static_url_path="")
@@ -29,6 +32,16 @@ def _run_coro(coro):
 
 def _device_to_dict(cfg):
     return cfg.to_dict()
+
+
+def _serve_http(stop_event: threading.Event):
+    server = make_server("0.0.0.0", 5000, app)
+    server.timeout = 1
+    try:
+        while not stop_event.is_set():
+            server.handle_request()
+    finally:
+        server.server_close()
 
 
 @app.get("/")
@@ -106,11 +119,29 @@ def select_device():
 async def main():
     global audio_system, loop
     loop = asyncio.get_running_loop()
+    stop_event = asyncio.Event()
+    server_stop = threading.Event()
+
+    def _request_shutdown():
+        stop_event.set()
+
+    for sig in (signal.SIGINT, signal.SIGTERM):
+        try:
+            loop.add_signal_handler(sig, _request_shutdown)
+        except NotImplementedError:
+            signal.signal(sig, lambda *_: _request_shutdown())
+
+    server_thread = threading.Thread(target=_serve_http, args=(server_stop,), daemon=True)
+
     async with AudioSystem(config=config.audio) as audio_system_instance:
         audio_system = audio_system_instance
-        await asyncio.to_thread(
-            app.run, host="0.0.0.0", port=5000, debug=False, use_reloader=False
-        )
+        server_thread.start()
+        try:
+            await stop_event.wait()
+        finally:
+            server_stop.set()
+            server_thread.join(timeout=2)
+            audio_system = None
 
 
 if __name__ == "__main__":
