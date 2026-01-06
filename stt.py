@@ -89,6 +89,8 @@ class AsyncSTT(object):
             await self.deepgram_task
         except asyncio.CancelledError:
             pass # intentional
+        except asyncio.CancelledError:
+            pass # intentional
         except:
             print(f"Error in deepgram task cancel")
             print(traceback.print_exc())

@@ -9,18 +9,17 @@ audio:
       host_id: CoreAudio
       resampler_quality: 5
       sample_format: f32
-      sample_rate: 48000
-    output_devices:
+      sample_rate: 88200
     - audio_buffer_seconds: 20
       calibration_packets: 20
       channels: 2
-      device_name: Built-in Output
-      frame_size: 160
+      device_name: Built-in Microphone
       history_len: 100
       host_id: CoreAudio
       resampler_quality: 5
       sample_format: f32
       sample_rate: 44100
+    output_devices: []
 stt:
   deepgram_api_key: ''
   enable_speaker_id: false
