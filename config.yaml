@@ -9,7 +9,7 @@ audio:
       host_id: CoreAudio
       resampler_quality: 5
       sample_format: f32
-      sample_rate: 44100
+      sample_rate: 48000
     output_devices:
     - audio_buffer_seconds: 20
       calibration_packets: 20

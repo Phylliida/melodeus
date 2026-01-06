@@ -97,7 +97,8 @@ class PersistentMelodeusConfig(Generic[T]):
             with open(path, "r") as f:
                 try:
                     json_data = yaml.safe_load(f.read())
-                    melodeus_config = MelodeusConfig(**json_data)
+                    if json_data is not None:
+                        melodeus_config = MelodeusConfig(**json_data)
                 except yaml.YAMLError as e:
                     print("Error writing loading config, reading blank file")
                     print(traceback.print_exc())

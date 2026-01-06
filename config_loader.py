@@ -1,11 +1,11 @@
-
-
+from melaec3 import InputDeviceConfig, OutputDeviceConfig
 import yaml
 import os
 from dataclasses import dataclass, field
 from typing import Optional, Dict, Any, List
 from pathlib import Path
 from copy import deepcopy
+import json
 
 @dataclass(slots=True)
 class AudioSystemState:
@@ -21,7 +21,7 @@ class AudioSystemState:
         return json.dumps(self.to_dict())
 
     @classmethod
-    def from_dict(self, dict_values) -> "AudioSystemState":
+    def from_dict(cls, dict_values) -> "AudioSystemState":
         res = cls(**dict_values)
         res.input_devices = [InputDeviceConfig.from_dict(cfg) for cfg in res.input_devices]
         res.output_devices = [OutputDeviceConfig.from_dict(cfg) for cfg in res.output_devices]

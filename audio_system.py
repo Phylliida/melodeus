@@ -13,7 +13,7 @@ import json as jsonlib
 import traceback
 import asyncio
 from async_callback_manager import AsyncCallbackManager
-from config_loader import AudioSystemConfig
+from config_loader import AudioSystemConfig, AudioSystemState
 
 # these are hardcoded to make aec3 happy
 TARGET_RATE = 16000
@@ -42,6 +42,8 @@ class AudioSystem(object):
         try:
             stream_cfg = melaec3.AecConfig(target_sample_rate=TARGET_RATE, frame_size=DEFAULT_FRAME, filter_length=DEFAULT_FILTER)
             self.stream = melaec3.AecStream(stream_cfg)
+            # convert it into the form we need
+            self.config.state = AudioSystemState.from_json(self.config.state.to_json())
             self.state = self.config.state
             self.output_devices = {}
             self.processing_queue_send = asyncio.Queue(maxsize=0)
@@ -115,14 +117,14 @@ class AudioSystem(object):
         inputs = self.state.input_devices
         for input_device_config in self.state.input_devices:
             # remove so we can re add it
-            if input_device_config in self.state.input_devices:
-                self.state.input_devices.remove(input_device_config)
-            await self.add_input_device(input_device_config)
+            if input_device_config.clone_config() in self.state.input_devices:
+                self.state.input_devices.remove(input_device_config.clone_config())
+            await self.add_input_device(input_device_config.clone_config())
         for output_device_config in self.state.output_devices:
             # remove so we can re add it
-            if output_device_config in self.state.output_devices:
-                self.state.output_devices.remove(output_device_config)
-            await self.add_output_device(output_device_config)
+            if output_device_config.clone_config() in self.state.output_devices:
+                self.state.output_devices.remove(output_device_config.clone_config())
+            await self.add_output_device(output_device_config.clone_config())
 
     def get_supported_device_configs(self):
         ins = melaec3.get_supported_input_configs(
@@ -145,31 +147,31 @@ class AudioSystem(object):
         }
 
     async def add_input_device(self, device_config):
-        if device_config not in self.state.input_devices:
+        if device_config.clone_config() not in self.state.input_devices:
             await self.stream.add_input_device(device_config.clone_config())
             self.state.input_devices.append(device_config.clone_config())
-            self.state.persist_data()
+            self.config.persist_data()
     
     async def remove_input_device(self, device_config):
-        if device_config in self.state.input_devices:
+        if device_config.clone_config() in self.state.input_devices:
             await self.stream.remove_input_device(device_config.clone_config())
             self.state.input_devices.remove(device_config.clone_config())
-            self.state.persist_data()
+            self.config.persist_data()
     
     async def add_output_device(self, device_config):
-        if device_config not in self.state.output_devices:
+        if device_config.clone_config() not in self.state.output_devices:
             output_device = await self.stream.add_output_device(device_config.clone_config())
             self.output_devices[device_config.clone_config()] = output_device
             self.state.output_devices.append(device_config.clone_config())
-            self.state.persist_data()
+            self.config.persist_data()
     
     async def remove_output_device(self, device_config):
-        if device_config in self.state.output_devices:
+        if device_config.clone_config() in self.state.output_devices:
             await self.stream.remove_output_device(device_config.clone_config())
-            if device_config in self.output_devices:
+            if device_config.clone_config() in self.output_devices:
                 del self.output_devices[device_config.clone_config()]
             self.state.output_devices.remove(device_config.clone_config())
-            self.state.persist_data()
+            self.config.persist_data()
     
     def get_connected_output_devices(self):
         return [config.clone_config() for config in self.output_devices.keys()]
