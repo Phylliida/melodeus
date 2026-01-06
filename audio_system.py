@@ -104,9 +104,7 @@ class AudioSystem(object):
                                 print(f"Unknown processing message {processing_message}")
                 input_data, output_data, aec_data, _, _, vad = await self.stream.update_debug_vad()  
                 await self.callbacks(input_data, output_data, aec_data, vad)
-                i += 1
-                if i % 1000 == 0:
-                    await asyncio.sleep(0) # important to give caller chance to call because above things are hungry
+                await asyncio.sleep(0) # important to give caller chance to call because above things are hungry
         except asyncio.CancelledError:
             raise
         except KeyboardInterrupt:
@@ -128,24 +126,22 @@ class AudioSystem(object):
         # Stop outputs first so any dependent processing halts before inputs.
         for output_cfg in self.state.output_devices:
             print(f"removing output {output_cfg}")
-            await self.stream.remove_output_device(output_cfg.clone_config())
+            await self.stream.remove_output_device(output_cfg.clone_config(), update_config=False)
         for input_cfg in self.state.input_devices:
             print(f"removing input {input_cfg}")
-            await self.stream.remove_input_device(input_cfg.clone_config())
+            await self.stream.remove_input_device(input_cfg.clone_config(), update_config=False)
         self.output_devices.clear()
     
     async def load_cached_config(self):
         inputs = self.state.input_devices
-        for input_device_config in self.state.input_devices:
-            # remove so we can re add it
-            if input_device_config.clone_config() in self.state.input_devices:
-                self.state.input_devices.remove(input_device_config.clone_config())
-            await self.add_input_device(input_device_config.clone_config())
-        for output_device_config in self.state.output_devices:
-            # remove so we can re add it
-            if output_device_config.clone_config() in self.state.output_devices:
-                self.state.output_devices.remove(output_device_config.clone_config())
-            await self.add_output_device(output_device_config.clone_config())
+        outputs = self.state.output_devices
+        # clear so we can re add them
+        self.state.input_devices = []
+        self.state.output_devices = []
+        for input_device_config in inputs:
+            await self.add_input_device(input_device_config.clone_config(), update_config=False)
+        for output_device_config in outputs:
+            await self.add_output_device(output_device_config.clone_config(), update_config=False)
 
     def get_supported_device_configs(self):
         ins = melaec3.get_supported_input_configs(
@@ -167,34 +163,36 @@ class AudioSystem(object):
             "outputs": outs
         }
 
-    async def add_input_device(self, device_config):
+    async def add_input_device(self, device_config, update_config=True):
         if device_config.clone_config() not in self.state.input_devices:
             await self.stream.add_input_device(device_config.clone_config())
             print(f"Adding input device {device_config.to_json()}")
             self.state.input_devices.append(device_config.clone_config())
-            self.config.persist_data()
+            if update_config: self.config.persist_data()
     
-    async def remove_input_device(self, device_config):
+    async def remove_input_device(self, device_config, update_config=True):
         if device_config.clone_config() in self.state.input_devices:
             await self.stream.remove_input_device(device_config.clone_config())
             print(f"Removing input device {device_config.to_json()}")
             self.state.input_devices.remove(device_config.clone_config())
-            self.config.persist_data()
+            if update_config: self.config.persist_data()
     
-    async def add_output_device(self, device_config):
+    async def add_output_device(self, device_config, update_config=True):
         if device_config.clone_config() not in self.state.output_devices:
             output_device = await self.stream.add_output_device(device_config.clone_config())
+            print(f"Adding output device {device_config.to_json()}")
             self.output_devices[device_config.clone_config()] = output_device
             self.state.output_devices.append(device_config.clone_config())
-            self.config.persist_data()
+            if update_config: self.config.persist_data()
     
-    async def remove_output_device(self, device_config):
+    async def remove_output_device(self, device_config, update_config=True):
         if device_config.clone_config() in self.state.output_devices:
             await self.stream.remove_output_device(device_config.clone_config())
+            print(f"Removing output device {device_config.to_json()}")
             if device_config.clone_config() in self.output_devices:
                 del self.output_devices[device_config.clone_config()]
             self.state.output_devices.remove(device_config.clone_config())
-            self.config.persist_data()
+            if update_config: self.config.persist_data()
     
     def get_connected_output_devices(self):
         return [config.clone_config() for config in self.output_devices.keys()]
