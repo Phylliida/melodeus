@@ -13,7 +13,7 @@ import json as jsonlib
 import traceback
 import asyncio
 from async_callback_manager import AsyncCallbackManager
-from config_loader 
+from config_loader import AudioSystemConfig
 
 # these are hardcoded to make aec3 happy
 TARGET_RATE = 16000
@@ -42,7 +42,7 @@ class AudioSystem(object):
         try:
             stream_cfg = melaec3.AecConfig(target_sample_rate=TARGET_RATE, frame_size=DEFAULT_FRAME, filter_length=DEFAULT_FILTER)
             self.stream = melaec3.AecStream(stream_cfg)
-            self.state = AudioSystemState()
+            self.state = self.config.state
             self.output_devices = {}
             self.processing_queue_send = asyncio.Queue(maxsize=0)
             self.processing_queue_recieve = asyncio.Queue(maxsize=0)
@@ -60,16 +60,19 @@ class AudioSystem(object):
             await self.processing_task
         except asyncio.CancelledError:
             pass # intentional
-        except:
+        except KeyboardInterrupt:
+            raise
+        except Exception:
             print(f"Error in audio system task cancel")
             print(traceback.print_exc())
-        del self.output_devices
-        del self.state
-        del self.stream
-        del self.processing_queue_send
-        del self.processing_queue_recieve
-        del self.processing_task
-        del self.callbacks
+        finally:
+            del self.output_devices
+            del self.state
+            del self.stream
+            del self.processing_queue_send
+            del self.processing_queue_recieve
+            del self.processing_task
+            del self.callbacks
 
     async def calibrate(self):
         await self.processing_queue_send.put((ProcessingEvent.CALIBRATE, None))
@@ -84,37 +87,41 @@ class AudioSystem(object):
     async def audio_processing_task(self):
         try:
             while True:
-                processing_message = None
-                processing_message_data = None
-                try:
+                while not self.processing_queue_send.empty():
                     processing_message, processing_message_data = self.processing_queue_send.get_nowait()
-                except asyncio.QueueEmpty:
-                    pass
-                else:
                     self.processing_queue_send.task_done() # weird stuff processing queue wants
-                if processing_message is not None:
-                    match processing_message:
-                        case ProcessingEvent.CALIBRATE:
-                            await self.stream.calibrate(list(self.output_devices.values()), False)
-                            # let it know we finished calibration
-                            await self.processing_queue_recieve.put(ProcessingEvent.CALIBRATE_DONE)
-                        case _:
-                            print(f"Unknown processing message {processing_message}")
+                    if processing_message is not None:
+                        match processing_message:
+                            case ProcessingEvent.CALIBRATE:
+                                await self.stream.calibrate(list(self.output_devices.values()), False)
+                                # let it know we finished calibration
+                                await self.processing_queue_recieve.put(ProcessingEvent.CALIBRATE_DONE)
+                            case _:
+                                print(f"Unknown processing message {processing_message}")
                 input_data, output_data, aec_data, _, _, vad = await self.stream.update_debug_vad()  
                 await self.callbacks(input_data, output_data, aec_data, vad)
+                await asyncio.sleep(0) # important to give caller chance to call because above things are hungry
         except asyncio.CancelledError:
-          raise
-        except Exception as e:
+            raise
+        except KeyboardInterrupt:
+            raise
+        except Exception:
             print("Error in audio system")
             print(traceback.print_exc())
         finally:
             pass
 
-    async def load_cached_config(self, config):
-        self.config = copy.deepcopy(config)
-        for input_device_config in config.loaded_devices.input_devices:
+    async def load_cached_config(self):
+        inputs = self.state.input_devices
+        for input_device_config in self.state.input_devices:
+            # remove so we can re add it
+            if input_device_config in self.state.input_devices:
+                self.state.input_devices.remove(input_device_config)
             await self.add_input_device(input_device_config)
-        for output_device_config in config.loaded_devices.output_devices:
+        for output_device_config in self.state.output_devices:
+            # remove so we can re add it
+            if output_device_config in self.state.output_devices:
+                self.state.output_devices.remove(output_device_config)
             await self.add_output_device(output_device_config)
     
     def write_cached_config(self):

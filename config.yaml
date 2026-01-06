@@ -1,0 +1,15 @@
+audio:
+  state:
+    input_devices: []
+    output_devices: []
+stt:
+  deepgram_api_key: ''
+  enable_speaker_id: false
+  keyterm: ''
+  speaker_id:
+    profiles: {}
+    recognition:
+      confidence_threshold: 0.7
+      learning_mode: true
+      max_speakers: 4
+      voice_fingerprint_length: 128

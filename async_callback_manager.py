@@ -16,21 +16,16 @@ class AsyncCallbackManager(object):
         await self.callback_queue.put((REMOVE_CALLBACK, callback))
 
     async def __call__(self, *args, **kwargs):
-        callback_message_type = None
-        callback = None
-        try:
+        while not self.callback_queue.empty():
             callback_message_type, callback = self.callback_queue.get_nowait()
-        except asyncio.QueueEmpty:
-            pass
-        else:
             self.callback_queue.task_done() # weird stuff callback queue wants
-        if callback_message_type is not None:
-            match callback_message_type:
-                case "add":
-                    self.callbacks.append(callback)
-                case "remove":
-                    if callback in self.callbacks:
-                        self.callbacks.remove(callback)
+            if callback_message_type is not None:
+                match callback_message_type:
+                    case "add":
+                        self.callbacks.append(callback)
+                    case "remove":
+                        if callback in self.callbacks:
+                            self.callbacks.remove(callback)
         for callback in self.callbacks:
             try:
                 if asyncio.iscoroutinefunction(callback):

@@ -20,11 +20,8 @@ from typing import Any, Dict, Optional
 import time
 from datetime import datetime
 import uuid
-from titanet_voice_fingerprinting import (
-    TitaNetVoiceFingerprinter,
-    WordTiming
-)
-from asysnc_callback_manager import AsyncCallbackManager
+
+from async_callback_manager import AsyncCallbackManager
 
 # hardcoded for deepgram and other stuff
 SAMPLE_RATE = 16000
@@ -70,6 +67,10 @@ class AsyncSTT(object):
         self.voice_fingerprinter = None
         self.stt_callbacks = AsyncCallbackManager()
         if config.enable_speaker_id:
+            from titanet_voice_fingerprinting import (
+                TitaNetVoiceFingerprinter,
+                WordTiming
+            )
             try:
                 # Enable debug audio saving if debug_speaker_data is enabled
                 self.voice_fingerprinter = TitaNetVoiceFingerprinter(config.speaker_id, debug_save_audio=False)
@@ -79,8 +80,6 @@ class AsyncSTT(object):
                 print(traceback.print_exc())
 
     async def __aenter__(self):
-        self.callbacks = []
-        self.callback_queue = asyncio.Queue(maxsize=0)
         self.deepgram_task = asyncio.create_task(self.deepgram_processor())
         return self
 
@@ -125,6 +124,9 @@ class AsyncSTT(object):
                     
                     await connection.send_media(mixed_data_pcm)
             except:
+                print("Error in audio callback")
+                print(traceback.print_exc())
+                raise
         while True:
             try:
                 self.prev_turn_idx = None
@@ -158,6 +160,7 @@ class AsyncSTT(object):
             except:
                 print("Error in deepgram")
                 print(traceback.print_exc())
+                raise
             finally:
                 # fine to do this again, only removes if present
                 await self.audio_system.remove_callback(audio_callback)
@@ -226,6 +229,10 @@ class AsyncSTT(object):
             
         if send_message or edit_message:
             if self.voice_fingerprinter:
+                from titanet_voice_fingerprinting import (
+                    TitaNetVoiceFingerprinter,
+                    WordTiming
+                )
                 word_timing = WordTiming(
                     word=self.prev_transcript,
                     speaker_id=f"speaker {turn_idx}", # v2 doesn't have diarization yet

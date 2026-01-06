@@ -72,6 +72,10 @@ class STTConfig:
     speaker_id: SpeakersConfig = field(default_factory=SpeakersConfig)
 
 @dataclass
+class AudioSystemConfig:
+    state: AudioSystemState = field(default_factory=AudioSystemState)
+
+@dataclass
 class MelodeusConfig:
-    audio: AudioSystemState = field(default_factory=AudioSystemState)
+    audio: AudioSystemConfig = field(default_factory=AudioSystemConfig)
     stt: STTConfig = field(default_factory=STTConfig)
