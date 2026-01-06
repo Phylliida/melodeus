@@ -123,12 +123,6 @@ class AudioSystem(object):
             if output_device_config in self.state.output_devices:
                 self.state.output_devices.remove(output_device_config)
             await self.add_output_device(output_device_config)
-    
-    def write_cached_config(self):
-        try:
-            STATE_FILE.write_text(self.state.to_json())
-        except Exception as e:
-            print("failed to write state", e)
 
     def get_supported_device_configs(self):
         ins = melaec3.get_supported_input_configs(
@@ -154,20 +148,20 @@ class AudioSystem(object):
         if device_config not in self.state.input_devices:
             await self.stream.add_input_device(device_config.clone_config())
             self.state.input_devices.append(device_config.clone_config())
-            self.write_cached_config()
+            self.state.persist_data()
     
     async def remove_input_device(self, device_config):
         if device_config in self.state.input_devices:
             await self.stream.remove_input_device(device_config.clone_config())
             self.state.input_devices.remove(device_config.clone_config())
-            self.write_cached_config()
+            self.state.persist_data()
     
     async def add_output_device(self, device_config):
         if device_config not in self.state.output_devices:
             output_device = await self.stream.add_output_device(device_config.clone_config())
             self.output_devices[device_config.clone_config()] = output_device
             self.state.output_devices.append(device_config.clone_config())
-            self.write_cached_config()
+            self.state.persist_data()
     
     async def remove_output_device(self, device_config):
         if device_config in self.state.output_devices:
@@ -175,7 +169,7 @@ class AudioSystem(object):
             if device_config in self.output_devices:
                 del self.output_devices[device_config.clone_config()]
             self.state.output_devices.remove(device_config.clone_config())
-            self.write_cached_config()
+            self.state.persist_data()
     
     def get_connected_output_devices(self):
         return [config.clone_config() for config in self.output_devices.keys()]

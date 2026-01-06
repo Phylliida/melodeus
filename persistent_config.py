@@ -3,6 +3,7 @@ from typing import Generic, MutableMapping, TypeVar
 import yaml
 from config_loader import MelodeusConfig
 import dataclasses
+import json
 
 T = TypeVar("T")
 
@@ -44,10 +45,15 @@ class PersistentMelodeusConfig(Generic[T]):
         except KeyError:
             raise AttributeError(f"{type(self).__name__!s} has no attribute {key}") from None
     
+    def to_json(self):
+        return json.dumps(self.to_dict())
+
     def to_dict(self):
         res = {}
         for k,v in self.data.items():
             res[k] = v.to_dict() if hasattr(v, "to_dict") else v
+            if type(v) is list:
+                res[k] = [(vi.to_dict() if hasattr(vi, "to_dict") else vi) for vi in v]
         return res
     
     @classmethod
@@ -59,10 +65,13 @@ class PersistentMelodeusConfig(Generic[T]):
             converted_dict = {}
             for k,v in d.items():
                 converted_dict[k] = cls.from_dict(v, parent=res) if type(v) is dict else v
+                if type(v) is list:
+                    converted_dict[k] = [(cls.from_dict(vi, parent=res) if type(vi) is dict else vi) for vi in v]
             res.data = converted_dict
             return res
 
     def persist_data(self):
+        print(f"Persisting to {self.path} parent {self.parent}")
         # write uppermost parent so we store everything
         if self.parent is None:
             self.write_config()

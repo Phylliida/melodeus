@@ -1,8 +1,9 @@
-from flask import Flask, jsonify, request
+from flask import Flask, abort, jsonify, request
 from persistent_config import PersistentMelodeusConfig
 from pathlib import Path
 from audio_system import AudioSystem
-from stt import AsyncSTT
+from melaec3 import InputDeviceConfig, OutputDeviceConfig
+import melaec3
 import asyncio
 
 root = Path(__file__).parent
@@ -11,22 +12,106 @@ app = Flask(__name__, static_folder=str(root), static_url_path="")
 CONFIG_FILE = root / "config.yaml"
 
 config = PersistentMelodeusConfig.load_config(CONFIG_FILE)
-
-async def get_speech(speech_event):
-    print(speech_event)
-
-async def run():
-    async with AudioSystem(config=config.audio) as audio_system:
-        async with AsyncSTT(config=config.stt, audio_system=audio_system) as stt:
-            await stt.add_callback(get_speech)
-
+audio_system: AudioSystem | None = None
+loop: asyncio.AbstractEventLoop | None = None
+DEVICE_HISTORY_LEN = 100
+DEVICE_CALIBRATION_PACKETS = 20
+DEVICE_AUDIO_BUFFER_SECONDS = 20
+DEVICE_RESAMPLER_QUALITY = 5
+DEVICE_FRAME_SIZE = 160
 
 
-            @app.get("/")
-            def index():
-                return read("melodeus.html")
-            
-            @app.get("")
+def _run_coro(coro):
+    if loop is None:
+        abort(503, description="Audio loop not ready")
+    return asyncio.run_coroutine_threadsafe(coro, loop).result()
 
-            app.run(host="0.0.0.0", port="5000", debug=False)
-asyncio.run(run())
+
+def _device_to_dict(cfg):
+    return cfg.to_dict()
+
+
+@app.get("/")
+def index():
+    return app.send_static_file("melodeus.html")
+
+
+@app.get("/api/devices")
+def list_devices():
+    if audio_system is None:
+        abort(503, description="Audio system not started")
+    configs = {
+        "inputs": melaec3.get_supported_input_configs(
+            history_len=DEVICE_HISTORY_LEN,
+            num_calibration_packets=DEVICE_CALIBRATION_PACKETS,
+            audio_buffer_seconds=DEVICE_AUDIO_BUFFER_SECONDS,
+            resampler_quality=DEVICE_RESAMPLER_QUALITY,
+        ),
+        "outputs": melaec3.get_supported_output_configs(
+            history_len=DEVICE_HISTORY_LEN,
+            num_calibration_packets=DEVICE_CALIBRATION_PACKETS,
+            audio_buffer_seconds=DEVICE_AUDIO_BUFFER_SECONDS,
+            resampler_quality=DEVICE_RESAMPLER_QUALITY,
+            frame_size=DEVICE_FRAME_SIZE,
+        ),
+    }
+
+    def flatten(config_list):
+        flat = []
+        for group in config_list or []:
+            for cfg in group:
+                flat.append(_device_to_dict(cfg))
+        return flat
+
+    return jsonify(
+        {
+            "inputs": flatten(configs.get("inputs")),
+            "outputs": flatten(configs.get("outputs")),
+        }
+    )
+
+
+@app.get("/api/selected")
+def selected_devices():
+    if audio_system is None:
+        abort(503, description="Audio system not started")
+    return jsonify(
+        {
+            "inputs": [_device_to_dict(cfg) for cfg in audio_system.state.input_devices],
+            "outputs": [_device_to_dict(cfg) for cfg in audio_system.state.output_devices],
+        }
+    )
+
+
+@app.post("/api/select")
+def select_device():
+    if audio_system is None:
+        abort(503, description="Audio system not started")
+    payload = request.get_json(force=True, silent=True) or {}
+    device_type = payload.get("type")
+    cfg_dict = payload.get("config")
+    if device_type not in {"input", "output"} or not isinstance(cfg_dict, dict):
+        abort(400, description="Missing or invalid device payload")
+
+    if device_type == "input":
+        cfg = InputDeviceConfig.from_dict(cfg_dict)
+        _run_coro(audio_system.add_input_device(cfg))
+    else:
+        cfg = OutputDeviceConfig.from_dict(cfg_dict)
+        _run_coro(audio_system.add_output_device(cfg))
+
+    return jsonify({"status": "ok"})
+
+
+async def main():
+    global audio_system, loop
+    loop = asyncio.get_running_loop()
+    async with AudioSystem(config=config.audio) as audio_system_instance:
+        audio_system = audio_system_instance
+        await asyncio.to_thread(
+            app.run, host="0.0.0.0", port=5000, debug=False, use_reloader=False
+        )
+
+
+if __name__ == "__main__":
+    asyncio.run(main())
