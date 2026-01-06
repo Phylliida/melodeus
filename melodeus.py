@@ -26,5 +26,7 @@ async def run():
             def index():
                 return read("melodeus.html")
             
+            @app.get("")
+
             app.run(host="0.0.0.0", port="5000", debug=False)
 asyncio.run(run())
