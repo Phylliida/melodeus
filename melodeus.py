@@ -10,7 +10,13 @@ import signal
 import threading
 from werkzeug.serving import make_server
 
-async def add_audio_system_device_callbacks(app, audio_system):
+
+def add_audio_system_device_callbacks(app, audio_system, loop: asyncio.AbstractEventLoop):
+    """Register Flask routes that bridge into the running asyncio loop."""
+
+    async def run_in_loop(coro):
+        return await asyncio.wrap_future(asyncio.run_coroutine_threadsafe(coro, loop))
+
     @app.post("/api/select")
     async def select_device():
         if audio_system is None:
@@ -23,13 +29,12 @@ async def add_audio_system_device_callbacks(app, audio_system):
 
         if device_type == "input":
             cfg = InputDeviceConfig.from_dict(cfg_dict)
-            await audio_system.add_input_device(cfg)
+            await run_in_loop(audio_system.add_input_device(cfg))
         else:
             cfg = OutputDeviceConfig.from_dict(cfg_dict)
-            await audio_system.add_output_device(cfg)
+            await run_in_loop(audio_system.add_output_device(cfg))
 
         return jsonify({"status": "ok"})
-
 
     @app.get("/api/selected")
     def selected_devices():
@@ -41,7 +46,7 @@ async def add_audio_system_device_callbacks(app, audio_system):
                 "outputs": [cfg.to_dict() for cfg in audio_system.state.output_devices],
             }
         )
-            
+
     @app.get("/api/devices")
     def list_devices():
         if audio_system is None:
@@ -70,10 +75,10 @@ async def add_audio_system_device_callbacks(app, audio_system):
 
         if device_type == "input":
             cfg = InputDeviceConfig.from_dict(cfg_dict)
-            await audio_system.remove_input_device(cfg)
+            await run_in_loop(audio_system.remove_input_device(cfg))
         else:
             cfg = OutputDeviceConfig.from_dict(cfg_dict)
-            await audio_system.remove_output_device(cfg)
+            await run_in_loop(audio_system.remove_output_device(cfg))
 
         return jsonify({"status": "ok"})
 
@@ -90,16 +95,25 @@ async def main():
             @app.get("/")
             def index():
                 return app.send_static_file("melodeus.html")
-            await add_audio_system_device_callbacks(app, audio_system)
+
+            loop = asyncio.get_running_loop()
+            add_audio_system_device_callbacks(app, audio_system, loop)
+
             server = make_server("0.0.0.0", 5000, app)
             server.timeout = 0.1  # seconds per poll
+
+            def serve_forever():
+                with server:
+                    server.serve_forever()
+
+            server_thread = threading.Thread(target=serve_forever, daemon=True)
+            server_thread.start()
             try:
                 while True:
-                    server.handle_request()  # one request per call; returns immediately after timeout
-                    await asyncio.sleep(0) # defer to other async stuff
+                    await asyncio.sleep(0.1)
             finally:
-                server.server_close()
-
+                server.shutdown()
+                server_thread.join()
 
 
 if __name__ == "__main__":
