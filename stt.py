@@ -1,10 +1,10 @@
 
 from deepgram import AsyncDeepgramClient
 from deepgram.core.events import EventType
-from deepgram.extensions.types.sockets import (
-    ListenV2ConnectedEvent,
-    ListenV2FatalErrorEvent,
-    ListenV2TurnInfoEvent,
+from deepgram.listen.v2 import (
+    ListenV2Connected,
+    ListenV2FatalError,
+    ListenV2TurnInfo,
 )
 import traceback
 import numpy as np
@@ -175,11 +175,11 @@ class AsyncSTT(object):
     async def deepgram_on_message(self, message: Any):
         """Dispatch Deepgram websocket messages to the appropriate handlers."""
         try:
-            if isinstance(message, ListenV2TurnInfoEvent):
+            if isinstance(message, ListenV2TurnInfo):
                 await self.deepgram_turn(message)
-            elif isinstance(message, ListenV2FatalErrorEvent):
+            elif isinstance(message, ListenV2FatalError):
                 print(f"❌ Deepgram fatal error ({message.code}): {message.description}")
-            elif isinstance(message, ListenV2ConnectedEvent):
+            elif isinstance(message, ListenV2Connected):
                 pass
         except Exception as dispatch_error:
             print(f"⚠️  Failed to process Deepgram message:")
@@ -188,7 +188,7 @@ class AsyncSTT(object):
     async def _emit_stt(self, stt):
         await self.stt_callbacks(stt)
 
-    async def deepgram_turn(self, message: ListenV2TurnInfoEvent):
+    async def deepgram_turn(self, message: ListenV2TurnInfo):
         event_type = (message.event or "").lower()
         turn_idx = message.turn_index
         transcript = message.transcript or ""
