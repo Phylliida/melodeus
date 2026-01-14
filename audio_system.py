@@ -3,6 +3,7 @@ import json
 import sys
 import melaec3
 from pathlib import Path
+import numpy as np
 import contextlib
 from typing import List
 from dataclasses import dataclass, field
@@ -16,10 +17,19 @@ import asyncio
 from async_callback_manager import AsyncCallbackManager
 from config_loader import AudioSystemConfig, AudioSystemState
 
+# Defaults pulled from pure-rust-aec examples
+HISTORY_LEN = 100
+CALIBRATION_PACKETS = 20
+AUDIO_BUF_SECONDS = 20
+RESAMPLE_QUALITY = 5
+FRAME_SIZE_MILLIS = 3
+AEC_SAMPLE_RATE = 16000
+
 # these are hardcoded to make aec3 happy
-TARGET_RATE = 16000
+TARGET_RATE = AEC_SAMPLE_RATE
 DEFAULT_FRAME = 160
-DEFAULT_FILTER = 1600
+DEFAULT_FILTER = DEFAULT_FRAME * 10
+DEFAULT_OUTPUT_FRAME = 160
 
 # We could change these, but no need to
 root = Path(__file__).parent
@@ -102,8 +112,13 @@ class AudioSystem(object):
                                 await self.processing_queue_recieve.put(ProcessingEvent.CALIBRATE_DONE)
                             case _:
                                 print(f"Unknown processing message {processing_message}")
-                input_data, output_data, aec_data, _, _, vad = await self.stream.update_debug_vad()  
-                await self.callbacks(input_data, output_data, aec_data, vad)
+                input_bytes, output_bytes, aec_bytes, _, _, vad = await self.stream.update_debug_vad()  
+                input_data  = np.frombuffer(input_bytes, dtype=np.float32)
+                output_data = np.frombuffer(output_bytes, dtype=np.float32)
+                aec_data    = np.frombuffer(aec_bytes, dtype=np.float32)
+                input_channels = self.stream.num_input_channels
+                output_channels = self.stream.num_output_channels
+                await self.callbacks(input_channels, output_channels, input_data, output_data, aec_data, vad)
                 await asyncio.sleep(0) # important to give caller chance to call because above things are hungry
         except asyncio.CancelledError:
             raise

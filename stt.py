@@ -105,26 +105,31 @@ class AsyncSTT(object):
 
     async def deepgram_processor(self):
         self.connection = None
-        async def audio_callback(audio_input_data, audio_output_data, aec_input_data, channel_vads):
+        self.mixed_data = None
+        async def audio_callback(input_channels, output_channels, audio_input_data, audio_output_data, aec_input_data, channel_vads):
             try:
                 # if we have any input channels available and aec detected something, mix them
                 # alternatively we could run deepgram per channel but that would be more expensive
-                if len(aec_input_data) > 0 and len(aec_input_data[0]) > 0 and any(channel_vads) and self.connection is not None:
-                    mixed_data = np.zeros(len(aec_input_data[0]))
-                    for i in range(len(channel_vads)):
-                        vad = channel_vads[i]
+                if len(aec_input_data) > 0 and any(channel_vads) and self.connection is not None:
+                    frame_size = len(aec_input_data)//input_channels
+                    aec_frames = aec_input_data.reshape(-1, input_channels) # view, no copy
+                    if self.mixed_data is None or len(self.mixed_data) != frame_size:
+                        self.mixed_data = np.zeros(frame_size)
+                    self.mixed_data[:] = 0
+                    for channel in range(len(channel_vads)):
+                        vad = channel_vads[channel]
                         if vad:
-                            mixed_data += np.array(aec_input_data[i])
-                    mixed_data_pcm = float_to_int16_bytes(mixed_data)
+                            self.mixed_data += aec_frames[:,channel]
+                    mixed_data_pcm = float_to_int16_bytes(self.mixed_data)
                     if self.voice_fingerprinter is not None:
                         self.voice_fingerprinter.add_audio_chunk(
-                            mixed_data,
+                            self.mixed_data,
                             self.num_audio_frames_recieved,
                             16000,
                         )
                         # increment frame count
-                        self.num_audio_frames_recieved += len(mixed_data)
-                    
+                        self.num_audio_frames_recieved += len(self.mixed_data)
+                    print(f"Sending {frame_size} frames")
                     await connection.send_media(mixed_data_pcm)
             except:
                 print("Error in audio callback")
