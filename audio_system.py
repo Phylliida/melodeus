@@ -4,6 +4,7 @@ import sys
 import melaec3
 from pathlib import Path
 import numpy as np
+import wave
 import contextlib
 from typing import List
 from dataclasses import dataclass, field
@@ -35,7 +36,20 @@ DEFAULT_OUTPUT_FRAME = 160
 root = Path(__file__).parent
 STATE_FILE = root / "last_devices.json"
 
+def load_wav(path):
+    with wave.open(str(path), "rb") as w:
+        rate = w.getframerate()
+        ch = w.getnchannels()
+        if w.getsampwidth() != 2:
+            raise ValueError("sample must be 16-bit")
+        frames = w.getnframes()
+        buf = w.readframes(frames)
 
+    audio_seconds = frames / float(rate)
+    samples = np.frombuffer(buf, dtype=np.int16).reshape(-1, ch)
+    floats = samples.astype(np.float32) / 32768.0  # interleaved [frames, ch]
+    interleaved = floats.reshape(-1).astype(np.float32, copy=False)
+    return rate, ch, audio_seconds, interleaved
 
 class ProcessingEvent(StrEnum):
     CALIBRATE = "calibrate"

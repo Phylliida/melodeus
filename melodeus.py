@@ -1,10 +1,11 @@
 from flask import Flask, abort, jsonify, request
 from persistent_config import PersistentMelodeusConfig
 from pathlib import Path
-from audio_system import AudioSystem
+from audio_system import AudioSystem, load_wav
 from stt import AsyncSTT
 import numpy as np
 import base64
+import math
 import json
 from melaec3 import InputDeviceConfig, OutputDeviceConfig
 import melaec3
@@ -15,6 +16,7 @@ import websockets
 from werkzeug.serving import make_server
 
 WEBSOCKET_PORT = 5001
+root = Path(__file__).parent
 
 def add_audio_system_device_callbacks(app, audio_system, loop: asyncio.AbstractEventLoop):
     """Register Flask routes that bridge into the running asyncio loop."""
@@ -95,6 +97,38 @@ def add_audio_system_device_callbacks(app, audio_system, loop: asyncio.AbstractE
         await run_in_loop(audio_system.calibrate())
         return jsonify({"status": "ok"})
 
+    @app.post("/play")
+    async def play_sample():
+        if audio_system is None:
+            abort(503, description="Audio system not started")
+        sample_rate, channels, audio_seconds, audio_data = load_wav(root / "example_talking.wav")
+        resampler_quality = 5 # some default value is fine
+        output_streams = []
+        # map all audio channels to first channel output, for testing
+        channel_map = {channel: [0] for channel in range(channels)}
+        for output_device in audio_system.get_connected_output_devices():
+            output_stream = audio_system.begin_audio_stream(
+                output_device,
+                channel_map,
+                math.ceil(audio_seconds),
+                sample_rate,
+                resampler_quality)
+            output_stream.queue_audio(audio_data)
+            output_streams.append(output_stream)
+        done = False
+        while not done:
+            done = True
+            for stream in output_streams:
+                if stream.num_queued_samples != 0:
+                    done = False
+            # poll until done
+            await asyncio.sleep(0.1)
+        
+        # clean up
+        for stream in output_streams:
+            audio_system.end_audio_stream(stream)
+        
+        return jsonify(ok=True, sent=sent, gain=gain)
 
 async def start_websocket_server(app, audio_system, ui_config):
     connections = set()
@@ -157,7 +191,6 @@ async def start_websocket_server(app, audio_system, ui_config):
     ws_thread.start()  
 
 async def main():
-    root = Path(__file__).parent
     app = Flask(__name__, static_folder=str(root), static_url_path="")
 
     CONFIG_FILE = root / "config.yaml"

@@ -46,7 +46,6 @@ def float_to_int16_bytes(audio: np.ndarray) -> bytes:
     clipped = np.clip(audio, -1.0, 1.0)
     return (clipped * 32767.0).astype(np.int16).tobytes()
 
-
 @dataclass
 class STTResult:
     """Result from speech-to-text recognition."""
@@ -129,7 +128,6 @@ class AsyncSTT(object):
                         )
                         # increment frame count
                         self.num_audio_frames_recieved += len(self.mixed_data)
-                    print(f"Sending {frame_size} frames")
                     await connection.send_media(mixed_data_pcm)
             except:
                 print("Error in audio callback")
