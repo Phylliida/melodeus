@@ -115,18 +115,22 @@ async def start_websocket_server(audio_system):
             return base64.b64encode(a.tobytes()).decode("ascii")
 
         async def audio_callback(input_channels, output_channels, audio_input_data, audio_output_data, aec_input_data, channel_vads):
-            payload = {
-                "type": "waveform",
-                "in_ch": input_channels,
-                "out_ch": output_channels,
-                "input": b64(audio_input_data),
-                "output": b64(audio_output_data),
-                "aec": b64(aec_input_data),
-                "vad": channel_vads,
-            }
-            await broadcast(json.dumps(payload))
+            if len(aec_input_data) > 0: # don't spam with empty things or it gets congested
+                payload = {
+                    "type": "waveform",
+                    "in_ch": input_channels,
+                    "out_ch": output_channels,
+                    "input": b64(audio_input_data),
+                    "output": b64(audio_output_data),
+                    "aec": b64(aec_input_data),
+                    "vad": channel_vads,
+                }
+                payls = json.dumps(payload)
+                await broadcast(payls)
+                await asyncio.sleep(0) # hand to other stuff so we don't exhaust async
         await audio_system.add_callback(audio_callback)
-        await asyncio.Event().wait()
+        while True:
+            await asyncio.sleep(0.1)
 
     ws_thread = threading.Thread(target=lambda: asyncio.run(serve_websocket()), daemon=True)
     ws_thread.start()  
