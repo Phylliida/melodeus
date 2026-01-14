@@ -88,6 +88,13 @@ def add_audio_system_device_callbacks(app, audio_system, loop: asyncio.AbstractE
 
         return jsonify({"status": "ok"})
 
+    @app.post("/api/calibrate")
+    async def calibrate():
+        if audio_system is None:
+            abort(503, description="Audio system not started")
+        await run_in_loop(audio_system.calibrate())
+        return jsonify({"status": "ok"})
+
 
 async def start_websocket_server(app, audio_system, ui_config):
     connections = set()

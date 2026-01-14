@@ -33,4 +33,4 @@ stt:
       max_speakers: 4
       voice_fingerprint_length: 128
 ui:
-  show_waveforms: false
+  show_waveforms: true

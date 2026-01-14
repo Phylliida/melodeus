@@ -110,6 +110,16 @@ const loadUiConfig = async () => {
   }
 };
 
+const calibrate = async () => {
+  ui.status.textContent = "Calibrating...";
+  try {
+    await fetchJson("/api/calibrate", { method: "POST" });
+    ui.status.textContent = "Calibration done";
+  } catch (e) {
+    ui.status.textContent = e.message || "Failed to calibrate";
+  }
+};
+
 document.addEventListener("DOMContentLoaded", () => {
   ui = {
     input: { key: "inputs", host: $("input-host"), device: $("input-device"), channels: $("input-channels"), rate: $("input-rate"), format: $("input-format"), frame: null, add: $("use-input"), active: $("input-active") },
@@ -118,6 +128,7 @@ document.addEventListener("DOMContentLoaded", () => {
     refresh: $("refresh"),
     toggleWaves: $("toggle-waves-btn"),
     waves: $("waves"),
+    calibrate: $("calibrate-btn"),
   };
   ui.refresh.onclick = load;
   ui.input.host.onchange = () => renderSelectors("input");
@@ -126,6 +137,7 @@ document.addEventListener("DOMContentLoaded", () => {
   ui.output.device.onchange = () => renderSelectors("output");
   ui.input.add.onclick = () => mutate("POST", "input", pickConfig("input"));
   ui.output.add.onclick = () => mutate("POST", "output", pickConfig("output"));
+  if (ui.calibrate) ui.calibrate.onclick = calibrate;
   if (ui.toggleWaves) {
     ui.toggleWaves.onclick = async () => {
       const next = !state.ui.showWaveforms;
