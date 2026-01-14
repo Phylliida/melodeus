@@ -126,10 +126,10 @@ class AudioSystem(object):
         # Stop outputs first so any dependent processing halts before inputs.
         for output_cfg in self.state.output_devices:
             print(f"removing output {output_cfg}")
-            await self.stream.remove_output_device(output_cfg.clone_config(), update_config=False)
+            await self.remove_output_device(output_cfg.clone_config(), update_config=False)
         for input_cfg in self.state.input_devices:
             print(f"removing input {input_cfg}")
-            await self.stream.remove_input_device(input_cfg.clone_config(), update_config=False)
+            await self.remove_input_device(input_cfg.clone_config(), update_config=False)
         self.output_devices.clear()
     
     async def load_cached_config(self):

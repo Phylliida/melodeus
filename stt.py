@@ -187,6 +187,7 @@ class AsyncSTT(object):
 
     async def _emit_stt(self, stt):
         await self.stt_callbacks(stt)
+
     async def deepgram_turn(self, message: ListenV2TurnInfoEvent):
         event_type = (message.event or "").lower()
         turn_idx = message.turn_index

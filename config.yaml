@@ -31,7 +31,7 @@ audio:
       sample_format: f32
       sample_rate: 44100
 stt:
-  deepgram_api_key: ''
+  deepgram_api_key: '87a6f2913693d353b005b7a35959df65c5a54d65'
   enable_speaker_id: false
   keyterm: ''
   speaker_id:
