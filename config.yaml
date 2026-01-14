@@ -1,6 +1,15 @@
 audio:
   state:
-    input_devices: []
+    input_devices:
+    - audio_buffer_seconds: 20
+      calibration_packets: 20
+      channels: 2
+      device_name: Built-in Microphone
+      history_len: 100
+      host_id: CoreAudio
+      resampler_quality: 5
+      sample_format: f32
+      sample_rate: 48000
     output_devices:
     - audio_buffer_seconds: 20
       calibration_packets: 20
