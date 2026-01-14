@@ -44,13 +44,50 @@
     .header { display: flex; justify-content: space-between; align-items: center; gap: 8px; }
     .status { font-size: 13px; color: var(--muted); }
     .actions { display: flex; gap: 8px; align-items: center; }
+    .ws {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      padding: 8px 10px;
+      border-radius: 10px;
+      background: #f9fafb;
+      border: 1px solid var(--border);
+      font-size: 13px;
+      color: var(--muted);
+    }
+    .ws-dot {
+      width: 12px;
+      height: 12px;
+      border-radius: 50%;
+      background: #f59e0b;
+      box-shadow: 0 0 0 4px rgba(245, 158, 11, 0.15);
+    }
+    .waves { display: none; flex-direction: column; gap: 8px; }
+    .wave-row { display: flex; flex-direction: column; gap: 6px; }
+    .wave-row h3 { margin: 0; font-size: 14px; color: var(--muted); }
+    canvas {
+      width: 100%;
+      height: 48px;
+      border-radius: 10px;
+      background: #f9fafb;
+      border: 1px solid var(--border);
+    }
   </style>
+  <script src="js/melodeus.js"></script>
+  <script src="js/waveforms.js"></script>
 </head>
 <body>
   <div class="wrap">
     <div class="header">
       <h1>Melodeus Audio</h1>
       <button id="refresh">Refresh</button>
+    </div>
+
+    <div class="card">
+      <div class="row" style="justify-content: space-between; align-items: center;">
+        <div class="status">Device/API status</div>
+        <div class="ws"><div id="ws" class="ws-dot"></div><span>WebSocket</span></div>
+      </div>
     </div>
 
     <div class="row">
@@ -83,8 +120,25 @@
     </div>
 
     <div class="status" id="status">Loading...</div>
+
+    <div class="card">
+      <h2 style="margin-bottom: 8px;">Waveforms</h2>
+      <div id="waves" class="waves">
+        <div class="wave-row">
+          <h3>Output</h3>
+          <div id="wave-out"></div>
+        </div>
+        <div class="wave-row">
+          <h3>Input</h3>
+          <div id="wave-in"></div>
+        </div>
+        <div class="wave-row">
+          <h3>AEC</h3>
+          <div id="wave-aec"></div>
+        </div>
+      </div>
+    </div>
   </div>
 
-  <script src="js/melodeus.js"></script>
 </body>
 </html>

@@ -35,5 +35,6 @@ class AsyncCallbackManager(object):
             except:
                 print("Error in callback")
                 print(traceback.print_exc())
+                raise
 
 

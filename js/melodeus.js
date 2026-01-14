@@ -1,10 +1,5 @@
 const $ = (id) => document.getElementById(id);
-const ui = {
-  input: { key: "inputs", host: $("input-host"), device: $("input-device"), channels: $("input-channels"), rate: $("input-rate"), format: $("input-format"), frame: null, add: $("use-input"), active: $("input-active") },
-  output: { key: "outputs", host: $("output-host"), device: $("output-device"), channels: $("output-channels"), rate: $("output-rate"), format: $("output-format"), frame: $("output-frame"), add: $("use-output"), active: $("output-active") },
-  status: $("status"),
-  refresh: $("refresh"),
-};
+let ui;
 
 const state = { devices: { inputs: [], outputs: [] }, selected: { inputs: [], outputs: [] } };
 const hostName = (cfg) => cfg.host_id || cfg.host_name || cfg.host || "unknown";
@@ -99,12 +94,19 @@ const mutate = async (method, kind, cfg) => {
   await load();
 };
 
-ui.refresh.onclick = load;
-ui.input.host.onchange = () => renderSelectors("input");
-ui.input.device.onchange = () => renderSelectors("input");
-ui.output.host.onchange = () => renderSelectors("output");
-ui.output.device.onchange = () => renderSelectors("output");
-ui.input.add.onclick = () => mutate("POST", "input", pickConfig("input"));
-ui.output.add.onclick = () => mutate("POST", "output", pickConfig("output"));
-
-load();
+document.addEventListener("DOMContentLoaded", () => {
+  ui = {
+    input: { key: "inputs", host: $("input-host"), device: $("input-device"), channels: $("input-channels"), rate: $("input-rate"), format: $("input-format"), frame: null, add: $("use-input"), active: $("input-active") },
+    output: { key: "outputs", host: $("output-host"), device: $("output-device"), channels: $("output-channels"), rate: $("output-rate"), format: $("output-format"), frame: $("output-frame"), add: $("use-output"), active: $("output-active") },
+    status: $("status"),
+    refresh: $("refresh"),
+  };
+  ui.refresh.onclick = load;
+  ui.input.host.onchange = () => renderSelectors("input");
+  ui.input.device.onchange = () => renderSelectors("input");
+  ui.output.host.onchange = () => renderSelectors("output");
+  ui.output.device.onchange = () => renderSelectors("output");
+  ui.input.add.onclick = () => mutate("POST", "input", pickConfig("input"));
+  ui.output.add.onclick = () => mutate("POST", "output", pickConfig("output"));
+  load();
+});
