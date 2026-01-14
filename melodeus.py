@@ -89,8 +89,20 @@ def add_audio_system_device_callbacks(app, audio_system, loop: asyncio.AbstractE
         return jsonify({"status": "ok"})
 
 
-async def start_websocket_server(audio_system):
+async def start_websocket_server(app, audio_system, ui_config):
     connections = set()
+
+    @app.get("/api/uiconfig")
+    def get_ui():
+        return jsonify({"show_waveforms": ui_config.show_waveforms})
+
+    @app.post("/api/uiconfig/waveforms")
+    def toggle_waveforms():
+        payload = request.get_json(force=True, silent=True) or {}
+        ui_config.show_waveforms = bool(payload.get("show_waveforms"))
+        ui_config.persist_data()
+        return jsonify({"show_waveforms": ui_config.show_waveforms})
+
     async def broadcast(msg: str):
         dead = []
         for ws in list(connections):
@@ -115,6 +127,8 @@ async def start_websocket_server(audio_system):
             return base64.b64encode(a.tobytes()).decode("ascii")
 
         async def audio_callback(input_channels, output_channels, audio_input_data, audio_output_data, aec_input_data, channel_vads):
+            if not ui_config.show_waveforms:
+                return
             if len(aec_input_data) > 0: # don't spam with empty things or it gets congested
                 payload = {
                     "type": "waveform",
@@ -144,7 +158,7 @@ async def main():
 
     async with AudioSystem(config=config.audio) as audio_system:
         async with AsyncSTT(config=config.stt, audio_system=audio_system):
-            await start_websocket_server(audio_system)
+            await start_websocket_server(app, audio_system, config.ui)
 
             @app.get("/")
             def index():

@@ -72,6 +72,12 @@
       background: #f9fafb;
       border: 1px solid var(--border);
     }
+    .button-row { display: flex; flex-wrap: wrap; gap: 8px; }
+    .btn-secondary {
+      background: #fff;
+      color: var(--text);
+      border: 1px solid var(--border);
+    }
   </style>
   <script src="js/melodeus.js"></script>
   <script src="js/waveforms.js"></script>
@@ -120,6 +126,15 @@
     </div>
 
     <div class="status" id="status">Loading...</div>
+
+    <div class="card">
+      <h2 style="margin-bottom: 8px;">Actions</h2>
+      <div class="button-row">
+        <button id="calibrate-btn">Calibrate</button>
+        <button id="test-audio-btn" class="btn-secondary">Play test audio</button>
+        <button id="toggle-waves-btn" class="btn-secondary">Toggle waveforms</button>
+      </div>
+    </div>
 
     <div class="card">
       <h2 style="margin-bottom: 8px;">Waveforms</h2>

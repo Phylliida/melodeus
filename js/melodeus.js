@@ -1,7 +1,7 @@
 const $ = (id) => document.getElementById(id);
 let ui;
 
-const state = { devices: { inputs: [], outputs: [] }, selected: { inputs: [], outputs: [] } };
+const state = { devices: { inputs: [], outputs: [] }, selected: { inputs: [], outputs: [] }, ui: { showWaveforms: true } };
 const hostName = (cfg) => cfg.host_id || cfg.host_name || cfg.host || "unknown";
 const fill = (sel, vals, fmt) => {
   const cur = sel.value;
@@ -94,12 +94,30 @@ const mutate = async (method, kind, cfg) => {
   await load();
 };
 
+const updateWaveToggle = () => {
+  if (!ui.toggleWaves) return;
+  ui.toggleWaves.textContent = state.ui.showWaveforms ? "Waveforms: On" : "Waveforms: Off";
+  if (ui.waves) ui.waves.style.display = state.ui.showWaveforms ? "flex" : "none";
+};
+
+const loadUiConfig = async () => {
+  try {
+    const cfg = await fetchJson("/api/uiconfig");
+    state.ui.showWaveforms = !!cfg.show_waveforms;
+    updateWaveToggle();
+  } catch (_) {
+    /* ignore */
+  }
+};
+
 document.addEventListener("DOMContentLoaded", () => {
   ui = {
     input: { key: "inputs", host: $("input-host"), device: $("input-device"), channels: $("input-channels"), rate: $("input-rate"), format: $("input-format"), frame: null, add: $("use-input"), active: $("input-active") },
     output: { key: "outputs", host: $("output-host"), device: $("output-device"), channels: $("output-channels"), rate: $("output-rate"), format: $("output-format"), frame: $("output-frame"), add: $("use-output"), active: $("output-active") },
     status: $("status"),
     refresh: $("refresh"),
+    toggleWaves: $("toggle-waves-btn"),
+    waves: $("waves"),
   };
   ui.refresh.onclick = load;
   ui.input.host.onchange = () => renderSelectors("input");
@@ -108,5 +126,22 @@ document.addEventListener("DOMContentLoaded", () => {
   ui.output.device.onchange = () => renderSelectors("output");
   ui.input.add.onclick = () => mutate("POST", "input", pickConfig("input"));
   ui.output.add.onclick = () => mutate("POST", "output", pickConfig("output"));
+  if (ui.toggleWaves) {
+    ui.toggleWaves.onclick = async () => {
+      const next = !state.ui.showWaveforms;
+      try {
+        await fetchJson("/api/uiconfig/waveforms", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ show_waveforms: next }),
+        });
+        state.ui.showWaveforms = next;
+        updateWaveToggle();
+      } catch (e) {
+        ui.status.textContent = e.message || "Failed to toggle waveforms";
+      }
+    };
+  }
+  loadUiConfig();
   load();
 });

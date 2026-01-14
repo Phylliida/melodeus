@@ -76,6 +76,11 @@ class AudioSystemConfig:
     state: AudioSystemState = field(default_factory=AudioSystemState)
 
 @dataclass
+class UISettings:
+    show_waveforms: bool = True
+
+@dataclass
 class MelodeusConfig:
     audio: AudioSystemConfig = field(default_factory=AudioSystemConfig)
     stt: STTConfig = field(default_factory=STTConfig)
+    ui: UISettings = field(default_factory=UISettings)
