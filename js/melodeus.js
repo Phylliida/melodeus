@@ -120,6 +120,18 @@ const calibrate = async () => {
   }
 };
 
+const playTestAudio = async () => {
+  ui.status.textContent = "Playing test audio...";
+  try {
+    const res = await fetchJson("/play", { method: "POST" });
+    const duration = typeof res.duration_sec === "number" ? `${res.duration_sec.toFixed(2)}s` : "test audio";
+    const outputs = typeof res.outputs_started === "number" ? res.outputs_started : 0;
+    ui.status.textContent = `Played ${duration} on ${outputs} output${outputs === 1 ? "" : "s"}`;
+  } catch (e) {
+    ui.status.textContent = e.message || "Failed to play test audio";
+  }
+};
+
 document.addEventListener("DOMContentLoaded", () => {
   ui = {
     input: { key: "inputs", host: $("input-host"), device: $("input-device"), channels: $("input-channels"), rate: $("input-rate"), format: $("input-format"), frame: null, add: $("use-input"), active: $("input-active") },
@@ -129,6 +141,7 @@ document.addEventListener("DOMContentLoaded", () => {
     toggleWaves: $("toggle-waves-btn"),
     waves: $("waves"),
     calibrate: $("calibrate-btn"),
+    testAudio: $("test-audio-btn"),
   };
   ui.refresh.onclick = load;
   ui.input.host.onchange = () => renderSelectors("input");
@@ -138,6 +151,7 @@ document.addEventListener("DOMContentLoaded", () => {
   ui.input.add.onclick = () => mutate("POST", "input", pickConfig("input"));
   ui.output.add.onclick = () => mutate("POST", "output", pickConfig("output"));
   if (ui.calibrate) ui.calibrate.onclick = calibrate;
+  if (ui.testAudio) ui.testAudio.onclick = playTestAudio;
   if (ui.toggleWaves) {
     ui.toggleWaves.onclick = async () => {
       const next = !state.ui.showWaveforms;

@@ -104,31 +104,44 @@ def add_audio_system_device_callbacks(app, audio_system, loop: asyncio.AbstractE
         sample_rate, channels, audio_seconds, audio_data = load_wav(root / "example_talking.wav")
         resampler_quality = 5 # some default value is fine
         output_streams = []
+        print(len(audio_data), "samples")
         # map all audio channels to first channel output, for testing
         channel_map = {channel: [0] for channel in range(channels)}
         for output_device in audio_system.get_connected_output_devices():
-            output_stream = audio_system.begin_audio_stream(
+            output_stream = await run_in_loop(audio_system.begin_audio_stream(
                 output_device,
+                channels,
                 channel_map,
                 math.ceil(audio_seconds),
                 sample_rate,
-                resampler_quality)
+                resampler_quality))
+            print(audio_seconds)
             output_stream.queue_audio(audio_data)
-            output_streams.append(output_stream)
+            output_streams.append((output_device, output_stream))
         done = False
         while not done:
             done = True
-            for stream in output_streams:
+            for output_device, stream in output_streams:
+                print(stream.num_queued_samples)
                 if stream.num_queued_samples != 0:
                     done = False
+                    print("Not done")
+            print(done)
             # poll until done
-            await asyncio.sleep(0.1)
+            await run_in_loop(asyncio.sleep(0.1))
         
         # clean up
-        for stream in output_streams:
-            audio_system.end_audio_stream(stream)
+        for output_device, stream in output_streams:
+            await run_in_loop(audio_system.end_audio_stream(output_device, stream))
         
-        return jsonify(ok=True, sent=sent, gain=gain)
+        return jsonify(
+            {
+                "status": "ok",
+                "outputs_started": len(output_streams),
+                "duration_sec": audio_seconds,
+                "sample_rate": sample_rate,
+            }
+        )
 
 async def start_websocket_server(app, audio_system, ui_config):
     connections = set()
