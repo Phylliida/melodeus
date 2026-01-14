@@ -6,6 +6,7 @@ from deepgram.listen.v2 import (
     ListenV2FatalError,
     ListenV2TurnInfo,
 )
+from deepgram.core.api_error import ApiError
 import traceback
 import numpy as np
 import asyncio
@@ -140,12 +141,16 @@ class AsyncSTT(object):
                 self.last_sent_message_uuid = None
                 self.num_audio_frames_recieved = 0
                 deepgram = AsyncDeepgramClient(api_key=self.deepgram_api_key)
-                async with deepgram.listen.v2.connect(
+                connect_kwargs = dict(
                     model="flux-general-en",
                     encoding="linear16",
                     sample_rate=str(SAMPLE_RATE),
                     eot_timeout_ms="500",
-                    keyterm=self.keyterm) as connection:
+                )
+                if self.keyterm:
+                    connect_kwargs["keyterm"] = self.keyterm
+
+                async with deepgram.listen.v2.connect(**connect_kwargs) as connection:
                     connection.on(EventType.OPEN, self.deepgram_on_open)
                     connection.on(EventType.MESSAGE, self.deepgram_on_message)
                     connection.on(EventType.ERROR, self.deepgram_error)
@@ -159,6 +164,10 @@ class AsyncSTT(object):
             except asyncio.CancelledError:
                 print("Deepgram processs canceled")
                 break
+            except ApiError as api_err:
+                print("Error in deepgram websocket connection")
+                print(traceback.print_exc())
+                raise
             except:
                 print("Error in deepgram")
                 print(traceback.print_exc())
