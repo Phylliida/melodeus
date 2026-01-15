@@ -105,6 +105,8 @@ class AsyncSTT(object):
     async def deepgram_processor(self):
         self.connection = None
         self.mixed_data = None
+        self.cur_gain = 1.0
+        self.gain_avg_mu = 0.99
         async def audio_callback(input_channels, output_channels, audio_input_data, audio_output_data, aec_input_data, channel_vads):
             try:
                 # if we have any input channels available and aec detected something, mix them
@@ -119,6 +121,15 @@ class AsyncSTT(object):
                         vad = channel_vads[channel]
                         if vad:
                             self.mixed_data += aec_frames[:,channel]
+                    R_target = 0.9
+                    avg_energy = np.sqrt(np.dot(self.mixed_data, self.mixed_data))
+                    if avg_energy > 0.1: # too quiet is just noise
+                        gain = R_target / np.sqrt(avg_energy)
+                        # slowly move gain
+                        self.cur_gain = self.gain_avg_mu*self.cur_gain + (1-self.gain_avg_mu)*gain
+                        self.mixed_data *= self.cur_gain
+                        print(avg_energy, self.cur_gain)
+                        np.clip(self.mixed_data, -1.0, 1.0, out=self.mixed_data)
                     mixed_data_pcm = float_to_int16_bytes(self.mixed_data)
                     if self.voice_fingerprinter is not None:
                         self.voice_fingerprinter.add_audio_chunk(
