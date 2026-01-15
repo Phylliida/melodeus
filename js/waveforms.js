@@ -1,6 +1,10 @@
 
 
 const set_ws_status_color = (c) => (document.getElementById("ws").style.background = c)
+let transcriptHandler = null;
+window.registerTranscriptHandler = (fn) => {
+  transcriptHandler = fn;
+};
 
 const wsPort = 5001;
 const url = () => `${location.protocol === "https:" ? "wss" : "ws"}://${location.hostname}:${wsPort}`;
@@ -142,6 +146,7 @@ const connect = () => {
     try {
       const data = JSON.parse(ev.data);
       if (data.type === "waveform") renderWaveforms(data);
+      else if (data.type === "stt" && transcriptHandler) transcriptHandler(data);
     } catch (e) {
       console.warn("Bad ws payload", e);
     }

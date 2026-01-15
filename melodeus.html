@@ -81,6 +81,7 @@
   </style>
   <script src="js/melodeus.js"></script>
   <script src="js/waveforms.js"></script>
+  <script src="js/transcribe.js"></script>
 </head>
 <body>
   <div class="wrap">
@@ -134,6 +135,12 @@
         <button id="test-audio-btn" class="btn-secondary">Play test audio</button>
         <button id="toggle-waves-btn" class="btn-secondary">Toggle waveforms</button>
       </div>
+    </div>
+
+    <div class="card">
+      <h2 style="margin-bottom: 8px;">Transcription</h2>
+      <div id="transcript-log" class="active"></div>
+      <div id="transcript-live" class="pill">Waiting for speech...</div>
     </div>
 
     <div class="card">

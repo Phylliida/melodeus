@@ -140,7 +140,7 @@ def add_audio_system_device_callbacks(app, audio_system, loop: asyncio.AbstractE
             }
         )
 
-async def start_websocket_server(app, audio_system, ui_config):
+async def start_websocket_server(app, audio_system, ui_config, stt_system):
     connections = set()
 
     @app.get("/api/uiconfig")
@@ -193,7 +193,19 @@ async def start_websocket_server(app, audio_system, ui_config):
                 payls = json.dumps(payload)
                 await broadcast(payls)
                 await asyncio.sleep(0) # hand to other stuff so we don't exhaust async
+        async def stt_callback(stt_result):
+            payload = {
+                "type": "stt",
+                "text": stt_result.text,
+                "is_final": stt_result.is_final,
+                "is_edit": stt_result.is_edit,
+                "message_id": stt_result.message_id,
+                "speaker": stt_result.speaker_name,
+            }
+            await broadcast(json.dumps(payload))
+
         await audio_system.add_callback(audio_callback)
+        await stt_system.add_callback(stt_callback)
         while True:
             await asyncio.sleep(0.1)
 
@@ -207,8 +219,8 @@ async def main():
     config = PersistentMelodeusConfig.load_config(CONFIG_FILE)
 
     async with AudioSystem(config=config.audio) as audio_system:
-        async with AsyncSTT(config=config.stt, audio_system=audio_system):
-            await start_websocket_server(app, audio_system, config.ui)
+        async with AsyncSTT(config=config.stt, audio_system=audio_system) as stt_system:
+            await start_websocket_server(app, audio_system, config.ui, stt_system)
 
             @app.get("/")
             def index():

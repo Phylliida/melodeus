@@ -46,6 +46,15 @@ def float_to_int16_bytes(audio: np.ndarray) -> bytes:
     clipped = np.clip(audio, -1.0, 1.0)
     return (clipped * 32767.0).astype(np.int16).tobytes()
 
+
+def has_meaningful_change(a, b):
+    if a is None or b is None: return True
+    ignore=set("*\n\r\t #@\\/.,?!-+[]()&%$:")
+    # only send edited if it actually changed content (we don't care about punctuation diffs)
+    a_cleaned, _ = _collapse(a, ignore)
+    b_cleaned, _ = _collapse(b, ignore)
+    return a_cleaned.lower() != b_cleaned.lower()
+
 @dataclass
 class STTResult:
     """Result from speech-to-text recognition."""
@@ -58,6 +67,76 @@ class STTResult:
     speaker_name: Optional[str] = None
     timestamp: datetime = field(default_factory=datetime.now)
     raw_data: Optional[Dict[str, Any]] = None
+
+
+class TurnState(object):
+    def __init__(self, stt, turn_index, transcript, audio_window_start, audio_window_end):
+        self.turn_index = turn_index
+        self.stt = stt
+        self.transcript = transcript
+        self.uuid = str(uuid.uuid4())
+        self.last_write = (time.time(), transcript)
+        self.audio_window_start = audio_window_start
+        self.audio_window_end = audio_window_end
+        self.is_edit = False
+    
+    async def emit(self, final: bool = False):
+        emit_data = self.build_emit_data(final)
+        await self.stt._emit_stt(emit_data)
+
+        # later ones are edits
+        self.is_edit = True
+
+    def build_emit_data(self, is_final: bool):
+        if self.stt.voice_fingerprinter:
+            from titanet_voice_fingerprinting import (
+                TitaNetVoiceFingerprinter,
+                WordTiming
+            )
+            word_timing = WordTiming(
+                word=self.transcript,
+                speaker_id=f"speaker {self.turn_idx}", # v2 doesn't have diarization yet
+                start_time=self.audio_window_start,
+                end_time=self.audio_window_end,
+                confidence=1)
+            user_tag = self.voice_fingerprinter.process_transcript_words(word_timings=[word_timing], sample_rate=SAMPLE_RATE)
+        else:
+            user_tag = "User"
+        return STTResult(
+            text = self.transcript,
+            confidence = 1.0,
+            is_final = is_final,
+            is_edit = self.is_edit,
+            speaker_id = None,
+            speaker_name = user_tag,
+            timestamp = datetime.now(),
+            message_id = self.uuid,
+        )
+
+    async def process(self, message):
+        # moved onto new turn
+        if message.turn_index != self.turn_index:
+            if len(self.transcript) > 0:
+                await self.emit(final=True)
+            return TurnState(
+                self.stt,
+                message.turn_index,
+                message.transcript,
+                message.audio_window_start,
+                message.audio_window_end)
+        
+        # still this turn, see if modified
+        transcript = message.transcript
+        last_modified_time, last_transcript = self.last_write
+        print(transcript)
+        if has_meaningful_change(transcript, last_transcript):
+            self.last_write = (time.time(), transcript)
+            self.transcript = transcript
+            self.audio_window_end = message.audio_window_end
+            await self.emit(final=False)
+        return self
+
+
 
 class AsyncSTT(object):
     def __init__(self, audio_system, config: STTConfig):
@@ -121,14 +200,14 @@ class AsyncSTT(object):
                         vad = channel_vads[channel]
                         if vad:
                             self.mixed_data += aec_frames[:,channel]
-                    R_target = 0.9
+                    R_target = 0.95
                     avg_energy = np.sqrt(np.dot(self.mixed_data, self.mixed_data))
                     if avg_energy > 0.1: # too quiet is just noise
                         gain = R_target / np.sqrt(avg_energy)
                         # slowly move gain
                         self.cur_gain = self.gain_avg_mu*self.cur_gain + (1-self.gain_avg_mu)*gain
                         self.mixed_data *= self.cur_gain
-                        print(avg_energy, self.cur_gain)
+                        #print(avg_energy, self.cur_gain)
                         np.clip(self.mixed_data, -1.0, 1.0, out=self.mixed_data)
                     mixed_data_pcm = float_to_int16_bytes(self.mixed_data)
                     if self.voice_fingerprinter is not None:
@@ -139,6 +218,7 @@ class AsyncSTT(object):
                         )
                         # increment frame count
                         self.num_audio_frames_recieved += len(self.mixed_data)
+                    await self.deepgram_turn()
                     await connection.send_media(mixed_data_pcm)
             except:
                 print("Error in audio callback")
@@ -146,14 +226,8 @@ class AsyncSTT(object):
                 raise
         while True:
             try:
-                self.prev_turn_idx = None
-                self.prev_transcript = ""
-                self.prev_audio_window_start = 0
-                self.prev_audio_window_end = 0
-                self.current_turn_history = []
-                self.current_turn_autosent_transcript = None
-                self.last_sent_message_uuid = None
-                self.num_audio_frames_recieved = 0
+                self.turn_state = TurnState(self, -1000, "", 0, 0)
+                self.last_message_stored = None
                 deepgram = AsyncDeepgramClient(api_key=self.deepgram_api_key)
                 connect_kwargs = dict(
                     model="flux-general-en",
@@ -210,8 +284,31 @@ class AsyncSTT(object):
 
     async def _emit_stt(self, stt):
         await self.stt_callbacks(stt)
+    
+        
 
-    async def deepgram_turn(self, message: ListenV2TurnInfo):
+
+    async def deepgram_turn(self, message: ListenV2TurnInfo = None):
+        # for the auto calls for auto send on delay
+        if message is None and self.last_message_stored is None:
+            return
+        if message is None:
+            return
+            message = self.last_message_stored
+        self.last_message_stored = message
+
+        self.turn_state = await self.turn_state.process(message)
+        
+        
+
+        
+    async def deepgram_turn_old(self, message: ListenV2TurnInfo = None):
+        if message is None and self.last_message_stored is None:
+            return
+        # this is for the auto calls to auto send through after delay
+        if message is None:
+            message = self.last_message_stored
+        self.last_message_stored = message
         event_type = (message.event or "").lower()
         turn_idx = message.turn_index
         transcript = message.transcript or ""
@@ -226,7 +323,7 @@ class AsyncSTT(object):
         # code to end turn earlier than deepgram decides for decreased latency
         if turn_idx != self.prev_turn_idx:
             self.current_turn_history = []    
-        if len(transcript) > 0:
+        if len(transcript) > 0 and (len(self.current_turn_history) == 0 or self.current_turn_history[-1][1] != transcript):
             self.current_turn_history.append((time.time(), transcript))
         if turn_idx == self.prev_turn_idx and len(transcript) > 0 and self.has_meaningful_change(transcript, self.current_turn_autosent_transcript):
             ms_until_autosend = 750
@@ -238,7 +335,7 @@ class AsyncSTT(object):
                 else:
                     oldest_time_still_same = old_time
             if (time.time() - oldest_time_still_same)*1000 > ms_until_autosend:
-                #print("Autosend")
+                print("Autosend")
                 if self.current_turn_autosent_transcript is not None:
                     edit_message = True
                 else:
@@ -319,14 +416,6 @@ class AsyncSTT(object):
         #if event_type in {"turn_end", "speech_ended", "speech_end"}:
         #    self._on_utterance_end(message)
 
-
-    def has_meaningful_change(self, a, b):
-        if a is None or b is None: return True
-        ignore=set("*\n\r\t #@\\/.,?!-+[]()&%$:")
-        # only send edited if it actually changed content (we don't care about punctuation diffs)
-        a_cleaned, _ = _collapse(a, ignore)
-        b_cleaned, _ = _collapse(b, ignore)
-        return a_cleaned.lower() != b_cleaned.lower()
 
     async def deepgram_error(self, error: Exception):
         """Handle errors emitted by the Deepgram websocket client."""
