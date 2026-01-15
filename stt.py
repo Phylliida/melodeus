@@ -128,7 +128,6 @@ class TurnState(object):
         # still this turn, see if modified
         transcript = message.transcript
         last_modified_time, last_transcript = self.last_write
-        print(transcript)
         if has_meaningful_change(transcript, last_transcript):
             self.last_write = (time.time(), transcript)
             self.transcript = transcript
@@ -218,7 +217,6 @@ class AsyncSTT(object):
                         )
                         # increment frame count
                         self.num_audio_frames_recieved += len(self.mixed_data)
-                    await self.deepgram_turn()
                     await connection.send_media(mixed_data_pcm)
             except:
                 print("Error in audio callback")
@@ -227,7 +225,6 @@ class AsyncSTT(object):
         while True:
             try:
                 self.turn_state = TurnState(self, -1000, "", 0, 0)
-                self.last_message_stored = None
                 deepgram = AsyncDeepgramClient(api_key=self.deepgram_api_key)
                 connect_kwargs = dict(
                     model="flux-general-en",
@@ -285,138 +282,9 @@ class AsyncSTT(object):
     async def _emit_stt(self, stt):
         await self.stt_callbacks(stt)
     
-        
-
-
-    async def deepgram_turn(self, message: ListenV2TurnInfo = None):
-        # for the auto calls for auto send on delay
-        if message is None and self.last_message_stored is None:
-            return
-        if message is None:
-            return
-            message = self.last_message_stored
-        self.last_message_stored = message
-
+    async def deepgram_turn(self, message: ListenV2TurnInfo):
         self.turn_state = await self.turn_state.process(message)
         
-        
-
-        
-    async def deepgram_turn_old(self, message: ListenV2TurnInfo = None):
-        if message is None and self.last_message_stored is None:
-            return
-        # this is for the auto calls to auto send through after delay
-        if message is None:
-            message = self.last_message_stored
-        self.last_message_stored = message
-        event_type = (message.event or "").lower()
-        turn_idx = message.turn_index
-        transcript = message.transcript or ""
-        # speech started: todo
-        # if event_type == "startofturn":
-        #     await self._on_speech_started()
-        if transcript.strip() != "":
-            print(transcript)
-
-        send_message = False
-        edit_message = False
-        # code to end turn earlier than deepgram decides for decreased latency
-        if turn_idx != self.prev_turn_idx:
-            self.current_turn_history = []    
-        if len(transcript) > 0 and (len(self.current_turn_history) == 0 or self.current_turn_history[-1][1] != transcript):
-            self.current_turn_history.append((time.time(), transcript))
-        if turn_idx == self.prev_turn_idx and len(transcript) > 0 and self.has_meaningful_change(transcript, self.current_turn_autosent_transcript):
-            ms_until_autosend = 750
-            # if we took longer than that and still the same, autosend
-            oldest_time_still_same = time.time()
-            for old_time, old_transcript in self.current_turn_history[::-1]:
-                if old_transcript != transcript:
-                    break
-                else:
-                    oldest_time_still_same = old_time
-            if (time.time() - oldest_time_still_same)*1000 > ms_until_autosend:
-                print("Autosend")
-                if self.current_turn_autosent_transcript is not None:
-                    edit_message = True
-                else:
-                    send_message = True
-                self.current_turn_autosent_transcript = transcript
-            
-        # If we are on a new turn, send old turn
-        if turn_idx != self.prev_turn_idx and self.prev_turn_idx != None and self.prev_transcript:
-            if self.current_turn_autosent_transcript is not None:
-                if self.has_meaningful_change(self.current_turn_autosent_transcript, self.prev_transcript):
-                    edit_message = True
-            else:
-                send_message = True
-            
-        if send_message or edit_message:
-            if self.voice_fingerprinter:
-                from titanet_voice_fingerprinting import (
-                    TitaNetVoiceFingerprinter,
-                    WordTiming
-                )
-                word_timing = WordTiming(
-                    word=self.prev_transcript,
-                    speaker_id=f"speaker {turn_idx}", # v2 doesn't have diarization yet
-                    start_time=self.prev_audio_window_start,
-                    end_time=self.prev_audio_window_end,
-                    confidence=1)
-                user_tag = self.voice_fingerprinter.process_transcript_words(word_timings=[word_timing], sample_rate=SAMPLE_RATE)
-            else:
-                user_tag = "User"
-            message_uuid = str(uuid.uuid4()) if send_message else self.last_sent_message_uuid
-            self.last_sent_message_uuid = message_uuid
-            #print(("send" if send_message else "edit"), "with data")
-            #print(self.prev_transcript)
-            stt_result = STTResult(
-                text = self.prev_transcript,
-                confidence = 1.0,
-                is_final = True,
-                is_edit = edit_message,
-                speaker_id = None,
-                speaker_name = user_tag,
-                timestamp = datetime.now(),
-                message_id = message_uuid,
-            )
-            await self._emit_stt(
-                stt_result
-            )
-        if turn_idx != self.prev_turn_idx:
-            self.last_sent_message_uuid = None
-            self.current_turn_autosent_transcript = None
-            
-
-        self.prev_turn_idx = turn_idx
-        self.prev_transcript = transcript
-        self.prev_audio_window_start = message.audio_window_start
-        self.prev_audio_window_end = message.audio_window_end
-
-        if transcript and not send_message and not edit_message and self.last_sent_message_uuid is None:
-            self.most_recent_turn_text = transcript
-            
-            stt_result = STTResult(
-                text = transcript,
-                confidence = 1.0,
-                is_final = False,
-                speaker_id = None,
-                speaker_name =  None,
-                timestamp = datetime.now(),
-                message_id = None,
-                is_edit = False
-            ) 
-
-            await self._emit_stt(
-                stt_result
-            )
-            print(f"Turn {turn_idx} {transcript}")
-        else:
-            #print(f"Turn {turn_idx} Dummy turn")
-            pass
-        #if event_type in {"turn_end", "speech_ended", "speech_end"}:
-        #    self._on_utterance_end(message)
-
-
     async def deepgram_error(self, error: Exception):
         """Handle errors emitted by the Deepgram websocket client."""
         error_message = str(error)
