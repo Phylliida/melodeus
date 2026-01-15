@@ -122,11 +122,8 @@ def add_audio_system_device_callbacks(app, audio_system, loop: asyncio.AbstractE
         while not done:
             done = True
             for output_device, stream in output_streams:
-                print(stream.num_queued_samples)
                 if stream.num_queued_samples != 0:
                     done = False
-                    print("Not done")
-            print(done)
             # poll until done
             await run_in_loop(asyncio.sleep(0.1))
         
