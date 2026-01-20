@@ -7,6 +7,29 @@ from pathlib import Path
 from copy import deepcopy
 import json
 
+
+@dataclass
+class TTSConfig:
+    """Configuration for TTS settings."""
+    api_key: str
+    voice_id: str = "T2KZm9rWPG5TgXTyjt7E"  # Catalyst voice
+    model_id: str = "eleven_multilingual_v2"
+    output_format: str = "pcm_22050"
+    sample_rate: int = 22050
+    resampler_quality: int = 5 # speex resampler quality, 5 is fine
+    speed: float = 1.0
+    stability: float = 0.5
+    similarity_boost: float = 0.8
+    chunk_size: int = 1024
+    buffer_size: int = 2048
+    # Multi-voice support
+    emotive_voice_id: Optional[str] = None  # Voice for text in asterisks (*emotive text*)
+    emotive_speed: float = 1.0
+    emotive_stability: float = 0.5
+    emotive_similarity_boost: float = 0.8
+    # Audio output device
+    output_device_name: Optional[str] = None  # None = default device, or specify device name
+
 @dataclass(slots=True)
 class AudioSystemState:
     input_devices: List[dict] = field(default_factory=list)
@@ -83,4 +106,5 @@ class UISettings:
 class MelodeusConfig:
     audio: AudioSystemConfig = field(default_factory=AudioSystemConfig)
     stt: STTConfig = field(default_factory=STTConfig)
+    tts: TTSConfig = field(default_factory=TTSConfig)
     ui: UISettings = field(default_factory=UISettings)

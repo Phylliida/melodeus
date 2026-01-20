@@ -140,7 +140,7 @@ def add_audio_system_device_callbacks(app, audio_system, loop: asyncio.AbstractE
             }
         )
 
-async def start_websocket_server(app, audio_system, ui_config, stt_system):
+async def start_websocket_server(app, audio_system, ui_config, stt_system, tts_system):
     connections = set()
 
     @app.get("/api/uiconfig")
@@ -220,30 +220,31 @@ async def main():
 
     async with AudioSystem(config=config.audio) as audio_system:
         async with AsyncSTT(config=config.stt, audio_system=audio_system) as stt_system:
-            await start_websocket_server(app, audio_system, config.ui, stt_system)
+            async with AsyncTTS(config=config.tts, audio_system=audio_system) as tts_system:
+                await start_websocket_server(app, audio_system, config.ui, stt_system)
 
-            @app.get("/")
-            def index():
-                return app.send_static_file("melodeus.html")
+                @app.get("/")
+                def index():
+                    return app.send_static_file("melodeus.html")
 
-            loop = asyncio.get_running_loop()
-            add_audio_system_device_callbacks(app, audio_system, loop)
+                loop = asyncio.get_running_loop()
+                add_audio_system_device_callbacks(app, audio_system, loop)
 
-            server = make_server("0.0.0.0", 5000, app)
-            server.timeout = 0.1  # seconds per poll
+                server = make_server("0.0.0.0", 5000, app)
+                server.timeout = 0.1  # seconds per poll
 
-            def serve_forever():
-                with server:
-                    server.serve_forever()
+                def serve_forever():
+                    with server:
+                        server.serve_forever()
 
-            server_thread = threading.Thread(target=serve_forever, daemon=True)
-            server_thread.start()
-            try:
-                while True:
-                    await asyncio.sleep(0.1)
-            finally:
-                server.shutdown()
-                server_thread.join()
+                server_thread = threading.Thread(target=serve_forever, daemon=True)
+                server_thread.start()
+                try:
+                    while True:
+                        await asyncio.sleep(0.1)
+                finally:
+                    server.shutdown()
+                    server_thread.join()
 
 
 if __name__ == "__main__":
