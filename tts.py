@@ -219,6 +219,7 @@ class AsyncTTS:
                             "stability": voice_config.stability,
                             "similarity_boost": voice_config.similarity_boost
                         }
+                        print(self.config.keys())
                         # Send initial configuration
                         initial_message = {
                             "text": " ",
@@ -266,7 +267,7 @@ class AsyncTTS:
             print(traceback.print_exc())
         finally:
             if not output_stream is None:
-                self.audio_system.end_audio_stream(output_device, output_stream)
+                await self.audio_system.end_audio_stream(output_device, output_stream)
             if emit_word_task:
                 try:
                     emit_word_task.cancel()
@@ -443,3 +444,9 @@ async def stream_sentences(
     tail = buffer.strip()
     if tail:
         yield tail
+
+def int16_bytes_to_float(audio_bytes: bytes) -> np.ndarray:
+    """Convert signed 16-bit PCM bytes to float32 in [-1, 1]."""
+    if not audio_bytes:
+        return np.zeros(0, dtype=np.float32)
+    return np.frombuffer(audio_bytes, dtype=np.int16).astype(np.float32) / 32768.0

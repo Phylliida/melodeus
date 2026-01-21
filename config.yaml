@@ -35,7 +35,7 @@ stt:
       max_speakers: 4
       voice_fingerprint_length: 128
 tts:
-  elevanlabs_api_key: ''
+  elevenlabs_api_key: 'sk_39216ad343ab875c4e2ded581553fc73c7a0cfa08c7bdcaf'
   output_format: pcm_22050
   resampler_quality: 5
   sample_rate: 22050
@@ -50,13 +50,13 @@ tts:
         similarity_boost: 0.8
         speed: 1.0
         stability: 0.5
-        voice_id: T2KZm9rWPG5TgXTyjt7E
+        voice_id: hpp4J3VqNfWAUOO0d1Us
       prompt_name: A
       voice:
         model_id: eleven_multilingual_v2
         similarity_boost: 0.8
         speed: 1.0
         stability: 0.5
-        voice_id: T2KZm9rWPG5TgXTyjt7E
+        voice_id: hpp4J3VqNfWAUOO0d1Us
 ui:
   show_waveforms: true

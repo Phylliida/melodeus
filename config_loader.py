@@ -16,7 +16,7 @@ class ContextConfig:
 @dataclass
 class TTSVoiceConfigInner:
     model_id: str = "eleven_multilingual_v2"
-    voice_id: str = "T2KZm9rWPG5TgXTyjt7E"  # Catalyst voice
+    voice_id: str = "hpp4J3VqNfWAUOO0d1Us"  # default voice
     speed: float = 1.0
     stability: float = 0.5
     similarity_boost: float = 0.8

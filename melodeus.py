@@ -207,6 +207,8 @@ async def start_websocket_server(app, audio_system, ui_config, stt_system, tts_s
                 await broadcast(payls)
                 await asyncio.sleep(0) # hand to other stuff so we don't exhaust async
         async def stt_callback(stt_result):
+            print("Got stt result")
+            print(stt_result)
             await context.update(
                 uuid=stt_result.message_id,
                 author=stt_result.speaker_name,
@@ -256,8 +258,10 @@ async def start_websocket_server(app, audio_system, ui_config, stt_system, tts_s
             )
 
         async def context_callback(update):
+            print("Got update")
             payload = asdict(update)
             payload['type'] = 'context'
+            print(payload)
             await broadcast(payload)
 
         await audio_system.add_callback(audio_callback)
