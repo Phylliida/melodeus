@@ -14,7 +14,6 @@ import numpy as np
 import websockets
 
 from config_loader import TTSConfig
-from mel_aec_audio import int16_bytes_to_float, interrupt_playback, shared_sample_rate
 from async_callback_manager import AsyncCallbackManager
 
 @dataclass
@@ -29,7 +28,7 @@ class AlignmentData:
     chars: list
     chars_start_times_ms: list
 
-class AsyncTTSStreamer:
+class AsyncTTS:
     """Async TTS Streamer with interruption capabilities and spoken content tracking."""
     
     def __init__(self, audio_system, config: TTSConfig):
@@ -172,7 +171,7 @@ class AsyncTTSStreamer:
                                     chars_start_times_ms=alignment['charStartTimesMs']
                                 )
                                 self.alignments.append(alignment_data)
-                            play_start_time += buffer_len/float(shared_sample_rate())
+                            play_start_time += buffer_len/float(self.config.sample_rate)
 
 
                     await websocket.close()
@@ -247,7 +246,6 @@ class AsyncTTSStreamer:
                 #print(self.generated_text)
 
             # interrupt audio, this clears the buffers
-            await interrupt_playback()
             await interrupted_callback(
                 self.generated_text,
                 0 if start_time_played is None else time.time() - start_time_played)

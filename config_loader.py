@@ -6,6 +6,7 @@ from typing import Optional, Dict, Any, List
 from pathlib import Path
 from copy import deepcopy
 import json
+import traceback
 
 
 @dataclass
@@ -13,16 +14,12 @@ class ContextConfig:
     history: str = "contexts/context.jsonl"
 
 @dataclass
-class TTSConfig:
-    """Configuration for TTS settings."""
-    api_key: str
-    output_format: str = "pcm_22050"
-    sample_rate: int = 22050
-    resampler_quality: int = 5 # speex resampler quality, 5 is fine
-    # have a default voices option if not initialized to something
-    voices: Dict[str, TTSVoiceConfig] = field(
-        default_factory=lambda: {"default": TTSVoiceConfig.default()}
-    )
+class TTSVoiceConfigInner:
+    model_id: str = "eleven_multilingual_v2"
+    voice_id: str = "T2KZm9rWPG5TgXTyjt7E"  # Catalyst voice
+    speed: float = 1.0
+    stability: float = 0.5
+    similarity_boost: float = 0.8
 
 @dataclass
 class TTSVoiceConfig:
@@ -33,14 +30,22 @@ class TTSVoiceConfig:
     voice: TTSVoiceConfigInner = field(default_factory=TTSVoiceConfigInner)
     emotive_voice: TTSVoiceConfigInner = field(default_factory=TTSVoiceConfigInner)
 
+    @classmethod
+    def default(cls) -> "TTSVoiceConfig":
+        return cls()
+
 @dataclass
-class TTSVoiceConfigInner:
-    model_id: str = "eleven_multilingual_v2"
-    voice_id: str = "T2KZm9rWPG5TgXTyjt7E"  # Catalyst voice
-    speed: float = 1.0
-    stability: float = 0.5
-    similarity_boost: float = 0.8
-    
+class TTSConfig:
+    """Configuration for TTS settings."""
+    api_key: str = ""
+    output_format: str = "pcm_22050"
+    sample_rate: int = 22050
+    resampler_quality: int = 5 # speex resampler quality, 5 is fine
+    # have a default voices option if not initialized to something
+    voices: Dict[str, TTSVoiceConfig] = field(
+        default_factory=lambda: {"default": TTSVoiceConfig.default()}
+    )
+
 @dataclass(slots=True)
 class AudioSystemState:
     input_devices: List[dict] = field(default_factory=list)
@@ -58,8 +63,22 @@ class AudioSystemState:
     @classmethod
     def from_dict(cls, dict_values) -> "AudioSystemState":
         res = cls(**dict_values)
-        res.input_devices = [InputDeviceConfig.from_dict(cfg) for cfg in res.input_devices]
-        res.output_devices = [OutputDeviceConfig.from_dict(cfg) for cfg in res.output_devices]
+        parsed_inputs = []
+        for cfg in res.input_devices:
+            try:
+                parsed_inputs.append(InputDeviceConfig.from_dict(cfg))
+            except:
+                print(f"Failed to parse input device {cfg}, ignoring:")
+                print(traceback.print_exc())
+        parsed_outputs = res.output_devices
+        for cfg in res.output_devices:
+            try:
+                parsed_outputs.append(InputDeviceConfig.from_dict(cfg))
+            except:
+                print(f"Failed to parse input device {cfg}, ignoring:")
+                print(traceback.print_exc())
+        res.input_devices = parsed_inputs
+        res.output_devices = parsed_outputs
         return res
 
     @classmethod

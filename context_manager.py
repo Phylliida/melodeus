@@ -4,7 +4,7 @@ import os
 import asyncio
 from pathlib import Path
 import traceback
-from .async_callback_manager import AsyncCallbackManager
+from async_callback_manager import AsyncCallbackManager
 from enum import Enum
 import json
 

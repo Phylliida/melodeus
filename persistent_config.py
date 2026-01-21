@@ -47,10 +47,13 @@ class PersistentMelodeusConfig(Generic[T]):
     def to_dict(self):
         res = {}
         for k,v in self.data.items():
-            res[k] = v.to_dict() if hasattr(v, "to_dict") else v
-            if type(v) is list:
+            if type(v) is dict:
+                res[k] = {ki: (vi.to_dict() if hasattr(vi, "to_dict") else vi) for (ki,vi) in v.items()}
+            elif type(v) is list:
                 res[k] = [(vi.to_dict() if hasattr(vi, "to_dict") else vi) for vi in v]
-        return res
+            else:
+                res[k] = v.to_dict() if hasattr(v, "to_dict") else v
+            return res
     
     @classmethod
     def from_dict(cls, d, parent=None, path=None):
@@ -60,9 +63,10 @@ class PersistentMelodeusConfig(Generic[T]):
             res = cls(parent=parent, path=path)
             converted_dict = {}
             for k,v in d.items():
-                converted_dict[k] = cls.from_dict(v, parent=res) if type(v) is dict else v
                 if type(v) is list:
                     converted_dict[k] = [(cls.from_dict(vi, parent=res) if type(vi) is dict else vi) for vi in v]
+                else:
+                    converted_dict[k] = cls.from_dict(v, parent=res) if type(v) is dict else v
             res.data = converted_dict
             return res
 
