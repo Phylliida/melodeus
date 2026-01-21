@@ -53,7 +53,7 @@ class PersistentMelodeusConfig(Generic[T]):
                 res[k] = [(vi.to_dict() if hasattr(vi, "to_dict") else vi) for vi in v]
             else:
                 res[k] = v.to_dict() if hasattr(v, "to_dict") else v
-            return res
+        return res
     
     @classmethod
     def from_dict(cls, d, parent=None, path=None):

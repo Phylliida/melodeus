@@ -1,28 +1,11 @@
 audio:
   state:
-    input_devices:
-    - audio_buffer_seconds: 20
-      calibration_packets: 20
-      channels: 2
-      device_name: Built-in Microphone
-      history_len: 100
-      host_id: CoreAudio
-      resampler_quality: 5
-      sample_format: f32
-      sample_rate: 48000
-    output_devices:
-    - audio_buffer_seconds: 20
-      calibration_packets: 20
-      channels: 2
-      device_name: Built-in Output
-      frame_size: 160
-      history_len: 100
-      host_id: CoreAudio
-      resampler_quality: 5
-      sample_format: f32
-      sample_rate: 44100
+    input_devices: []
+    output_devices: []
+context:
+  history: contexts/context.jsonl
 stt:
-  deepgram_api_key: 87a6f2913693d353b005b7a35959df65c5a54d65
+  deepgram_api_key: '87a6f2913693d353b005b7a35959df65c5a54d65'
   enable_speaker_id: false
   keyterm: ''
   speaker_id:
@@ -32,5 +15,29 @@ stt:
       learning_mode: true
       max_speakers: 4
       voice_fingerprint_length: 128
+tts:
+  elevanlabs_api_key: ''
+  output_format: pcm_22050
+  resampler_quality: 5
+  sample_rate: 22050
+  voices:
+    default:
+      device: {}
+      device_channels:
+      - 0
+      display_name: A
+      emotive_voice:
+        model_id: eleven_multilingual_v2
+        similarity_boost: 0.8
+        speed: 1.0
+        stability: 0.5
+        voice_id: T2KZm9rWPG5TgXTyjt7E
+      prompt_name: A
+      voice:
+        model_id: eleven_multilingual_v2
+        similarity_boost: 0.8
+        speed: 1.0
+        stability: 0.5
+        voice_id: T2KZm9rWPG5TgXTyjt7E
 ui:
   show_waveforms: true

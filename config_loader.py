@@ -37,7 +37,7 @@ class TTSVoiceConfig:
 @dataclass
 class TTSConfig:
     """Configuration for TTS settings."""
-    api_key: str = ""
+    elevanlabs_api_key: str = ""
     output_format: str = "pcm_22050"
     sample_rate: int = 22050
     resampler_quality: int = 5 # speex resampler quality, 5 is fine
@@ -66,12 +66,14 @@ class AudioSystemState:
         parsed_inputs = []
         for cfg in res.input_devices:
             try:
+                cfg = cfg if not hasattr(cfg, "to_dict") else cfg.to_dict()
                 parsed_inputs.append(InputDeviceConfig.from_dict(cfg))
             except:
                 print(f"Failed to parse input device {cfg}, ignoring:")
                 print(traceback.print_exc())
         parsed_outputs = res.output_devices
         for cfg in res.output_devices:
+            cfg = cfg if not hasattr(cfg, "to_dict") else cfg.to_dict()
             try:
                 parsed_outputs.append(InputDeviceConfig.from_dict(cfg))
             except:
