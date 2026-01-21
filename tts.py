@@ -100,24 +100,23 @@ class AsyncTTSStreamer:
             return
         
         tts_config = self.config.voices[tts_id]
-        for cfg in [tts_config.voice, tts_config.emotive_voice]:
-            output_device = cfg.device
-            # if empty, fall back to first output device
-            if len(output_device) == 0:
-                output_devices = self.audio_system.get_connected_output_devices()
-                if len(output_devices) == 0:
-                    print("No available output devices, bailing")
-                    return
-                else:
-                    cfg.device = output_devices[0]
-                    output_device = cfg.device
-                    print(f"No device specified for voice {tts_id}, falling back to device {tts_config.device.to_dict()}")
+        output_device = tts_config.device
+        # if empty, fall back to first output device
+        if len(output_device) == 0:
+            output_devices = self.audio_system.get_connected_output_devices()
+            if len(output_devices) == 0:
+                print("No available output devices, bailing")
+                return
+            else:
+                tts_config.device = output_devices[0]
+                output_device = tts_config.device
+                print(f"No device specified for voice {tts_id}, falling back to device {tts_config.device.to_dict()}")
         try:
             emit_word_task = asyncio.create_task(self._emit_word_helper())
-            # map first channel of voice to target output channel
-            channel_map = {0: [tts_config.device_channel]}
+            # map first channel of voice to all target output channels
+            channel_map = {0: tts_config.device_channels}
             output_stream = self.audio_system.begin_audio_stream(
-                tts_config.device,
+                output_device,
                 1,
                 channel_map,
                 math.ceil(max_audio_seconds),

@@ -28,6 +28,8 @@ class TTSConfig:
 class TTSVoiceConfig:
     display_name: str = "A"
     prompt_name: str = "A"
+    device: Dict[str, Any] = field(default_factory=dict)
+    device_channels: List[int] = field(default_factory=lambda: [0])
     voice: TTSVoiceConfigInner = field(default_factory=TTSVoiceConfigInner)
     emotive_voice: TTSVoiceConfigInner = field(default_factory=TTSVoiceConfigInner)
 
@@ -38,8 +40,6 @@ class TTSVoiceConfigInner:
     speed: float = 1.0
     stability: float = 0.5
     similarity_boost: float = 0.8
-    device: Dict[str, Any] = field(default_factory=dict)
-    device_channel: int = 0
     
 @dataclass(slots=True)
 class AudioSystemState:
