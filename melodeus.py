@@ -195,21 +195,11 @@ async def start_websocket_server(app, audio_system, ui_config, stt_system, tts_s
                 await broadcast(payls)
                 await asyncio.sleep(0) # hand to other stuff so we don't exhaust async
         async def stt_callback(stt_result):
-            payload = {
-                "type": "stt",
-                "text": stt_result.text,
-                "is_final": stt_result.is_final,
-                "is_edit": stt_result.is_edit,
-                "message_id": stt_result.message_id,
-                "speaker": stt_result.speaker_name,
-            }
             await context.update(
                 uuid=stt_result.message_id,
                 author=stt_result.speaker_name,
                 message=stt_result.text)
             await get_model_response("default")
-        
-        
         
         async def get_model_response(author_id):
             async def text_generator():
@@ -253,8 +243,14 @@ async def start_websocket_server(app, audio_system, ui_config, stt_system, tts_s
                 interrupted_callback=interrupted
             )
 
+        async def context_callback(update):
+            payload = to_dict(update)
+            payload['type'] = 'context'
+            broadcast(payload)
+
         await audio_system.add_callback(audio_callback)
         await stt_system.add_callback(stt_callback)
+        await context.add_callback(context_callback)
         while True:
             await asyncio.sleep(0.1)
 
