@@ -168,14 +168,21 @@ async def start_websocket_server(app, audio_system, ui_config, stt_system, tts_s
         for ws in dead:
             connections.discard(ws)
 
+    def serialize_context(update):
+        return {
+            "type": "context",
+            "action": getattr(update.action, "value", update.action),
+            "uuid": update.uuid,
+            "author": update.author,
+            "message": update.message,
+        }
+
     async def websocket_server(websocket):
         connections.add(websocket)
         try:
             async def send_state_to_websocket(update):
                 try:
-                    update = update.to_dict()
-                    update['type'] = 'context'
-                    await ws.send(json.dumps(update))
+                    await websocket.send(json.dumps(serialize_context(update)))
                 except Exception:
                     pass
             # fastforward to current history state
@@ -207,8 +214,7 @@ async def start_websocket_server(app, audio_system, ui_config, stt_system, tts_s
                 await broadcast(payls)
                 await asyncio.sleep(0) # hand to other stuff so we don't exhaust async
         async def stt_callback(stt_result):
-            print("Got stt result")
-            print(stt_result)
+            print(stt_result.text)
             await context.update(
                 uuid=stt_result.message_id,
                 author=stt_result.speaker_name,
@@ -258,11 +264,9 @@ async def start_websocket_server(app, audio_system, ui_config, stt_system, tts_s
             )
 
         async def context_callback(update):
-            print("Got update")
-            payload = asdict(update)
-            payload['type'] = 'context'
+            payload = serialize_context(update)
             print(payload)
-            await broadcast(payload)
+            await broadcast(json.dumps(payload))
 
         await audio_system.add_callback(audio_callback)
         await stt_system.add_callback(stt_callback)

@@ -139,18 +139,28 @@ const renderWaveforms = (payload) => {
   drawWave("aec");
 };
 
+const handleMessage = (text) => {
+  try {
+    const data = JSON.parse(text);
+    if (data.type === "waveform") renderWaveforms(data);
+    else if (data.type === "stt" && transcriptHandler) transcriptHandler(data);
+    else if (data.type === "context" && window.handleContextUpdate) window.handleContextUpdate(data);
+  } catch (e) {
+    // Handle occasional concatenated payloads like {}{}
+    const parts = text.includes("}{") ? text.split(/}\s*{/).map((p, i, arr) => (i ? "{" : "") + p + (i < arr.length - 1 ? "}" : "")) : null;
+    if (parts && parts.length > 1) {
+      parts.forEach(handleMessage);
+    } else {
+      console.warn("Bad ws payload", e);
+    }
+  }
+};
+
 const connect = () => {
   const ws = new WebSocket(url());
   ws.onopen = () => set_ws_status_color("#3f3");
   ws.onmessage = (ev) => {
-    try {
-      const data = JSON.parse(ev.data);
-      if (data.type === "waveform") renderWaveforms(data);
-      else if (data.type === "stt" && transcriptHandler) transcriptHandler(data);
-      else if (data.type === "context" && window.handleContextUpdate) window.handleContextUpdate(data);
-    } catch (e) {
-      console.warn("Bad ws payload", e);
-    }
+    handleMessage(ev.data);
     set_ws_status_color("#3f3");
   }
   // don't make both of these call set timeout or we get exponential growth

@@ -147,6 +147,7 @@ class AsyncTTS:
                     # we buffer all audio before playing because that prevents jitters
                     # (this is okay because we do this one sentence at a time)
                     async for message in websocket:
+                        await asyncio.sleep(0) # hand to other asyncs
                         data = json.loads(message)
                         audio_base64 = data.get("audio")
                         if audio_base64 and len(audio_base64) > 0:
@@ -186,8 +187,10 @@ class AsyncTTS:
 
 
                     await websocket.close()
+                    await asyncio.sleep(0) # hand to other asyncs
                     
             async for sentence in stream_sentences(text_generator):
+                await asyncio.sleep(0) # hand to other asyncs
                 # add spaces back between the sentences
                 self.generated_text = (self.generated_text + " " + sentence).strip()
                 # split out *emotive* into seperate parts
@@ -230,6 +233,7 @@ class AsyncTTS:
                     await websocket.send(json.dumps({
                         "text": message.strip() + " ", # elevenlabs always requires ends with single space
                     }))
+                    await asyncio.sleep(0) # hand to other asyncs
 
                 # stream the speech, this allows us to start outputting speech before it's done outputting
                 await flush_websocket(websocket)
@@ -290,9 +294,9 @@ class AsyncTTS:
         self.speak_task = asyncio.create_task(self._speak_text_helper(tts_id, text_generator, first_audio_callback, interrupted_callback))
 
         # wait for it to finish
-        await self.speak_task
+        # await self.speak_task
 
-        self.speak_task = None
+        # self.speak_task = None
     
     def is_currently_playing(self):
         return self.speak_task is not None
