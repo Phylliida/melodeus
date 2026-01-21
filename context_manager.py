@@ -1,6 +1,7 @@
 from dataclasses import dataclass
 from dataclasses import asdict
 import os
+import asyncio
 from pathlib import Path
 import traceback
 from .async_callback_manager import AsyncCallbackManager
@@ -72,6 +73,19 @@ class AsyncContextManager(object):
         dest.parent.mkdir(parents=True, exist_ok=True)
         with open(dest, "a", encoding="utf-8") as f:
             f.write(json.dumps(asdict(context_update)) + "\n")
+
+    async def fetch_current_state(self, callback):
+        for message in self.messages:
+            update = ContextUpdate(
+                action=ContextAction.CREATE,
+                uuid=message.uuid,
+                author=message.author,
+                message=message.message
+            )
+            if asyncio.iscoroutinefunction(callback):
+                await callback(update)
+            else:
+                callback(update)
 
     async def emit(self, context_update, record=True):
         await self.context_update_callback(context_update)

@@ -168,6 +168,15 @@ async def start_websocket_server(app, audio_system, ui_config, stt_system, tts_s
     async def websocket_server(websocket):
         connections.add(websocket)
         try:
+            async def send_state_to_websocket(update):
+                try:
+                    update = update.to_dict()
+                    update['type'] = 'context'
+                    await ws.send(json.dumps(update))
+                except Exception:
+                    pass
+            # fastforward to current history state
+            await context.fetch_current_state(send_state_to_websocket)
             await websocket.wait_closed()
         finally:
             connections.discard(websocket)
