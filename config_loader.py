@@ -9,32 +9,42 @@ import json
 
 
 @dataclass
+class ContextConfig:
+    history: str = "contexts/context.jsonl"
+
+@dataclass
 class TTSConfig:
     """Configuration for TTS settings."""
     api_key: str
-    voice_id: str = "T2KZm9rWPG5TgXTyjt7E"  # Catalyst voice
-    model_id: str = "eleven_multilingual_v2"
     output_format: str = "pcm_22050"
     sample_rate: int = 22050
     resampler_quality: int = 5 # speex resampler quality, 5 is fine
+    # have a default voices option if not initialized to something
+    voices: Dict[str, TTSVoiceConfig] = field(
+        default_factory=lambda: {"default": TTSVoiceConfig.default()}
+    )
+
+@dataclass
+class TTSVoiceConfig:
+    voice: TTSVoiceConfigInner = field(default_factory=TTSVoiceConfigInner)
+    emotive_voice: TTSVoiceConfigInner = field(default_factory=TTSVoiceConfigInner)
+
+@dataclass
+class TTSVoiceConfigInner:
+    model_id: str = "eleven_multilingual_v2"
+    voice_id: str = "T2KZm9rWPG5TgXTyjt7E"  # Catalyst voice
     speed: float = 1.0
     stability: float = 0.5
     similarity_boost: float = 0.8
-    chunk_size: int = 1024
-    buffer_size: int = 2048
-    # Multi-voice support
-    emotive_voice_id: Optional[str] = None  # Voice for text in asterisks (*emotive text*)
-    emotive_speed: float = 1.0
-    emotive_stability: float = 0.5
-    emotive_similarity_boost: float = 0.8
-    # Audio output device
-    output_device_name: Optional[str] = None  # None = default device, or specify device name
-
+    device: Dict[str, Any] = field(default_factory=dict)
+    device_channel: int = 0
+    
 @dataclass(slots=True)
 class AudioSystemState:
     input_devices: List[dict] = field(default_factory=list)
     output_devices: List[dict] = field(default_factory=list)
 
+    # because this is a wrapper around a rust object we need special helpers here
     def to_dict(self) -> dict:
         return {
             'input_devices': [cfg.to_dict() for cfg in self.input_devices],
@@ -99,7 +109,7 @@ class AudioSystemConfig:
     state: AudioSystemState = field(default_factory=AudioSystemState)
 
 @dataclass
-class UISettings:
+class UIConfig:
     show_waveforms: bool = True
 
 @dataclass
@@ -107,4 +117,5 @@ class MelodeusConfig:
     audio: AudioSystemConfig = field(default_factory=AudioSystemConfig)
     stt: STTConfig = field(default_factory=STTConfig)
     tts: TTSConfig = field(default_factory=TTSConfig)
-    ui: UISettings = field(default_factory=UISettings)
+    context: ContextConfig = field(default_factory=ContextConfig)
+    ui: UIConfig = field(default_factory=UIConfig)    

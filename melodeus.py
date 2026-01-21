@@ -1,8 +1,9 @@
 from flask import Flask, abort, jsonify, request
 from persistent_config import PersistentMelodeusConfig
 from pathlib import Path
-from audio_system import AudioSystem, load_wav
-from stt import AsyncSTT
+from .audio_system import AudioSystem, load_wav
+from .stt import AsyncSTT
+from .tts import AsyncTTS
 import numpy as np
 import base64
 import math
@@ -140,7 +141,7 @@ def add_audio_system_device_callbacks(app, audio_system, loop: asyncio.AbstractE
             }
         )
 
-async def start_websocket_server(app, audio_system, ui_config, stt_system, tts_system):
+async def start_websocket_server(app, audio_system, ui_config, stt_system, tts_system, context):
     connections = set()
 
     @app.get("/api/uiconfig")
@@ -202,7 +203,18 @@ async def start_websocket_server(app, audio_system, ui_config, stt_system, tts_s
                 "message_id": stt_result.message_id,
                 "speaker": stt_result.speaker_name,
             }
-            await broadcast(json.dumps(payload))
+            await context.update(
+                uuid=stt_result.message_id,
+                author=stt_result.speaker_name,
+                message=stt_result.text)
+            await get_model_response()
+        
+        
+        
+        async def get_model_response():
+            async def text_generator():
+                yield "Hello there the green beans are tasty! Do you think so?"
+            await tts_system.
 
         await audio_system.add_callback(audio_callback)
         await stt_system.add_callback(stt_callback)
@@ -221,30 +233,31 @@ async def main():
     async with AudioSystem(config=config.audio) as audio_system:
         async with AsyncSTT(config=config.stt, audio_system=audio_system) as stt_system:
             async with AsyncTTS(config=config.tts, audio_system=audio_system) as tts_system:
-                await start_websocket_server(app, audio_system, config.ui, stt_system)
+                async with AsyncContextManager(config=config.context) as context:
+                    await start_websocket_server(app, audio_system, config.ui, stt_system, tts_system, context)
 
-                @app.get("/")
-                def index():
-                    return app.send_static_file("melodeus.html")
+                    @app.get("/")
+                    def index():
+                        return app.send_static_file("melodeus.html")
 
-                loop = asyncio.get_running_loop()
-                add_audio_system_device_callbacks(app, audio_system, loop)
+                    loop = asyncio.get_running_loop()
+                    add_audio_system_device_callbacks(app, audio_system, loop)
 
-                server = make_server("0.0.0.0", 5000, app)
-                server.timeout = 0.1  # seconds per poll
+                    server = make_server("0.0.0.0", 5000, app)
+                    server.timeout = 0.1  # seconds per poll
 
-                def serve_forever():
-                    with server:
-                        server.serve_forever()
+                    def serve_forever():
+                        with server:
+                            server.serve_forever()
 
-                server_thread = threading.Thread(target=serve_forever, daemon=True)
-                server_thread.start()
-                try:
-                    while True:
-                        await asyncio.sleep(0.1)
-                finally:
-                    server.shutdown()
-                    server_thread.join()
+                    server_thread = threading.Thread(target=serve_forever, daemon=True)
+                    server_thread.start()
+                    try:
+                        while True:
+                            await asyncio.sleep(0.1)
+                    finally:
+                        server.shutdown()
+                        server_thread.join()
 
 
 if __name__ == "__main__":

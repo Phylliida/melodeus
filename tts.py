@@ -29,7 +29,23 @@ class AsyncTTSStreamer:
 
     async def __aexit__(self, exc_type, exc, tb):
         await self.interrupt()
-    
+
+    def _get_voice_settings(self, voice, is_emotive: bool) -> Dict[str, float]:
+        """Get voice settings for regular or emotive speech."""
+        voice_config = getattr(self.config, voice)
+        if is_emotive:
+            return {
+                "speed": voice_config.emotive_speed,
+                "stability": voice_config.emotive_stability,
+                "similarity_boost": voice_config.emotive_similarity_boost
+            }
+        else:
+            return {
+                "speed": voice_config.speed,
+                "stability": voice_config.stability,
+                "similarity_boost": voice_config.similarity_boost
+            }
+
     async def add_callback(self, callback):
         await self.word_callback.add_callback(callback)
 
@@ -60,7 +76,7 @@ class AsyncTTSStreamer:
             print(traceback.print_exc())
             print("Error in osc emit")
 
-    async def _speak_text_helper(self, text_generator: AsyncGenerator[str, None], output_device, output_channel, first_audio_callback) -> bool:
+    async def _speak_text_helper(self, tts_id, text_generator: AsyncGenerator[str, None], first_audio_callback, output_device, output_channel) -> bool:
         """
         Speak the given text (task that can be canceled)
         
@@ -146,7 +162,7 @@ class AsyncTTSStreamer:
             async for sentence in stream_sentences(text_generator):
                 # add spaces back between the sentences
                 self.generated_text = (self.generated_text + " " + sentence).strip()
-
+                tts_config = getattr(self.config, tts_id)
                 # split out *emotive* into seperate parts
                 eleven_messages = []
                 for text_part, is_emotive in self.extract_emotive_text(sentence):
@@ -155,35 +171,39 @@ class AsyncTTSStreamer:
                         voice_id = self.config.emotive_voice_id if is_emotive else self.config.voice_id
                         voice_settings = self._get_voice_settings(is_emotive)
 
-                        eleven_messages.append((voice_id, {
-                            "text": text_part.strip(),
-                            "voice_settings": voice_settings,
-                        }))
+                        eleven_messages.append((is_emotive, text_part.strip()))
 
                 # send text to websockets and receive and play audio
-                for voice_id, message in eleven_messages:
+                for is_emotive, message in eleven_messages:
+                    voice_config = tts_config.emotive_voice if is_emotive else tts_config.voice
+
                     # Connect to WebSocket (if needed)
-                    if current_voice != voice_id:
+                    if current_voice != voice_config.voice_id:
                         # Disconnect old websocket
                         if not websocket is None:
                             await flush_websocket(websocket)
                             websocket = None
-                        current_voice = voice_id
+                        current_voice = voice_config.voice_id
             
-                        uri = f"wss://api.elevenlabs.io/v1/text-to-speech/{voice_id}/stream-input"
-                        params = f"?model_id={self.config.model_id}&output_format={self.config.output_format}"
+                        uri = f"wss://api.elevenlabs.io/v1/text-to-speech/{voice_config.voice_id}/stream-input"
+                        params = f"?model_id={voice_config.model_id}&output_format={self.config.output_format}"
 
                         websocket = await websockets.connect(uri + params)
 
+                        voice_settings = {
+                            "speed": voice_config.speed,
+                            "stability": voice_config.stability,
+                            "similarity_boost": voice_config.similarity_boost
+                        }
                         # Send initial configuration
                         initial_message = {
                             "text": " ",
-                            "voice_settings": message["voice_settings"],
+                            "voice_settings": voice_settings,
                             "xi_api_key": self.config.api_key
                         }
                         await websocket.send(json.dumps(initial_message))
                     await websocket.send(json.dumps({
-                        "text": message['text'].strip() + " ", # elevenlabs always requires ends with single space
+                        "text": message.strip() + " ", # elevenlabs always requires ends with single space
                     }))
 
                 # stream the speech, this allows us to start outputting speech before it's done outputting
@@ -234,12 +254,12 @@ class AsyncTTSStreamer:
                     print(f"TTS websocket close error")
                     print(traceback.print_exc())
             
-    async def speak_text(self, text_generator: AsyncGenerator[str, None], first_audio_callback, osc_client, osc_client_address):
+    async def speak_text(self, text_generator: AsyncGenerator[str, None], first_audio_callback, output_device, output_channel):
         # interrupt (if already running)
         await self.interrupt()
 
         # start the task (this way it's cancellable and we don't need to spam checks)
-        self.speak_task = asyncio.create_task(self._speak_text_helper(text_generator, first_audio_callback, osc_client, osc_client_address))
+        self.speak_task = asyncio.create_task(self._speak_text_helper(text_generator, first_audio_callback, output_device, output_channel))
 
         # wait for it to finish
         await self.speak_task
