@@ -145,8 +145,6 @@ class AsyncTTSStreamer:
                             if not first_audio_callback is None:
                                 await first_audio_callback()
                                 first_audio_callback = None
-                            if start_time_played is None:
-                                start_time_played = time.time()
 
                             float_audio = int16_bytes_to_float(audio_data)
                             if len(float_audio) > 0:
@@ -157,6 +155,8 @@ class AsyncTTSStreamer:
                     
                     # now send the audio, all in one piece
                     if len(audio_datas) > 0:
+                        if start_time_played is None:
+                            start_time_played = time.time()
                         concat_data = np.concatenate(audio_datas)
 
                         # see when it'll actually be played
