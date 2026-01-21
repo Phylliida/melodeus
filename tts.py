@@ -8,6 +8,7 @@ import time
 import traceback
 from dataclasses import dataclass
 from typing import AsyncGenerator, Dict, List, Tuple
+from rapidfuzz.distance import Levenshtein
 
 import numpy as np
 import websockets
@@ -57,17 +58,18 @@ class AsyncTTSStreamer:
             appended_text = ""
             while True:
                 offset_in_original_text = self.get_current_index_in_text()
-                if prev_offset < offset_in_original_text:
-                    match = re.search(r"\w+\b", self.generated_text[prev_offset:])
-                    if match:
-                        new_text = self.generated_text[prev_offset:prev_offset+match.end()]
-                        prev_offset = prev_offset+match.end()
-                    else:
-                        prev_offset = len(self.generated_text)
-                        new_text = self.generated_text[prev_offset:]
-                    for word in re.sub(r"\s+", " ", new_text).split(" "):
-                        if len(word.strip()) > 0:
-                            await self.word_callback(word)
+                if offset_in_original_text is not None:
+                    if prev_offset < offset_in_original_text:
+                        match = re.search(r"\w+\b", self.generated_text[prev_offset:])
+                        if match:
+                            new_text = self.generated_text[prev_offset:prev_offset+match.end()]
+                            prev_offset = prev_offset+match.end()
+                        else:
+                            prev_offset = len(self.generated_text)
+                            new_text = self.generated_text[prev_offset:]
+                        for word in re.sub(r"\s+", " ", new_text).split(" "):
+                            if len(word.strip()) > 0:
+                                await self.word_callback(word)
                 await asyncio.sleep(0.02)
         except asyncio.CancelledError:
             raise
@@ -108,6 +110,7 @@ class AsyncTTSStreamer:
                 return
             else:
                 tts_config.device = output_devices[0]
+                output_device = tts_config.device
                 print(f"No device specified for voice {tts_id}, falling back to device {tts_config.device.to_dict()}")
         try:
             emit_word_task = asyncio.create_task(self._emit_word_helper())
@@ -154,22 +157,23 @@ class AsyncTTSStreamer:
                             break # done
                     
                     # now send the audio, all in one piece
-                    concat_data = np.concatenate(audio_datas)
+                    if len(audio_datas) > 0:
+                        concat_data = np.concatenate(audio_datas)
 
-                    # see when it'll actually be played
-                    current_time = time.time()
-                    buffered_duration = output_stream.num_queued_samples / self.config.sample_rate
-                    output_stream.queue_audio(concat_data)
-                    play_start_time = current_time + buffered_duration
-                    for buffer_len, alignment in segment_alignments:
-                        if alignment is not None: # sometimes we get no alignments but still audio data
-                            alignment_data = AlignmentData(
-                                start_time_played=play_start_time,
-                                chars=alignment['chars'],
-                                chars_start_times_ms=alignment['charStartTimesMs']
-                            )
-                            self.alignments.append(alignment_data)
-                        play_start_time += buffer_len/float(shared_sample_rate())
+                        # see when it'll actually be played
+                        current_time = time.time()
+                        buffered_duration = output_stream.num_queued_samples / self.config.sample_rate
+                        output_stream.queue_audio(concat_data)
+                        play_start_time = current_time + buffered_duration
+                        for buffer_len, alignment in segment_alignments:
+                            if alignment is not None: # sometimes we get no alignments but still audio data
+                                alignment_data = AlignmentData(
+                                    start_time_played=play_start_time,
+                                    chars=alignment['chars'],
+                                    chars_start_times_ms=alignment['charStartTimesMs']
+                                )
+                                self.alignments.append(alignment_data)
+                            play_start_time += buffer_len/float(shared_sample_rate())
 
 
                     await websocket.close()
@@ -238,7 +242,8 @@ class AsyncTTSStreamer:
                 # AI Alignment TM
                 # (computes where in the text it was interrupted and trims context to that)
                 offset_in_original_text = self.get_current_index_in_text()
-                self.generated_text = self.generated_text[:offset_in_original_text]
+                if offset_in_original_text is not None:
+                    self.generated_text = self.generated_text[:offset_in_original_text]
                 #print(f"Fuzzy matched to position {offset_in_original_text}")
                 #print(self.generated_text)
 
@@ -308,10 +313,6 @@ class AsyncTTSStreamer:
         Returns:
             List of (text_chunk, is_emotive) tuples
         """
-        if not self.config.emotive_voice_id:
-            # No emotive voice configured, return all as regular text
-            return [(text, False)]
-        
         parts = []
         current_pos = 0
         
@@ -338,7 +339,7 @@ class AsyncTTSStreamer:
         
         return parts if parts else [(text, False)]
 
-   def get_current_index_in_text(self):
+    def get_current_index_in_text(self):
         if len(self.alignments) == 0:
             return 0
         # AI Alignment TM
