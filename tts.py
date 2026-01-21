@@ -75,7 +75,7 @@ class AsyncTTSStreamer:
             print(traceback.print_exc())
             print("Error in osc emit")
 
-    async def _speak_text_helper(self, tts_id, text_generator: AsyncGenerator[str, None], first_audio_callback) -> bool:
+    async def _speak_text_helper(self, tts_id, text_generator: AsyncGenerator[str, None], first_audio_callback, interrupted_callback) -> bool:
         """
         Speak the given text (task that can be canceled)
         
@@ -229,10 +229,10 @@ class AsyncTTSStreamer:
         except asyncio.CancelledError:
             print(f"Cancelled tts, interrupting playback")
             # not enough audio played and interrupted, make empty
-            if start_time_played is None or time.time() - start_time_played < 2.0:
-                self.generated_text = ""
+            #if start_time_played is None or time.time() - start_time_played < 2.0:
+            #    self.generated_text = ""
             # no audio played yet, empty text
-            elif len(self.alignments) == 0:
+            if len(self.alignments) == 0:
                 self.generated_text = ""
             else:
                 # AI Alignment TM
@@ -244,6 +244,7 @@ class AsyncTTSStreamer:
 
             # interrupt audio, this clears the buffers
             await interrupt_playback()
+            await interrupted_callback(self.generated_text, time.time() - start_time_played)
             raise
         except Exception as e:
             print(f"TTS error")
@@ -265,12 +266,12 @@ class AsyncTTSStreamer:
                     print(f"TTS websocket close error")
                     print(traceback.print_exc())
             
-    async def speak_text(self, tts_id: str, text_generator: AsyncGenerator[str, None], first_audio_callback):
+    async def speak_text(self, tts_id: str, text_generator: AsyncGenerator[str, None], first_audio_callback, interrupted_callback):
         # interrupt (if already running)
         await self.interrupt()
 
         # start the task (this way it's cancellable and we don't need to spam checks)
-        self.speak_task = asyncio.create_task(self._speak_text_helper(tts_id, text_generator, first_audio_callback))
+        self.speak_task = asyncio.create_task(self._speak_text_helper(tts_id, text_generator, first_audio_callback, interrupted_callback))
 
         # wait for it to finish
         await self.speak_task

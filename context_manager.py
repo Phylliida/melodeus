@@ -26,10 +26,11 @@ class ContextUpdate:
     message: str
 
 class AsyncContextManager(object):
-    def __init__(self, config):
+    def __init__(self, config, voices):
         self.messages = []
         self.history = []
         self.config = config
+        self.voices = voices
         self.context_update_callback = AsyncCallbackManager()
     
     async def __aenter__(self):

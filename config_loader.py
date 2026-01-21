@@ -26,6 +26,8 @@ class TTSConfig:
 
 @dataclass
 class TTSVoiceConfig:
+    display_name: str = "A"
+    prompt_name: str = "A"
     voice: TTSVoiceConfigInner = field(default_factory=TTSVoiceConfigInner)
     emotive_voice: TTSVoiceConfigInner = field(default_factory=TTSVoiceConfigInner)
 

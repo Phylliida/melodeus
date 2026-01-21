@@ -207,14 +207,51 @@ async def start_websocket_server(app, audio_system, ui_config, stt_system, tts_s
                 uuid=stt_result.message_id,
                 author=stt_result.speaker_name,
                 message=stt_result.text)
-            await get_model_response()
+            await get_model_response("default")
         
         
         
-        async def get_model_response():
+        async def get_model_response(author_id):
             async def text_generator():
                 yield "Hello there the green beans are tasty! Do you think so?"
-            await tts_system.
+                yield "Wow the green beans"
+            
+            response_uuid = str(uuid.uuid4())
+            # wraps the text generator to add it to context
+            async def text_generator_wrapper(text_generator):
+                full_text = ""
+                async for text in text_generator():
+                    full_text += text
+                    await context.update(
+                        uuid=response_uuid,
+                        author=author_id,
+                        message=full_text
+                    )
+                    yield text
+
+            async def first_audio_callback():
+                pass
+            async def interrupted(text, outputted_audio_duration):
+                # if outputted less than 2 seconds of audio, just do blank
+                if outputted_audio_duration < 2:
+                    text = ""
+                if text == "":
+                    await context.delete(
+                        uuid=response_uuid
+                    )
+                else:
+                    await context.update(
+                        uuid=response_uuid,
+                        author=author_id,
+                        message=text
+                    )
+    
+            await tts_system.speak_text(
+                tts_id=author_id,
+                text_generator=text_generator_wrapper,
+                first_audio_callback=first_audio_callback,
+                interrupted_callback=interrupted
+            )
 
         await audio_system.add_callback(audio_callback)
         await stt_system.add_callback(stt_callback)
@@ -233,7 +270,7 @@ async def main():
     async with AudioSystem(config=config.audio) as audio_system:
         async with AsyncSTT(config=config.stt, audio_system=audio_system) as stt_system:
             async with AsyncTTS(config=config.tts, audio_system=audio_system) as tts_system:
-                async with AsyncContextManager(config=config.context) as context:
+                async with AsyncContextManager(config=config.context, voices=config.tts.voices) as context:
                     await start_websocket_server(app, audio_system, config.ui, stt_system, tts_system, context)
 
                     @app.get("/")
