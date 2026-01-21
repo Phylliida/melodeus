@@ -1,6 +1,21 @@
 
-from async_callback_manager import AsyncCallbackManager
+import asyncio
+import base64
+import json
+import math
+import re
+import time
+import traceback
+from dataclasses import dataclass
+from typing import AsyncGenerator, Dict, List, Tuple
 
+import numpy as np
+import websockets
+
+from config_loader import TTSConfig
+from mel_aec_audio import int16_bytes_to_float, interrupt_playback, shared_sample_rate
+from async_callback_manager import AsyncCallbackManager
+from dataclasses import dataclass
 
 @dataclass
 class AlignmentData:
@@ -30,22 +45,6 @@ class AsyncTTSStreamer:
     async def __aexit__(self, exc_type, exc, tb):
         await self.interrupt()
 
-    def _get_voice_settings(self, voice, is_emotive: bool) -> Dict[str, float]:
-        """Get voice settings for regular or emotive speech."""
-        voice_config = getattr(self.config, voice)
-        if is_emotive:
-            return {
-                "speed": voice_config.emotive_speed,
-                "stability": voice_config.emotive_stability,
-                "similarity_boost": voice_config.emotive_similarity_boost
-            }
-        else:
-            return {
-                "speed": voice_config.speed,
-                "stability": voice_config.stability,
-                "similarity_boost": voice_config.similarity_boost
-            }
-
     async def add_callback(self, callback):
         await self.word_callback.add_callback(callback)
 
@@ -68,7 +67,7 @@ class AsyncTTSStreamer:
                         new_text = self.generated_text[prev_offset:]
                     for word in re.sub(r"\s+", " ", new_text).split(" "):
                         if len(word.strip()) > 0:
-                            self.word_callback(word)
+                            await self.word_callback(word)
                 await asyncio.sleep(0.02)
         except asyncio.CancelledError:
             raise
@@ -76,7 +75,7 @@ class AsyncTTSStreamer:
             print(traceback.print_exc())
             print("Error in osc emit")
 
-    async def _speak_text_helper(self, tts_id, text_generator: AsyncGenerator[str, None], first_audio_callback, output_device, output_channel) -> bool:
+    async def _speak_text_helper(self, tts_id, text_generator: AsyncGenerator[str, None], first_audio_callback) -> bool:
         """
         Speak the given text (task that can be canceled)
         
@@ -94,12 +93,28 @@ class AsyncTTSStreamer:
         start_time_played = None
         output_stream = None
         emit_word_task = None
+        if tts_id not in self.config.voices:
+            print(f"Invalid tts id {tts_id}, valid choices are")
+            print(self.config.voices.keys())
+            return
+        
+        tts_config = self.config.voices[tts_id]
+        output_device = tts_config.device
+        # if empty, fall back to first output device
+        if len(output_device) == 0:
+            output_devices = self.audio_system.get_connected_output_devices()
+            if len(output_devices) == 0:
+                print("No available output devices, bailing")
+                return
+            else:
+                tts_config.device = output_devices[0]
+                print(f"No device specified for voice {tts_id}, falling back to device {tts_config.device.to_dict()}")
         try:
             emit_word_task = asyncio.create_task(self._emit_word_helper())
             # map first channel of voice to target output channel
-            channel_map = {0: [output_channel]}
-            output_stream = audio_system.begin_audio_stream(
-                output_device,
+            channel_map = {0: [tts_config.device_channel]}
+            output_stream = self.audio_system.begin_audio_stream(
+                tts_config.device,
                 1,
                 channel_map,
                 math.ceil(max_audio_seconds),
@@ -162,15 +177,11 @@ class AsyncTTSStreamer:
             async for sentence in stream_sentences(text_generator):
                 # add spaces back between the sentences
                 self.generated_text = (self.generated_text + " " + sentence).strip()
-                tts_config = getattr(self.config, tts_id)
                 # split out *emotive* into seperate parts
                 eleven_messages = []
                 for text_part, is_emotive in self.extract_emotive_text(sentence):
 
                     if text_part.strip():
-                        voice_id = self.config.emotive_voice_id if is_emotive else self.config.voice_id
-                        voice_settings = self._get_voice_settings(is_emotive)
-
                         eleven_messages.append((is_emotive, text_part.strip()))
 
                 # send text to websockets and receive and play audio
@@ -254,12 +265,12 @@ class AsyncTTSStreamer:
                     print(f"TTS websocket close error")
                     print(traceback.print_exc())
             
-    async def speak_text(self, text_generator: AsyncGenerator[str, None], first_audio_callback, output_device, output_channel):
+    async def speak_text(self, tts_id: str, text_generator: AsyncGenerator[str, None], first_audio_callback):
         # interrupt (if already running)
         await self.interrupt()
 
         # start the task (this way it's cancellable and we don't need to spam checks)
-        self.speak_task = asyncio.create_task(self._speak_text_helper(text_generator, first_audio_callback, output_device, output_channel))
+        self.speak_task = asyncio.create_task(self._speak_text_helper(tts_id, text_generator, first_audio_callback))
 
         # wait for it to finish
         await self.speak_task
@@ -326,8 +337,74 @@ class AsyncTTSStreamer:
         
         return parts if parts else [(text, False)]
 
+   def get_current_index_in_text(self):
+        if len(self.alignments) == 0:
+            return 0
+        # AI Alignment TM
+        # (computes where in the text it was interrupted and trims context to that)
+        current_time = time.time()
+        end_alignment_i = 0 # if none have been played, don't include any
+        end_char_i_in_alignment_i = 0 # if no characters have been played, don't include any
+        for alignmentI, alignment in list(enumerate(self.alignments))[::-1]:
+            # find the latest thing that is already started playing
+            if alignment.start_time_played < current_time:
+                end_alignment_i = alignmentI
+                millis_since_start_time = (current_time-alignment.start_time_played)*1000
+                # find the latest char that has already played
+                end_char_i_in_alignment_i = 0 # default to first (if none in array)
+                for charI, (char, char_ms) in list(enumerate(zip(alignment.chars, alignment.chars_start_times_ms)))[::-1]:
+                    if char_ms < millis_since_start_time:
+                        end_char_i_in_alignment_i = charI+1
+                        break
+                break
+            
+        played_chars = [alignment.chars for alignment in self.alignments[:end_alignment_i]] + [self.alignments[end_alignment_i].chars[:end_char_i_in_alignment_i]]
+        played_text = " ".join(["".join(chars) for chars in played_chars])
+        # do some fuzzy matching to handle the loss of things like *
+        #print(self.generated_text)
+        return trimmed_end(self.generated_text, played_text)
 
+# with a of like "*wow hi there* I like bees" and b of "wow hi there i like" this will give us index of end of like inside a
+def _collapse(s: str, ignore: set[str]):
+    kept = []
+    idx_map = []
+    for idx, ch in enumerate(s):
+        if ch in ignore:
+            continue
+        kept.append(ch)
+        idx_map.append(idx)
+    return "".join(kept), idx_map
 
+def _noisy_prefix_end(filtered_a: str, filtered_b: str) -> int | None:
+    ops = iter(Levenshtein.editops(filtered_b, filtered_a))
+    op = next(ops, None)
+    i = j = 0
+    last_match = -1
+
+    while i < len(filtered_b):
+        if op and op.src_pos == i and op.dest_pos == j:
+            if op.tag in {"delete", "replace"}:
+                return None
+            j += 1               # insertion in filtered_a
+            op = next(ops, None)
+        else:
+            last_match = j
+            i += 1
+            j += 1
+
+    return last_match + 1
+
+def trimmed_end(a: str, b: str, ignore="*\n\r\t #@\\/.,?!-+[]()&%$:"):
+    ignore_set = set(ignore)
+    filtered_a, idx_map_a = _collapse(a, ignore_set)
+    filtered_b, _ = _collapse(b, ignore_set)
+
+    end = _noisy_prefix_end(filtered_a, filtered_b)
+    if end is None:
+        return None
+    if end == 0:
+        return 0
+    return idx_map_a[end - 1] + 1
 
 _SENTENCE_END = re.compile(r'([.?!][\'")\]]*)(?=\s)')
 
