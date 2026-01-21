@@ -1,9 +1,11 @@
 from flask import Flask, abort, jsonify, request
 from persistent_config import PersistentMelodeusConfig
 from pathlib import Path
+from dataclasses import asdict
 from audio_system import AudioSystem, load_wav
 from stt import AsyncSTT
 from tts import AsyncTTS
+import uuid
 import numpy as np
 import base64
 import math
@@ -248,15 +250,15 @@ async def start_websocket_server(app, audio_system, ui_config, stt_system, tts_s
     
             await tts_system.speak_text(
                 tts_id=author_id,
-                text_generator=text_generator_wrapper,
+                text_generator=text_generator_wrapper(text_generator),
                 first_audio_callback=first_audio_callback,
                 interrupted_callback=interrupted
             )
 
         async def context_callback(update):
-            payload = to_dict(update)
+            payload = asdict(update)
             payload['type'] = 'context'
-            broadcast(payload)
+            await broadcast(payload)
 
         await audio_system.add_callback(audio_callback)
         await stt_system.add_callback(stt_callback)

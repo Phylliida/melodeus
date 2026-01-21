@@ -6,6 +6,7 @@ import math
 import re
 import time
 import traceback
+from melaec3 import OutputDeviceConfig
 from dataclasses import dataclass
 from typing import AsyncGenerator, Dict, List, Tuple
 from rapidfuzz.distance import Levenshtein
@@ -93,6 +94,7 @@ class AsyncTTS:
         start_time_played = None
         output_stream = None
         emit_word_task = None
+        voices_keys = self.config.voices.keys()
         if tts_id not in self.config.voices:
             print(f"Invalid tts id {tts_id}, valid choices are")
             print(self.config.voices.keys())
@@ -101,7 +103,16 @@ class AsyncTTS:
         tts_config = self.config.voices[tts_id]
         output_device = tts_config.device
         # if empty, fall back to first output device
-        if len(output_device) == 0:
+        try:
+            if type(output_device) is dict:
+                output_device = OutputDeviceConfig.from_dict(output_device)
+            output_devices = self.audio_system.get_connected_output_devices()
+            if output_device not in output_devices:
+                raise ValueError(f"Output device {output_device.to_dict()} not available")
+        except:
+            print(f"Failed to parse output device {output_device}")
+            print(traceback.print_exc())
+            print("Using default instead")
             output_devices = self.audio_system.get_connected_output_devices()
             if len(output_devices) == 0:
                 print("No available output devices, bailing")
@@ -114,7 +125,7 @@ class AsyncTTS:
             emit_word_task = asyncio.create_task(self._emit_word_helper())
             # map first channel of voice to all target output channels
             channel_map = {0: tts_config.device_channels}
-            output_stream = self.audio_system.begin_audio_stream(
+            output_stream = await self.audio_system.begin_audio_stream(
                 output_device,
                 1,
                 channel_map,
@@ -212,7 +223,7 @@ class AsyncTTS:
                         initial_message = {
                             "text": " ",
                             "voice_settings": voice_settings,
-                            "xi_api_key": self.config.api_key
+                            "xi_api_key": self.config.elevenlabs_api_key
                         }
                         await websocket.send(json.dumps(initial_message))
                     await websocket.send(json.dumps({

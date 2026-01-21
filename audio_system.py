@@ -68,7 +68,9 @@ class AudioSystem(object):
             stream_cfg = melaec3.AecConfig(target_sample_rate=TARGET_RATE, frame_size=DEFAULT_FRAME, filter_length=DEFAULT_FILTER)
             self.stream = melaec3.AecStream(stream_cfg)
             # convert it into the form we need
+            print("Setting state")
             self.config.state = AudioSystemState.from_json(self.config.state.to_json())
+            print("Done setting state")
             self.state = self.config.state
             self.output_devices = {}
             self.processing_queue_send = asyncio.Queue(maxsize=0)

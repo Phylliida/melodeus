@@ -13,6 +13,15 @@ class PersistentMelodeusConfig(Generic[T]):
         self.parent = parent
         self.path = path
 
+    def __contains__(self, item):
+        return item in self.data
+
+    def __len__(self):
+        return len(self.data)
+    
+    def keys(self):
+        return self.data.keys()
+
     def __getitem__(self, key):
         return self.data[key]
 

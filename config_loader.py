@@ -37,7 +37,7 @@ class TTSVoiceConfig:
 @dataclass
 class TTSConfig:
     """Configuration for TTS settings."""
-    elevanlabs_api_key: str = ""
+    elevenlabs_api_key: str = ""
     output_format: str = "pcm_22050"
     sample_rate: int = 22050
     resampler_quality: int = 5 # speex resampler quality, 5 is fine
@@ -62,9 +62,9 @@ class AudioSystemState:
 
     @classmethod
     def from_dict(cls, dict_values) -> "AudioSystemState":
-        res = cls(**dict_values)
+        res = cls({})
         parsed_inputs = []
-        for cfg in res.input_devices:
+        for cfg in dict_values['input_devices']:
             try:
                 cfg = cfg if not hasattr(cfg, "to_dict") else cfg.to_dict()
                 parsed_inputs.append(InputDeviceConfig.from_dict(cfg))
@@ -72,12 +72,12 @@ class AudioSystemState:
                 print(f"Failed to parse input device {cfg}, ignoring:")
                 print(traceback.print_exc())
         parsed_outputs = res.output_devices
-        for cfg in res.output_devices:
+        for cfg in dict_values['output_devices']:
             cfg = cfg if not hasattr(cfg, "to_dict") else cfg.to_dict()
             try:
-                parsed_outputs.append(InputDeviceConfig.from_dict(cfg))
+                parsed_outputs.append(OutputDeviceConfig.from_dict(cfg))
             except:
-                print(f"Failed to parse input device {cfg}, ignoring:")
+                print(f"Failed to parse output device {cfg}, ignoring:")
                 print(traceback.print_exc())
         res.input_devices = parsed_inputs
         res.output_devices = parsed_outputs
