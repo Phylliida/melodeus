@@ -2,6 +2,30 @@ const $ = (id) => document.getElementById(id);
 let ui;
 
 const state = { devices: { inputs: [], outputs: [] }, selected: { inputs: [], outputs: [] }, ui: { showWaveforms: true } };
+const contextRows = new Map();
+const renderContextUpdate = (update) => {
+  if (!update || update.type !== "context") return;
+  const log = $("transcript-log");
+  if (!log || !update.uuid) return;
+  const action = String(update.action || "").toLowerCase();
+  if (action.includes("delete")) {
+    const row = contextRows.get(update.uuid);
+    if (row) row.remove();
+    contextRows.delete(update.uuid);
+    return;
+  }
+  let row = contextRows.get(update.uuid);
+  if (!row) {
+    row = document.createElement("div");
+    row.className = "pill";
+    log.append(row);
+    contextRows.set(update.uuid, row);
+  }
+  const author = update.author ? `${update.author}: ` : "";
+  row.textContent = `${author}${update.message || ""}`;
+};
+window.handleContextUpdate = renderContextUpdate;
+
 const hostName = (cfg) => cfg.host_id || cfg.host_name || cfg.host || "unknown";
 const fill = (sel, vals, fmt) => {
   const cur = sel.value;

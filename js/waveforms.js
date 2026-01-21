@@ -147,6 +147,7 @@ const connect = () => {
       const data = JSON.parse(ev.data);
       if (data.type === "waveform") renderWaveforms(data);
       else if (data.type === "stt" && transcriptHandler) transcriptHandler(data);
+      else if (data.type === "context" && window.handleContextUpdate) window.handleContextUpdate(data);
     } catch (e) {
       console.warn("Bad ws payload", e);
     }
