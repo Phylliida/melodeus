@@ -3,6 +3,9 @@ import traceback
 import base64
 from flask import Flask, abort, jsonify, request
 import websockets
+import asyncio
+import uuid
+import json
 
 def serialize_context(update):
     return {
@@ -18,7 +21,7 @@ def b64(arr, dtype=np.float32):
     return base64.b64encode(a.tobytes()).decode("ascii")
 
 class AsyncWebsocketServer(object):
-    def __init__(self, app, ui_config, audio_system, stt, tts, context):
+    def __init__(self, ui_config, app, audio_system, stt, tts, context):
         self.app = app
         self.ui_config = ui_config
         self.audio_system = audio_system
@@ -31,7 +34,7 @@ class AsyncWebsocketServer(object):
         def get_ui():
             return jsonify({"show_waveforms": self.ui_config.show_waveforms})
 
-        @self.appapp.post("/api/uiconfig/waveforms")
+        @self.app.post("/api/uiconfig/waveforms")
         def toggle_waveforms():
             payload = request.get_json(force=True, silent=True) or {}
             self.ui_config.show_waveforms = bool(payload.get("show_waveforms"))
@@ -40,11 +43,11 @@ class AsyncWebsocketServer(object):
 
         self.connections = set()
 
-        await websockets.serve(websocket_server, self.ui_config.host, self.ui_config.port)
+        await websockets.serve(self.websocket_server, self.ui_config.host, self.ui_config.port)
 
-        await audio_system.add_callback(self.audio_callback)
-        await stt_system.add_callback(self.stt_callback)
-        await context.add_callback(self.context_callback)
+        await self.audio_system.add_callback(self.audio_callback)
+        await self.stt.add_callback(self.stt_callback)
+        await self.context.add_callback(self.context_callback)
     
         return self
         
@@ -76,8 +79,8 @@ class AsyncWebsocketServer(object):
         finally:
             self.connections.discard(websocket)
 
-    async def audio_callback(input_channels, output_channels, audio_input_data, audio_output_data, aec_input_data, channel_vads):
-        if not ui_config.show_waveforms:
+    async def audio_callback(self, input_channels, output_channels, audio_input_data, audio_output_data, aec_input_data, channel_vads):
+        if not self.ui_config.show_waveforms:
             return
         if len(aec_input_data) > 0: # don't spam with empty things or it gets congested
             payload = {
@@ -90,7 +93,7 @@ class AsyncWebsocketServer(object):
                 "vad": channel_vads,
             }
             payload = json.dumps(payload)
-            await broadcast(payload)
+            await self.broadcast(payload)
             await asyncio.sleep(0) # hand to other stuff so we don't exhaust async
                 
     async def stt_callback(self, stt_result):
@@ -103,7 +106,7 @@ class AsyncWebsocketServer(object):
     
     async def context_callback(self, update):
         payload = serialize_context(update)
-        await selof.broadcast(json.dumps(payload))
+        await self.broadcast(json.dumps(payload))
 
     async def get_model_response(self, author_id):
         async def text_generator():
