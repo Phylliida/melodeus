@@ -52,6 +52,23 @@ class AsyncWebsocketServer(object):
         return self
         
     async def __aexit__(self, exc_type, exc, tb):
+        # stop accepting new websockets
+        if hasattr(self, "server"):
+            self.server.close()
+            await self.server.wait_closed()
+
+        # close existing websocket connections
+        for ws in list(self.connections):
+            try:
+                await ws.close()
+            except Exception:
+                print(traceback.print_exc())
+        self.connections.clear()
+
+        # unregister callbacks
+        await self.audio_system.remove_callback(self.audio_callback)
+        await self.stt.remove_callback(self.stt_callback)
+        await self.context.remove_callback(self.context_callback)
         return
     
     async def broadcast(self, msg: str):
