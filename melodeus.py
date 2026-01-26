@@ -1,16 +1,9 @@
 from flask import Flask, abort, jsonify, request
-from persistent_config import PersistentMelodeusConfig
 from pathlib import Path
 from dataclasses import asdict
-from audio_system import AudioSystem, load_wav
-from stt import AsyncSTT
-from tts import AsyncTTS
 import uuid
 import numpy as np
-import base64
 import math
-import json
-from melaec3 import InputDeviceConfig, OutputDeviceConfig
 import melaec3
 import asyncio
 import signal
@@ -18,6 +11,14 @@ import threading
 import websockets
 import traceback
 from werkzeug.serving import make_server
+
+from melaec3 import InputDeviceConfig, OutputDeviceConfig
+
+from persistent_config import PersistentMelodeusConfig
+from audio_system import AudioSystem, load_wav
+from stt import AsyncSTT
+from tts import AsyncTTS
+from ws_server import AsyncWebsocketServer
 from context_manager import AsyncContextManager
 
 WEBSOCKET_PORT = 5001
