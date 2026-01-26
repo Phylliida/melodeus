@@ -114,16 +114,10 @@ class TurnState(object):
         )
 
     async def process(self, message):
-        # moved onto new turn
+        # moved onto new turn, reset last write
         if message.turn_index != self.turn_index:
-            if len(self.transcript) > 0:
-                await self.emit(final=True)
-            return TurnState(
-                self.stt,
-                message.turn_index,
-                message.transcript,
-                message.audio_window_start,
-                message.audio_window_end)
+            self.last_write = (time.time(), "")
+            self.turn_index = message.turn_index
         
         # still this turn, see if modified
         transcript = message.transcript
@@ -158,6 +152,7 @@ class AsyncSTT(object):
                 print(traceback.print_exc())
 
     async def __aenter__(self):
+        self.time_of_last_speech = time.time()
         self.deepgram_task = asyncio.create_task(self.deepgram_processor())
         return self
 
@@ -190,6 +185,7 @@ class AsyncSTT(object):
                 # if we have any input channels available and aec detected something, mix them
                 # alternatively we could run deepgram per channel but that would be more expensive
                 if len(aec_input_data) > 0 and any(channel_vads) and self.connection is not None:
+                    self.time_of_last_speech = time.time()
                     frame_size = len(aec_input_data)//input_channels
                     aec_frames = aec_input_data.reshape(-1, input_channels) # view, no copy
                     if self.mixed_data is None or len(self.mixed_data) != frame_size:

@@ -139,6 +139,63 @@ const renderWaveforms = (payload) => {
   drawWave("aec");
 };
 
+const extractJsonChunks = (text) => {
+  const chunks = [];
+  let start = null;
+  let depth = 0;
+  let inString = false;
+  let escape = false;
+
+  for (let i = 0; i < text.length; i++) {
+    const ch = text[i];
+    if (start === null) {
+      if (ch !== "{" && ch !== "[") continue;
+      start = i;
+      depth = 0;
+    }
+    if (inString) {
+      if (escape) {
+        escape = false;
+        continue;
+      }
+      if (ch === "\\") {
+        escape = true;
+        continue;
+      }
+      if (ch === "\"") inString = false;
+      continue;
+    }
+    if (ch === "\"") {
+      inString = true;
+      continue;
+    }
+    if (ch === "{" || ch === "[") depth += 1;
+    if (ch === "}" || ch === "]") depth -= 1;
+    if (depth === 0 && start !== null) {
+      chunks.push(text.slice(start, i + 1));
+      start = null;
+    }
+  }
+  return chunks;
+};
+
+const normalizeMalformedWaveform = (text) => {
+  if (!text || typeof text !== "string") return null;
+  if (!text.startsWith("{") || !text.includes("bhg") || !text.includes("f50")) return null;
+
+  let fixed = text;
+  fixed = fixed.replace(/typebhg/g, 'type":"');
+  fixed = fixed.replace(/in_chbhg/g, 'in_ch":');
+  fixed = fixed.replace(/out_chbhg/g, 'out_ch":');
+  fixed = fixed.replace(/inputbhg/g, 'input":"');
+  fixed = fixed.replace(/outputbhg/g, 'output":"');
+  fixed = fixed.replace(/aecbhg/g, 'aec":"');
+  fixed = fixed.replace(/vadbhg/g, 'vad":');
+  fixed = fixed.replace(/f50(?=in_ch|out_ch|input|output|aec|vad)/g, ',"');
+
+  return fixed === text ? null : fixed;
+};
+
 const handleMessage = (text) => {
   try {
     const data = JSON.parse(text);
@@ -146,13 +203,20 @@ const handleMessage = (text) => {
     else if (data.type === "stt" && transcriptHandler) transcriptHandler(data);
     else if (data.type === "context" && window.handleContextUpdate) window.handleContextUpdate(data);
   } catch (e) {
-    // Handle occasional concatenated payloads like {}{}
-    const parts = text.includes("}{") ? text.split(/}\s*{/).map((p, i, arr) => (i ? "{" : "") + p + (i < arr.length - 1 ? "}" : "")) : null;
-    if (parts && parts.length > 1) {
-      parts.forEach(handleMessage);
-    } else {
-      console.warn("Bad ws payload", e);
+    const parts = extractJsonChunks(text);
+    const shouldSplit = parts.length > 1 || (parts.length === 1 && parts[0] !== text);
+    if (shouldSplit) return parts.forEach(handleMessage);
+    const normalized = normalizeMalformedWaveform(text);
+    if (normalized) {
+      try {
+        const data = JSON.parse(normalized);
+        if (data.type === "waveform") return renderWaveforms(data);
+      } catch (_) {
+        /* fall through */
+      }
     }
+    const preview = text.length > 200 ? `${text.slice(0, 200)}… (${text.length} chars)` : text;
+    console.warn("Bad ws payload", e, preview);
   }
 };
 
@@ -160,7 +224,13 @@ const connect = () => {
   const ws = new WebSocket(url());
   ws.onopen = () => set_ws_status_color("#3f3");
   ws.onmessage = (ev) => {
-    handleMessage(ev.data);
+    if (typeof ev.data === "string") {
+      handleMessage(ev.data);
+    } else if (ev.data instanceof ArrayBuffer) {
+      handleMessage(new TextDecoder("utf-8").decode(ev.data));
+    } else if (ev.data && typeof ev.data.text === "function") {
+      ev.data.text().then(handleMessage).catch((err) => console.warn("Bad ws payload", err));
+    }
     set_ws_status_color("#3f3");
   }
   // don't make both of these call set timeout or we get exponential growth

@@ -32,8 +32,9 @@ class AlignmentData:
 class AsyncTTS:
     """Async TTS Streamer with interruption capabilities and spoken content tracking."""
     
-    def __init__(self, audio_system, config: TTSConfig):
+    def __init__(self, audio_system, stt, config: TTSConfig):
         self.audio_system = audio_system
+        self.stt = stt
         self.config = config
         self.speak_task = None
         self.generated_text = ""
@@ -109,7 +110,9 @@ class AsyncTTS:
             output_devices = self.audio_system.get_connected_output_devices()
             if output_device not in output_devices:
                 raise ValueError(f"Output device {output_device.to_dict()} not available")
-        except:
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:
             print(f"Failed to parse output device {output_device}")
             print(traceback.print_exc())
             print("Using default instead")
@@ -122,7 +125,16 @@ class AsyncTTS:
                 output_device = tts_config.device
                 print(f"No device specified for voice {tts_id}, falling back to device {tts_config.device.to_dict()}")
         try:
+            # wait 1 second after last emitted token
+            # this avoids eager spam, but if the stt just did a fixup after speech we don't delay for that
+            sleep_time = 1
+            time_already_waited = time.time() - self.stt.time_of_last_speech
+            time_still_need_to_sleep = sleep_time - time_already_waited
+            if time_still_need_to_sleep > 0:
+                print(f"Sleeping for {time_still_need_to_sleep}")
+                await asyncio.sleep(time_still_need_to_sleep) # pause a moment so we don't spam requests
             emit_word_task = asyncio.create_task(self._emit_word_helper())
+            print("Made request")
             # map first channel of voice to all target output channels
             channel_map = {0: tts_config.device_channels}
             output_stream = await self.audio_system.begin_audio_stream(
@@ -222,7 +234,6 @@ class AsyncTTS:
                             "stability": voice_config.stability,
                             "similarity_boost": voice_config.similarity_boost
                         }
-                        print(self.config.keys())
                         # Send initial configuration
                         initial_message = {
                             "text": " ",
@@ -245,7 +256,6 @@ class AsyncTTS:
                 await asyncio.sleep(0.05)
                 
         except asyncio.CancelledError:
-            print(f"Cancelled tts, interrupting playback")
             # not enough audio played and interrupted, make empty
             #if start_time_played is None or time.time() - start_time_played < 2.0:
             #    self.generated_text = ""

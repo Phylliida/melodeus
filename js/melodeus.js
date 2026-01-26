@@ -6,20 +6,24 @@ const contextRows = new Map();
 const renderContextUpdate = (update) => {
   if (!update || update.type !== "context") return;
   const log = $("transcript-log");
-  if (!log || !update.uuid) return;
+  const uuid = update.uuid;
+  if (!log || !uuid) return;
   const action = String(update.action || "").toLowerCase();
   if (action.includes("delete")) {
-    const row = contextRows.get(update.uuid);
+    const row = contextRows.get(uuid);
     if (row) row.remove();
-    contextRows.delete(update.uuid);
+    contextRows.delete(uuid);
     return;
   }
-  let row = contextRows.get(update.uuid);
+  let row = contextRows.get(uuid);
   if (!row) {
     row = document.createElement("div");
     row.className = "pill";
+    row.dataset.uuid = uuid;
     log.append(row);
-    contextRows.set(update.uuid, row);
+    contextRows.set(uuid, row);
+  } else {
+    row.dataset.uuid = uuid;
   }
   const author = update.author ? `${update.author}: ` : "";
   row.textContent = `${author}${update.message || ""}`;

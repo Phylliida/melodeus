@@ -16,18 +16,22 @@ import asyncio
 import signal
 import threading
 import websockets
+import traceback
 from werkzeug.serving import make_server
 from context_manager import AsyncContextManager
 
 WEBSOCKET_PORT = 5001
 root = Path(__file__).parent
 
+global loop
+async def run_in_loop(coro):
+    global loop
+    return await asyncio.wrap_future(asyncio.run_coroutine_threadsafe(coro, loop))
+
 def add_audio_system_device_callbacks(app, audio_system, loop: asyncio.AbstractEventLoop):
     """Register Flask routes that bridge into the running asyncio loop."""
 
     # nonsense needed to make async happy in flask
-    async def run_in_loop(coro):
-        return await asyncio.wrap_future(asyncio.run_coroutine_threadsafe(coro, loop))
 
     @app.post("/api/select")
     async def select_device():
@@ -129,7 +133,7 @@ def add_audio_system_device_callbacks(app, audio_system, loop: asyncio.AbstractE
                 if stream.num_queued_samples != 0:
                     done = False
             # poll until done
-            await run_in_loop(asyncio.sleep(0.1))
+            await asyncio.sleep(0.1)
         
         # clean up
         for output_device, stream in output_streams:
@@ -144,148 +148,16 @@ def add_audio_system_device_callbacks(app, audio_system, loop: asyncio.AbstractE
             }
         )
 
-async def start_websocket_server(app, audio_system, ui_config, stt_system, tts_system, context):
-    connections = set()
-
-    @app.get("/api/uiconfig")
-    def get_ui():
-        return jsonify({"show_waveforms": ui_config.show_waveforms})
-
-    @app.post("/api/uiconfig/waveforms")
-    def toggle_waveforms():
-        payload = request.get_json(force=True, silent=True) or {}
-        ui_config.show_waveforms = bool(payload.get("show_waveforms"))
-        ui_config.persist_data()
-        return jsonify({"show_waveforms": ui_config.show_waveforms})
-
-    async def broadcast(msg: str):
-        dead = []
-        for ws in list(connections):
-            try:
-                await ws.send(msg)
-            except Exception:
-                dead.append(ws)
-        for ws in dead:
-            connections.discard(ws)
-
-    def serialize_context(update):
-        return {
-            "type": "context",
-            "action": getattr(update.action, "value", update.action),
-            "uuid": update.uuid,
-            "author": update.author,
-            "message": update.message,
-        }
-
-    async def websocket_server(websocket):
-        connections.add(websocket)
-        try:
-            async def send_state_to_websocket(update):
-                try:
-                    await websocket.send(json.dumps(serialize_context(update)))
-                except Exception:
-                    pass
-            # fastforward to current history state
-            await context.fetch_current_state(send_state_to_websocket)
-            await websocket.wait_closed()
-        finally:
-            connections.discard(websocket)
-
-    async def serve_websocket():
-        await websockets.serve(websocket_server, "0.0.0.0", WEBSOCKET_PORT)
-        def b64(arr, dtype=np.float32):
-            a = np.asarray(arr, dtype=dtype, order="C") # continguous
-            return base64.b64encode(a.tobytes()).decode("ascii")
-
-        async def audio_callback(input_channels, output_channels, audio_input_data, audio_output_data, aec_input_data, channel_vads):
-            if not ui_config.show_waveforms:
-                return
-            if len(aec_input_data) > 0: # don't spam with empty things or it gets congested
-                payload = {
-                    "type": "waveform",
-                    "in_ch": input_channels,
-                    "out_ch": output_channels,
-                    "input": b64(audio_input_data),
-                    "output": b64(audio_output_data),
-                    "aec": b64(aec_input_data),
-                    "vad": channel_vads,
-                }
-                payls = json.dumps(payload)
-                await broadcast(payls)
-                await asyncio.sleep(0) # hand to other stuff so we don't exhaust async
-        async def stt_callback(stt_result):
-            print(stt_result.text)
-            await context.update(
-                uuid=stt_result.message_id,
-                author=stt_result.speaker_name,
-                message=stt_result.text)
-            await get_model_response("default")
-        
-        async def get_model_response(author_id):
-            async def text_generator():
-                yield "Hello there the green beans are tasty! Do you think so?"
-                yield "Wow the green beans"
-            
-            response_uuid = str(uuid.uuid4())
-            # wraps the text generator to add it to context
-            async def text_generator_wrapper(text_generator):
-                full_text = ""
-                async for text in text_generator():
-                    full_text += text
-                    await context.update(
-                        uuid=response_uuid,
-                        author=author_id,
-                        message=full_text
-                    )
-                    yield text
-
-            async def first_audio_callback():
-                pass
-            async def interrupted(text, outputted_audio_duration):
-                # if outputted less than 2 seconds of audio, just do blank
-                if outputted_audio_duration < 2:
-                    text = ""
-                if text == "":
-                    await context.delete(
-                        uuid=response_uuid
-                    )
-                else:
-                    await context.update(
-                        uuid=response_uuid,
-                        author=author_id,
-                        message=text
-                    )
-    
-            await tts_system.speak_text(
-                tts_id=author_id,
-                text_generator=text_generator_wrapper(text_generator),
-                first_audio_callback=first_audio_callback,
-                interrupted_callback=interrupted
-            )
-
-        async def context_callback(update):
-            payload = serialize_context(update)
-            print(payload)
-            await broadcast(json.dumps(payload))
-
-        await audio_system.add_callback(audio_callback)
-        await stt_system.add_callback(stt_callback)
-        await context.add_callback(context_callback)
-        while True:
-            await asyncio.sleep(0.1)
-
-    ws_thread = threading.Thread(target=lambda: asyncio.run(serve_websocket()), daemon=True)
-    ws_thread.start()  
-
 async def main():
     app = Flask(__name__, static_folder=str(root), static_url_path="")
 
     CONFIG_FILE = root / "config.yaml"
     config = PersistentMelodeusConfig.load_config(CONFIG_FILE)
-
+    global loop
+    loop = asyncio.get_running_loop()
     async with AudioSystem(config=config.audio) as audio_system:
         async with AsyncSTT(config=config.stt, audio_system=audio_system) as stt_system:
-            async with AsyncTTS(config=config.tts, audio_system=audio_system) as tts_system:
+            async with AsyncTTS(config=config.tts, audio_system=audio_system, stt=stt_system) as tts_system:
                 async with AsyncContextManager(config=config.context, voices=config.tts.voices) as context:
                     await start_websocket_server(app, audio_system, config.ui, stt_system, tts_system, context)
 
@@ -293,7 +165,7 @@ async def main():
                     def index():
                         return app.send_static_file("melodeus.html")
 
-                    loop = asyncio.get_running_loop()
+                    
                     add_audio_system_device_callbacks(app, audio_system, loop)
 
                     server = make_server("0.0.0.0", 5000, app)

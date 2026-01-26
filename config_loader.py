@@ -132,8 +132,10 @@ class AudioSystemConfig:
     state: AudioSystemState = field(default_factory=AudioSystemState)
 
 @dataclass
-class UIConfig:
+class UiConfig:
     show_waveforms: bool = True
+    host: str = "0.0.0.0"
+    port: int = 5001
 
 @dataclass
 class MelodeusConfig:
