@@ -60,3 +60,5 @@ tts:
         voice_id: hpp4J3VqNfWAUOO0d1Us
 ui:
   show_waveforms: true
+  port: 5001
+  host: "0.0.0.0"

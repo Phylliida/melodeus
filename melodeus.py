@@ -179,7 +179,7 @@ async def main():
                         server_thread.start()
                         try:
                             while True:
-                                await asyncio.sleep(0.01)
+                                await asyncio.sleep(1)
                         finally:
                             server.shutdown()
                             server_thread.join()
