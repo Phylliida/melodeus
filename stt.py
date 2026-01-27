@@ -237,10 +237,10 @@ class AsyncSTT(object):
                     connection.on(EventType.CLOSE, self.deepgram_close)
                     
                     self.connection = connection
-                    await self.audio_system.add_callback(audio_callback)
+                    await self.audio_system.add_audio_callback(audio_callback)
                     await connection.start_listening()
                     self.connection = None
-                    await self.audio_system.remove_callback(audio_callback)
+                    await self.audio_system.remove_audio_callback(audio_callback)
             except asyncio.CancelledError:
                 print("Deepgram processs canceled")
                 break
@@ -254,7 +254,7 @@ class AsyncSTT(object):
                 raise
             finally:
                 # fine to do this again, only removes if present
-                await self.audio_system.remove_callback(audio_callback)
+                await self.audio_system.remove_audio_callback(audio_callback)
 
 
     def deepgram_on_open(self, *args, **kwargs):

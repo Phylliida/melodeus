@@ -74,14 +74,13 @@ class AudioSystem(object):
             self.state = self.config.state
             self.output_devices = {}
             self.processing_queue_send = asyncio.Queue(maxsize=0)
-            self.processing_queue_recieve = asyncio.Queue(maxsize=0)
             self.audio_callbacks = AsyncCallbackManager()
             self.ready_input_device_callbacks = AsyncCallbackManager()
             self.ready_output_device_callbacks = AsyncCallbackManager()
             
             # add auto calibration callbacks once devices are ready (it can take a bit for the device to calibrate due to sync code, which is why we can't call calibrate immediately)
-            self.add_ready_input_device_callback(self.auto_calibrate_callback)
-            self.add_ready_input_device_callback(self.auto_calibrate_callback)
+            await self.add_ready_input_device_callback(self.auto_calibrate_callback)
+            await self.add_ready_output_device_callback(self.auto_calibrate_callback)
 
             self.processing_task = asyncio.create_task(self.audio_processing_task())
             await self.load_cached_config()
@@ -91,8 +90,13 @@ class AudioSystem(object):
         return self
 
     async def auto_calibrate_callback(self, new_ready_device, all_ready_input_devices, all_ready_output_devices):
+        print(f"ready device {new_ready_device}")
+        print(f"ready input devices {all_ready_input_devices} ")
+        print(f"ready output devices {all_ready_output_devices} ")
         if self.config.auto_calibrate and len(all_ready_input_devices) > 0 and len(all_ready_output_devices) > 0:
+            print("Auto calibration")
             await self.calibrate()
+            print("Done auto calibration")
 
     async def __aexit__(self, exc_type, exc, tb):
         self.processing_task.cancel()
@@ -110,16 +114,20 @@ class AudioSystem(object):
             del self.state
             del self.stream
             del self.processing_queue_send
-            del self.processing_queue_recieve
             del self.processing_task
             del self.audio_callbacks
             del self.ready_input_device_callbacks
             del self.ready_output_device_callbacks
 
     async def calibrate(self):
-        await self.processing_queue_send.put((ProcessingEvent.CALIBRATE, None))
-        await self.processing_queue_recieve.get()
-
+        # If we’re already on the processing task, run directly to avoid deadlock.
+        if asyncio.current_task() is self.processing_task:
+            await self.stream.calibrate(list(self.output_devices.values()), False)
+        # otherwise, enqueue it then wait for processing task to finish
+        else:
+            fut = loop.create_future()
+            await self.processing_queue_send.put((ProcessingEvent.CALIBRATE, fut))
+            await fut # wait for completion
     async def add_audio_callback(self, callback):
         await self.audio_callbacks.add_callback(callback)
     
@@ -149,23 +157,23 @@ class AudioSystem(object):
                         match processing_message:
                             case ProcessingEvent.CALIBRATE:
                                 await self.stream.calibrate(list(self.output_devices.values()), False)
-                                # let it know we finished calibration
-                                await self.processing_queue_recieve.put(ProcessingEvent.CALIBRATE_DONE)
+                                if processing_message_data: # trigger that it is done
+                                    processing_message_data.set_result(None)
                             case _:
                                 print(f"Unknown processing message {processing_message}")
                 new_ready_inputs, new_ready_outputs, input_bytes, output_bytes, aec_bytes, _, _, vad = await self.stream.update_debug_vad()  
                 
                 # callbacks for new devices ready
-                if len(ready_inputs) > 0:
+                if len(new_ready_inputs) > 0:
                     all_ready_inputs = self.stream.get_ready_input_devices()
                     all_ready_outputs = self.stream.get_ready_output_devices()
-                    for ready_input in ready_inputs:
-                        self.ready_input_device_callbacks(ready_input, all_ready_inputs, all_ready_outputs)
-                if len(ready_outputs) > 0:
+                    for ready_input in new_ready_inputs:
+                        await self.ready_input_device_callbacks(ready_input, all_ready_inputs, all_ready_outputs)
+                if len(new_ready_outputs) > 0:
                     all_ready_inputs = self.stream.get_ready_input_devices()
                     all_ready_outputs = self.stream.get_ready_output_devices()
-                    for ready_output in ready_outputs:
-                        self.ready_output_device_callbacks(ready_output, all_ready_inputs, all_ready_outputs)
+                    for ready_output in new_ready_outputs:
+                        await self.ready_output_device_callbacks(ready_output, all_ready_inputs, all_ready_outputs)
                 input_data  = np.frombuffer(input_bytes, dtype=np.float32)
                 output_data = np.frombuffer(output_bytes, dtype=np.float32)
                 aec_data    = np.frombuffer(aec_bytes, dtype=np.float32)

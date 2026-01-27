@@ -63,7 +63,7 @@ class AsyncWebsocketServer(object):
 
         self.server = await websockets.serve(self.websocket_server, self.config.host, self.config.port)
 
-        await self.audio_system.add_callback(self.audio_callback)
+        await self.audio_system.add_audio_callback(self.audio_callback)
         await self.stt.add_callback(self.stt_callback)
         await self.context.add_callback(self.context_callback)
     
@@ -84,7 +84,7 @@ class AsyncWebsocketServer(object):
         self.connections.clear()
 
         # unregister callbacks
-        await self.audio_system.remove_callback(self.audio_callback)
+        await self.audio_system.remove_audio_callback(self.audio_callback)
         await self.stt.remove_callback(self.stt_callback)
         await self.context.remove_callback(self.context_callback)
         return
