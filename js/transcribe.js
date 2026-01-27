@@ -4,22 +4,18 @@ document.addEventListener("DOMContentLoaded", () => {
   const entries = new Map();
 
   const render = (data) => {
-    console.log(data);
-    if (!data || !data.text) return;
-    if (!data.is_final) {
-      if (live) live.textContent = data.text;
-      return;
-    }
-    if (live) live.textContent = "";
+    if (!data || !data.text || !log) return;
     const key = data.message_id || data.text;
-    let row = entries.get(key);
-    if (!row) {
-      row = document.createElement("div");
-      row.className = "pill";
-      log?.append(row);
-      entries.set(key, row);
+    let bubble = entries.get(key);
+    if (!bubble) {
+      bubble = document.createElement("div");
+      bubble.className = "pill";
+      bubble.dataset.messageId = key;
+      log.append(bubble);
+      entries.set(key, bubble);
     }
-    row.textContent = data.text;
+    bubble.textContent = data.text;
+    if (live) live.textContent = "";
   };
 
   if (window.registerTranscriptHandler) {

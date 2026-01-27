@@ -117,6 +117,13 @@ class TurnState(object):
         if message.turn_index != self.turn_index:
             self.last_write = (time.time(), "")
             self.turn_index = message.turn_index
+            res = TurnState(
+                self.stt,
+                message.turn_index,
+                "",
+                message.audio_window_start,
+                message.audio_window_end)
+            return await res.process(message)
         
         # still this turn, see if modified
         transcript = message.transcript
