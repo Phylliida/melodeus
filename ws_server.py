@@ -16,8 +16,25 @@ def serialize_context(update):
         "message": update.message,
     }
 
-def b64(arr, dtype=np.float32):
-    a = np.asarray(arr, dtype=dtype, order="C") # continguous
+def b64(arr, k, dtype=np.float32):
+    def block_max_mag(x, k):
+        n = len(x) // k
+        blocks = x[: n * k].reshape(n, k)  # view, no copy
+        if not hasattr(block_max_mag, "out") or block_max_mag.out is None or n != len(block_max_mag.out):
+            block_max_mag.out = np.empty(n, dtype=x.dtype, order="C") # continguous
+        if not hasattr(block_max_mag, "scratch") or block_max_mag.scratch is None or  len(blocks) != len(block_max_mag.scratch):
+            block_max_mag.scratch = np.empty_like(blocks)  # provide your own to avoid repeat allocs
+        np.abs(blocks, out=block_max_mag.scratch)
+        idx = block_max_mag.scratch.argmax(axis=1)
+        if not hasattr(block_max_mag, "rangen") or len(block_max_mag.rangen) != n:
+            block_max_mag.rangen = np.arange(n)
+        np.put_along_axis(block_max_mag.out, block_max_mag.rangen, blocks[block_max_mag.rangen, idx], axis=0)
+        return block_max_mag.out
+    def peak_downsample(x, k):
+        n = len(x) // k
+        blocks = x[: n*k].reshape(n, k)
+        return np.abs(blocks).max(axis=1)
+    a = np.asarray(block_max_mag(arr, k), dtype=dtype, order="C") # continguous
     return base64.b64encode(a.tobytes()).decode("ascii")
 
 class AsyncWebsocketServer(object):
@@ -30,6 +47,7 @@ class AsyncWebsocketServer(object):
         self.context = context
        
     async def __aenter__(self):
+        self.i = 0
         @self.app.get("/api/uiconfig")
         def get_ui():
             return jsonify({"show_waveforms": self.config.show_waveforms})
@@ -98,15 +116,16 @@ class AsyncWebsocketServer(object):
 
     async def audio_callback(self, input_channels, output_channels, audio_input_data, audio_output_data, aec_input_data, channel_vads):
         if not self.config.show_waveforms:
-            return
+            return 
+        downsample_rate = 10 # we don't need full data
         if len(aec_input_data) > 0: # don't spam with empty things or it gets congested
             payload = {
                 "type": "waveform",
                 "in_ch": input_channels,
                 "out_ch": output_channels,
-                "input": b64(audio_input_data),
-                "output": b64(audio_output_data),
-                "aec": b64(aec_input_data),
+                "input": b64(audio_input_data, downsample_rate),
+                "output": b64(audio_output_data, downsample_rate),
+                "aec": b64(aec_input_data, downsample_rate),
                 "vad": channel_vads,
             }
             payload = json.dumps(payload)

@@ -10,10 +10,11 @@ const wsPort = 5001;
 const url = () => `${location.protocol === "https:" ? "wss" : "ws"}://${location.hostname}:${wsPort}`;
 
 const SAMPLE_RATE = 16000;
-const MAX_SAMPLES = SAMPLE_RATE * 5;
+const MAX_SAMPLES = SAMPLE_RATE * 5 / 10;
 const ACTIVE_COLOR = "#15803d";   // deeper green for contrast
 const DEFAULT_COLOR = "#2563eb";
 const FILL_ALPHA = 0.2;
+const utf8Decoder = new TextDecoder("utf-8");
 
 // already declared in melodeus.js
 //const $ = (id) => document.getElementById(id);
@@ -21,8 +22,17 @@ const FILL_ALPHA = 0.2;
 const waveBuffers = { output: [], input: [], aec: [] };
 let waveContainers;
 let wavesSection;
+const waveformQueue = [];
+let renderQueued = false;
 
-const decodeF32 = (b64) => new Float32Array(Uint8Array.from(atob(b64 || ""), (c) => c.charCodeAt(0)).buffer);
+const decodeF32 = (b64) => {
+  if (!b64) return new Float32Array();
+  const bin = atob(b64);
+  const len = bin.length;
+  const bytes = new Uint8Array(len);
+  for (let i = 0; i < len; i++) bytes[i] = bin.charCodeAt(i);
+  return new Float32Array(bytes.buffer);
+};
 
 const ensureCanvases = (key, channels) => {
   const container = waveContainers[key];
@@ -37,9 +47,12 @@ const ensureCanvases = (key, channels) => {
 };
 
 const splitChannels = (data, channels) => {
-  const out = Array.from({ length: channels }, () => []);
-  for (let i = 0; i < data.length; i += channels) {
-    for (let c = 0; c < channels; c++) out[c].push(data[i + c] ?? 0);
+  const frames = Math.ceil(data.length / channels);
+  const out = new Array(channels);
+  for (let c = 0; c < channels; c++) out[c] = new Float32Array(frames);
+  for (let frame = 0; frame < frames; frame++) {
+    const base = frame * channels;
+    for (let c = 0; c < channels; c++) out[c][frame] = data[base + c] ?? 0;
   }
   return out;
 };
@@ -128,15 +141,35 @@ const drawWave = (key) => {
   });
 };
 
-const renderWaveforms = (payload) => {
+const renderWaveforms = (payload, { skipDraw = false } = {}) => {
   wavesSection.style.display = "flex";
   const vads = payload.vad || [];
   pushSamples("output", payload.out_ch, decodeF32(payload.output));
   pushSamples("input", payload.in_ch, decodeF32(payload.input), vads);
   pushSamples("aec", payload.in_ch, decodeF32(payload.aec), vads);
+  if (skipDraw) return;
   drawWave("output");
   drawWave("input");
   drawWave("aec");
+};
+
+const flushWaveformQueue = () => {
+  if (!waveformQueue.length) return;
+  const queue = waveformQueue.splice(0);
+  queue.forEach((payload) => renderWaveforms(payload, { skipDraw: true }));
+  drawWave("output");
+  drawWave("input");
+  drawWave("aec");
+};
+
+const enqueueWaveform = (payload) => {
+  waveformQueue.push(payload);
+  if (renderQueued) return;
+  renderQueued = true;
+  requestAnimationFrame(() => {
+    renderQueued = false;
+    flushWaveformQueue();
+  });
 };
 
 const extractJsonChunks = (text) => {
@@ -199,7 +232,7 @@ const normalizeMalformedWaveform = (text) => {
 const handleMessage = (text) => {
   try {
     const data = JSON.parse(text);
-    if (data.type === "waveform") renderWaveforms(data);
+    if (data.type === "waveform") enqueueWaveform(data);
     else if (data.type === "stt" && transcriptHandler) transcriptHandler(data);
     else if (data.type === "context" && window.handleContextUpdate) window.handleContextUpdate(data);
   } catch (e) {
@@ -210,7 +243,7 @@ const handleMessage = (text) => {
     if (normalized) {
       try {
         const data = JSON.parse(normalized);
-        if (data.type === "waveform") return renderWaveforms(data);
+        if (data.type === "waveform") return enqueueWaveform(data);
       } catch (_) {
         /* fall through */
       }
@@ -222,12 +255,13 @@ const handleMessage = (text) => {
 
 const connect = () => {
   const ws = new WebSocket(url());
+  ws.binaryType = "arraybuffer";
   ws.onopen = () => set_ws_status_color("#3f3");
   ws.onmessage = (ev) => {
     if (typeof ev.data === "string") {
       handleMessage(ev.data);
     } else if (ev.data instanceof ArrayBuffer) {
-      handleMessage(new TextDecoder("utf-8").decode(ev.data));
+      handleMessage(utf8Decoder.decode(ev.data));
     } else if (ev.data && typeof ev.data.text === "function") {
       ev.data.text().then(handleMessage).catch((err) => console.warn("Bad ws payload", err));
     }

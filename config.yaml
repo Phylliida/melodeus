@@ -59,6 +59,6 @@ tts:
         stability: 0.5
         voice_id: hpp4J3VqNfWAUOO0d1Us
 ui:
-  show_waveforms: true
+  host: 0.0.0.0
   port: 5001
-  host: "0.0.0.0"
+  show_waveforms: true

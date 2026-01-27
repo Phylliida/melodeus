@@ -27,7 +27,6 @@ from async_callback_manager import AsyncCallbackManager
 # hardcoded for deepgram and other stuff
 SAMPLE_RATE = 16000
 
-
 # with a of like "*wow hi there* I like bees" and b of "wow hi there i like" this will give us index of end of like inside a
 def _collapse(s: str, ignore: set[str]):
     kept = []
