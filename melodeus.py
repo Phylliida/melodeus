@@ -16,7 +16,7 @@ from melaec3 import InputDeviceConfig, OutputDeviceConfig
 
 from persistent_config import PersistentMelodeusConfig
 from audio_system import AudioSystem, load_wav
-from stt import AsyncSTT
+from stt_elevenlabs import AsyncElevenLabsSTT
 from tts import AsyncTTS
 from ws_server import AsyncWebsocketServer
 from context_manager import AsyncContextManager
@@ -157,8 +157,8 @@ async def main():
     global loop
     loop = asyncio.get_running_loop()
     async with AudioSystem(config=config.audio) as audio_system:
-        async with AsyncSTT(config=config.stt, audio_system=audio_system) as stt_system:
-            async with AsyncTTS(config=config.tts, audio_system=audio_system, stt=stt_system) as tts_system:
+        async with AsyncElevenLabsSTT(key=config.secrets.elevenlabs_api_key, config=config.stt, audio_system=audio_system) as stt_system:
+            async with AsyncTTS(key=config.secrets.elevenlabs_api_key, config=config.tts, audio_system=audio_system, stt=stt_system) as tts_system:
                 async with AsyncContextManager(config=config.context, voices=config.tts.voices) as context:
                     async with AsyncWebsocketServer(config=config.ui, app=app, audio_system=audio_system, stt=stt_system, tts=tts_system, context=context) as ws_server:
                         @app.get("/")

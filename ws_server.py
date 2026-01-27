@@ -95,7 +95,7 @@ class AsyncWebsocketServer(object):
             try:
                 await ws.send(msg)
             except Exception:
-                print(traceback.print_exc())
+                print("Closed connection to websocket")
                 dead.append(ws)
         for ws in dead:
             self.connections.discard(ws)
@@ -161,9 +161,15 @@ class AsyncWebsocketServer(object):
                     message=full_text
                 )
                 yield text
-
-        async def first_audio_callback():
-            pass
+        commited_user_response = False
+        async def audio_played_callback(seconds_played):
+            nonlocal commited_user_response
+            print(f"Played {seconds_played}")
+            # commit user resonse once enough audio has played
+            # we don't do it immediately in case they were't done and just talking slow
+            if seconds_played > 2 and not commited_user_response:
+                commited_user_response = True
+                await self.stt.commit()
         async def interrupted(text, outputted_audio_duration):
             # if outputted less than 2 seconds of audio, just do blank
             if outputted_audio_duration < 2:
@@ -182,6 +188,6 @@ class AsyncWebsocketServer(object):
         await self.tts.speak_text(
             tts_id=author_id,
             text_generator=text_generator_wrapper(text_generator),
-            first_audio_callback=first_audio_callback,
+            audio_played_callback=audio_played_callback,
             interrupted_callback=interrupted
         )

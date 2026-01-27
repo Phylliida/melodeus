@@ -1,3 +1,6 @@
+secrets:
+  elevenlabs_api_key: sk_3a10423b6656c3f7a32ee8848d30a04eca287858070dcdbc
+  deepgram_api_key: ""
 audio:
   auto_calibrate: true
   state:
@@ -36,7 +39,6 @@ stt:
       max_speakers: 4
       voice_fingerprint_length: 128
 tts:
-  elevenlabs_api_key: sk_3a10423b6656c3f7a32ee8848d30a04eca287858070dcdbc
   output_format: pcm_22050
   resampler_quality: 5
   sample_rate: 22050

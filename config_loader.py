@@ -122,7 +122,6 @@ class SpeakersConfig:
 @dataclass
 class STTConfig:
     """Configuration for text to speech and voice fingerprinting."""
-    deepgram_api_key: str = ""
     keyterm: str = ""
     enable_speaker_id: bool = False
     speaker_id: SpeakersConfig = field(default_factory=SpeakersConfig)
@@ -139,7 +138,13 @@ class UIConfig:
     port: int = 5001
 
 @dataclass
+class SecretsConfig:
+    deepgram_api_key: str = ""
+    elevenlabs_api_key: str = ""
+
+@dataclass
 class MelodeusConfig:
+    secrets: SecretsConfig = field(default_factory=SecretsConfig)
     audio: AudioSystemConfig = field(default_factory=AudioSystemConfig)
     stt: STTConfig = field(default_factory=STTConfig)
     tts: TTSConfig = field(default_factory=TTSConfig)

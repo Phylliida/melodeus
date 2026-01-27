@@ -94,9 +94,13 @@ class AudioSystem(object):
         print(f"ready input devices {all_ready_input_devices} ")
         print(f"ready output devices {all_ready_output_devices} ")
         if self.config.auto_calibrate and len(all_ready_input_devices) > 0 and len(all_ready_output_devices) > 0:
-            print("Auto calibration")
-            await self.calibrate()
-            print("Done auto calibration")
+            devices = [all_ready_input_devices, all_ready_output_devices]
+            # avoid double calibration init
+            if not hasattr(self, "devices_last_calibration") or self.devices_last_calibration != devices:
+                self.devices_last_calibration = devices
+                print("Auto calibration")
+                await self.calibrate()
+                print("Done auto calibration")
 
     async def __aexit__(self, exc_type, exc, tb):
         self.processing_task.cancel()

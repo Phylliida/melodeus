@@ -32,10 +32,11 @@ class AlignmentData:
 class AsyncTTS:
     """Async TTS Streamer with interruption capabilities and spoken content tracking."""
     
-    def __init__(self, audio_system, stt, config: TTSConfig):
+    def __init__(self, audio_system, stt, key, config: TTSConfig):
         self.audio_system = audio_system
         self.stt = stt
         self.config = config
+        self.elevenlabs_api_key = key
         self.speak_task = None
         self.generated_text = ""
         self.word_callback = AsyncCallbackManager()    
@@ -77,7 +78,7 @@ class AsyncTTS:
             print(traceback.print_exc())
             print("Error in osc emit")
 
-    async def _speak_text_helper(self, tts_id, text_generator: AsyncGenerator[str, None], first_audio_callback, interrupted_callback):
+    async def _speak_text_helper(self, tts_id, text_generator: AsyncGenerator[str, None], audio_played_callback, interrupted_callback):
         """
         Speak the given text (task that can be canceled)
         
@@ -146,7 +147,7 @@ class AsyncTTS:
                 self.config.resampler_quality)
             audios = []
             async def flush_websocket(websocket):
-                nonlocal first_audio_callback, start_time_played, output_stream
+                nonlocal audio_played_callback, start_time_played, output_stream
                 if websocket is not None:
                     await websocket.send(json.dumps({
                         "text": "", # final message
@@ -164,17 +165,14 @@ class AsyncTTS:
                         audio_base64 = data.get("audio")
                         if audio_base64 and len(audio_base64) > 0:
                             audio_data = base64.b64decode(audio_base64)
-                            # call callback (this will stop the "thinking" sound)
-                            if not first_audio_callback is None:
-                                await first_audio_callback()
-                                first_audio_callback = None
-
                             float_audio = int16_bytes_to_float(audio_data)
                             if len(float_audio) > 0:
                                 audio_datas.append(float_audio)
                                 segment_alignments.append((len(float_audio), data["alignment"]))
                         elif data.get("isFinal"):
                             break # done
+                        await audio_played_callback(output_stream.num_played_samples / self.config.sample_rate)
+                    
                     
                     # now send the audio, all in one piece
                     if len(audio_datas) > 0:
@@ -197,7 +195,7 @@ class AsyncTTS:
                                 self.alignments.append(alignment_data)
                             play_start_time += buffer_len/float(self.config.sample_rate)
 
-
+                    await audio_played_callback(output_stream.num_played_samples / self.config.sample_rate)
                     await websocket.close()
                     await asyncio.sleep(0) # hand to other asyncs
                     
@@ -238,7 +236,7 @@ class AsyncTTS:
                         initial_message = {
                             "text": " ",
                             "voice_settings": voice_settings,
-                            "xi_api_key": self.config.elevenlabs_api_key
+                            "xi_api_key": self.elevenlabs_api_key
                         }
                         await websocket.send(json.dumps(initial_message))
                     await websocket.send(json.dumps({
@@ -254,6 +252,7 @@ class AsyncTTS:
             # wait for buffered audio to drain (polling)
             while output_stream.num_queued_samples > 0:
                 await asyncio.sleep(0.05)
+                await audio_played_callback(output_stream.num_played_samples / self.config.sample_rate)
                 
         except asyncio.CancelledError:
             # not enough audio played and interrupted, make empty
@@ -296,12 +295,12 @@ class AsyncTTS:
                     print(f"TTS websocket close error")
                     print(traceback.print_exc())
             
-    async def speak_text(self, tts_id: str, text_generator: AsyncGenerator[str, None], first_audio_callback, interrupted_callback):
+    async def speak_text(self, tts_id: str, text_generator: AsyncGenerator[str, None], audio_played_callback, interrupted_callback):
         # interrupt (if already running)
         await self.interrupt()
 
         # start the task (this way it's cancellable and we don't need to spam checks)
-        self.speak_task = asyncio.create_task(self._speak_text_helper(tts_id, text_generator, first_audio_callback, interrupted_callback))
+        self.speak_task = asyncio.create_task(self._speak_text_helper(tts_id, text_generator, audio_played_callback, interrupted_callback))
 
         # wait for it to finish
         # await self.speak_task

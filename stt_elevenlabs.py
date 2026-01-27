@@ -1,17 +1,9 @@
 
-from deepgram import AsyncDeepgramClient
-from deepgram.core.events import EventType
-from deepgram.listen.v2 import (
-    ListenV2Connected,
-    ListenV2FatalError,
-    ListenV2TurnInfo,
-)
-from deepgram.core.api_error import ApiError
 import traceback
 import numpy as np
 import asyncio
 from dataclasses import dataclass, field
-from config_loader import STTConfig
+from config_loader import STTConfig, SecretsConfig
 import sys
 if sys.version_info >= (3, 11):
     from enum import StrEnum
@@ -21,8 +13,19 @@ from typing import Any, Dict, Optional
 import time
 from datetime import datetime
 import uuid
-
+from elevenlabs import ElevenLabs, AudioFormat, RealtimeEvents
+from contextlib import asynccontextmanager
 from async_callback_manager import AsyncCallbackManager
+import base64
+
+# Todo polishing for deepgram:
+# don't interrupt for very small changes to text (edit distance less than 5-10 or so, or small enough audio bursts)
+#     bc echo cancel isn't perfect
+# a "no interruption" mode that simply responds after x amount of time
+#   can be useful in noise heavy environments
+#   possibly have a button that can be pressed to manually interrupt still tho
+
+
 
 # hardcoded for deepgram and other stuff
 SAMPLE_RATE = 16000
@@ -53,6 +56,14 @@ def has_meaningful_change(a, b):
     a_cleaned, _ = _collapse(a, ignore)
     b_cleaned, _ = _collapse(b, ignore)
     return a_cleaned.lower() != b_cleaned.lower()
+
+@asynccontextmanager
+async def elevenlabs_realtime_conn(client, opts):
+    conn = await client.speech_to_text.realtime.connect(opts)
+    try:
+        yield conn
+    finally:
+        await conn.close()
 
 @dataclass
 class STTResult:
@@ -137,9 +148,9 @@ class TurnState(object):
 
 
 
-class AsyncSTT(object):
-    def __init__(self, audio_system, config: STTConfig):
-        self.deepgram_api_key = config.deepgram_api_key
+class AsyncElevenLabsSTT(object):
+    def __init__(self, audio_system, key: str, config: STTConfig):
+        self.elevenlabs_api_key = key
         self.keyterm = config.keyterm
         self.audio_system = audio_system
         self.voice_fingerprinter = None
@@ -159,13 +170,13 @@ class AsyncSTT(object):
 
     async def __aenter__(self):
         self.time_of_last_speech = time.time()
-        self.deepgram_task = asyncio.create_task(self.deepgram_processor())
+        self.elevenlabs_task = asyncio.create_task(self.elevenlabs_processor())
         return self
 
     async def __aexit__(self, exc_type, exc, tb):
-        self.deepgram_task.cancel()
+        self.elevenlabs_task.cancel()
         try:
-            await self.deepgram_task
+            await self.elevenlabs_task
         except asyncio.CancelledError:
             pass # intentional
         except asyncio.CancelledError:
@@ -173,7 +184,7 @@ class AsyncSTT(object):
         except:
             print(f"Error in deepgram task cancel")
             print(traceback.print_exc())
-        del self.deepgram_task
+        del self.elevenlabs_task
 
     async def add_callback(self, callback):
         await self.stt_callbacks.add_callback(callback)
@@ -181,11 +192,12 @@ class AsyncSTT(object):
     async def remove_callback(self, callback):
         await self.stt_callbacks.remove_callback(callback)
 
-    async def deepgram_processor(self):
+    async def elevenlabs_processor(self):
         self.connection = None
         self.mixed_data = None
         self.cur_gain = 1.0
         self.gain_avg_mu = 0.99
+        self.elevenlabs_queue = asyncio.Queue()
         async def audio_callback(input_channels, output_channels, audio_input_data, audio_output_data, aec_input_data, channel_vads):
             try:
                 # if we have any input channels available and aec detected something, mix them
@@ -219,84 +231,90 @@ class AsyncSTT(object):
                         )
                         # increment frame count
                         self.num_audio_frames_recieved += len(self.mixed_data)
-                    await connection.send_media(mixed_data_pcm)
+                    mixed_data_pcm_base_64 = base64.b64encode(mixed_data_pcm).decode()
+                    await self.connection.send({"audio_base_64": mixed_data_pcm_base_64 })
             except:
                 print("Error in audio callback")
                 print(traceback.print_exc())
                 raise
         while True:
             try:
-                self.turn_state = TurnState(self, -1000, "", 0, 0)
-                deepgram = AsyncDeepgramClient(api_key=self.deepgram_api_key)
-                connect_kwargs = dict(
-                    model="flux-general-en",
-                    encoding="linear16",
-                    sample_rate=str(SAMPLE_RATE),
-                    eot_timeout_ms="500",
-                )
-                if self.keyterm:
-                    connect_kwargs["keyterm"] = self.keyterm
-
-                async with deepgram.listen.v2.connect(**connect_kwargs) as connection:
-                    connection.on(EventType.OPEN, self.deepgram_on_open)
-                    connection.on(EventType.MESSAGE, self.deepgram_on_message)
-                    connection.on(EventType.ERROR, self.deepgram_error)
-                    connection.on(EventType.CLOSE, self.deepgram_close)
-                    
+                transcript = ""
+                turn_id = str(uuid.uuid4())
+                client = ElevenLabs(api_key=self.elevenlabs_api_key)
+                async with elevenlabs_realtime_conn(client, {
+                    "model_id": "scribe_v2_realtime",
+                    "audio_format": AudioFormat.PCM_16000,
+                        "sample_rate": 16000,
+                    }) as connection:
                     self.connection = connection
+                    loop = asyncio.get_running_loop()
+                    def schedule_emit(result):
+                        task = loop.create_task(self._emit_stt(result))
+                        def _log_err(t):
+                            if t.cancelled():
+                                return
+                            exc = t.exception()
+                            if exc:
+                                print("Error emitting STT:", exc)
+                        task.add_done_callback(_log_err)
+                    def partial_transcript(event):
+                        nonlocal turn_id, transcript
+                        text = event['text']
+                        if has_meaningful_change(text, transcript):
+                            schedule_emit(
+                                STTResult(
+                                    text = text,
+                                    confidence = 1.0,
+                                    is_final = False,
+                                    is_edit = True,
+                                    speaker_id = None,
+                                    speaker_name = "Unknown",
+                                    timestamp = datetime.now(),
+                                    message_id = turn_id,
+                                )
+                            )
+                            transcript = text
+                        
+                    def commited_transcript(event):
+                        nonlocal turn_id, transcript
+                        text = event['text']
+                        if has_meaningful_change(text, transcript):
+                            schedule_emit(
+                                STTResult(
+                                    text = text,
+                                    confidence = 1.0,
+                                    is_final = True,
+                                    is_edit = True,
+                                    speaker_id = None,
+                                    speaker_name = "Unknown",
+                                    timestamp = datetime.now(),
+                                    message_id = turn_id,
+                                )
+                            )
+                        turn_id = str(uuid.uuid4())
+                        transcript = ""
+                            
+                    connection.on(RealtimeEvents.PARTIAL_TRANSCRIPT, partial_transcript)
+                    connection.on(RealtimeEvents.COMMITTED_TRANSCRIPT, commited_transcript)
                     await self.audio_system.add_audio_callback(audio_callback)
-                    await connection.start_listening()
-                    self.connection = None
-                    await self.audio_system.remove_audio_callback(audio_callback)
+                    while True:
+                        await asyncio.sleep(1)
             except asyncio.CancelledError:
-                print("Deepgram processs canceled")
-                break
-            except ApiError as api_err:
-                print("Error in deepgram websocket connection")
-                print(traceback.print_exc())
+                print("Elevenlabs stt processs canceled")
                 raise
-            except:
-                print("Error in deepgram")
+            except Exception as e:
+                print("Error in elevenlabs stt")
                 print(traceback.print_exc())
                 raise
             finally:
                 # fine to do this again, only removes if present
                 await self.audio_system.remove_audio_callback(audio_callback)
 
-
-    def deepgram_on_open(self, *args, **kwargs):
-        """Handle Deepgram connection open."""
-        print("🔗 Deepgram STT connection opened")
-
-    async def deepgram_on_message(self, message: Any):
-        """Dispatch Deepgram websocket messages to the appropriate handlers."""
-        try:
-            if isinstance(message, ListenV2TurnInfo):
-                await self.deepgram_turn(message)
-            elif isinstance(message, ListenV2FatalError):
-                print(f"❌ Deepgram fatal error ({message.code}): {message.description}")
-            elif isinstance(message, ListenV2Connected):
-                pass
-        except Exception as dispatch_error:
-            print(f"⚠️  Failed to process Deepgram message:")
-            print(traceback.print_exc())
-
+    async def commit(self):
+        print("Commiting")
+        await self.connection.commit()
     async def _emit_stt(self, stt):
         await self.stt_callbacks(stt)
     
-    async def deepgram_turn(self, message: ListenV2TurnInfo):
-        self.turn_state = await self.turn_state.process(message)
-        
-    async def deepgram_error(self, error: Exception):
-        """Handle errors emitted by the Deepgram websocket client."""
-        error_message = str(error)
-        print(f"⚠️ Deepgram websocket error")
-        print(error_message)
-
-    def deepgram_close(self, *args, **kwargs):
-        """Handle Deepgram connection open."""
-        print("🔗 Deepgram STT connection closed")
-    
-
-
             
