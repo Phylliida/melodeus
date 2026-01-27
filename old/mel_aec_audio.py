@@ -557,7 +557,7 @@ async def read_capture_chunk() -> bytes:
     """
     settings = _current_settings()
     stream, output_producer = await ensure_stream_started()
-    buf_bytes, started_micros, ended_micros = await stream.update()
+    _ready_inputs, _ready_outputs, buf_bytes, started_micros, ended_micros = await stream.update()
     float_audio = np.frombuffer(buf_bytes, dtype=np.float32) * 50
     pcm_bytes = float_to_int16_bytes(float_audio)
     _append_capture_wav(pcm_bytes, settings.sample_rate, settings.channels)

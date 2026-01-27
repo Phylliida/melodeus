@@ -1,4 +1,5 @@
 audio:
+  auto_calibrate: true
   state:
     input_devices:
     - audio_buffer_seconds: 20

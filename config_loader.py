@@ -129,6 +129,7 @@ class STTConfig:
 
 @dataclass
 class AudioSystemConfig:
+    auto_calibrate: bool = True
     state: AudioSystemState = field(default_factory=AudioSystemState)
 
 @dataclass
