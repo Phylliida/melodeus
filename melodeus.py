@@ -168,7 +168,7 @@ async def main():
                         
                         add_audio_system_device_callbacks(app, audio_system, loop)
 
-                        server = make_server("0.0.0.0", 5000, app)
+                        server = make_server("0.0.0.0", 5045, app)
                         server.timeout = 0.1  # seconds per poll
 
                         def serve_forever():

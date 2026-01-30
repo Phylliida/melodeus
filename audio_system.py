@@ -163,7 +163,7 @@ class AudioSystem(object):
                     if processing_message is not None:
                         match processing_message:
                             case ProcessingEvent.CALIBRATE:
-                                await self.stream.calibrate(list(self.output_devices.values()), False)
+                                await self.stream.calibrate(MAX_CALIBRATION_OFFSET_FRAMES, MAX_CALIBRATION_RETRY_ATTEMPTS, list(self.output_devices.values()), False)
                                 if processing_message_data: # trigger that it is done
                                     processing_message_data.set_result(None)
                             case _:
