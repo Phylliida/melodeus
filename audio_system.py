@@ -26,6 +26,9 @@ RESAMPLE_QUALITY = 5
 FRAME_SIZE_MILLIS = 3
 AEC_SAMPLE_RATE = 16000
 
+MAX_CALIBRATION_OFFSET_FRAMES = 1000
+MAX_CALIBRATION_RETRY_ATTEMPTS = 3
+
 # these are hardcoded to make aec3 happy
 TARGET_RATE = AEC_SAMPLE_RATE
 DEFAULT_FRAME = 160
@@ -123,10 +126,10 @@ class AudioSystem(object):
             del self.ready_input_device_callbacks
             del self.ready_output_device_callbacks
 
-    async def calibrate(self):
+    async def calibrate(self, max_offset_frames, max_calibration_attempts):
         # If we’re already on the processing task, run directly to avoid deadlock.
         if asyncio.current_task() is self.processing_task:
-            await self.stream.calibrate(list(self.output_devices.values()), False)
+            await self.stream.calibrate(max_offset_frames, max_calibration_attempts, list(self.output_devices.values()), False)
         # otherwise, enqueue it then wait for processing task to finish
         else:
             fut = loop.create_future()
