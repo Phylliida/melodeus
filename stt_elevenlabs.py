@@ -120,7 +120,7 @@ class AsyncElevenLabsSTT(object):
                 STTResult(
                     text = text,
                     speaker_id = None,
-                    speaker_name = "Unknown",
+                    speaker_name = "Tessa",
                     timestamp = datetime.now(),
                     message_id = self.turn_id,
                 )

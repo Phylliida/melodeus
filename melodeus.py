@@ -29,10 +29,16 @@ async def run_in_loop(coro):
     global loop
     return await asyncio.wrap_future(asyncio.run_coroutine_threadsafe(coro, loop))
 
-def add_audio_system_device_callbacks(app, audio_system, loop: asyncio.AbstractEventLoop):
+def add_audio_system_device_callbacks(app, audio_system, ws_server, loop: asyncio.AbstractEventLoop):
     """Register Flask routes that bridge into the running asyncio loop."""
 
     # nonsense needed to make async happy in flask
+
+
+    @app.post("/api/interrupt")
+    async def interrupt():
+        ws_server.interrupted = True
+
 
     @app.post("/api/select")
     async def select_device():
@@ -166,7 +172,7 @@ async def main():
                             return app.send_static_file("melodeus.html")
 
                         
-                        add_audio_system_device_callbacks(app, audio_system, loop)
+                        add_audio_system_device_callbacks(app, audio_system, ws_server, loop)
 
                         server = make_server("0.0.0.0", 5045, app)
                         server.timeout = 0.1  # seconds per poll

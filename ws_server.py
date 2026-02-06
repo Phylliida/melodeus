@@ -9,7 +9,7 @@ import json
 import aiohttp
 
 BASE_URL = "http://172.22.146.1:8055"  # adjust if needed
-
+BOT_NAME = "Onion"
 
 def serialize_context(update):
     return {
@@ -208,8 +208,14 @@ class AsyncWebsocketServer(object):
 
 
     async def get_model_response(self, author_id):
+        self.interrupted = False
         async def text_generator():
-            async for part in stream_generate("The onion is"):
+            context = self.context.encode_context()
+            context += f"\n{BOT_NAME}:"
+            print("########")
+            print(context)
+            print("########")
+            async for part in stream_generate(context):
                 yield part
         
         response_uuid = str(uuid.uuid4())
@@ -220,7 +226,7 @@ class AsyncWebsocketServer(object):
                 full_text += text
                 await self.context.update(
                     uuid=response_uuid,
-                    author=author_id,
+                    author="Onion",
                     message=full_text
                 )
                 yield text
@@ -229,11 +235,14 @@ class AsyncWebsocketServer(object):
             nonlocal commited_user_response
             # commit user resonse once enough audio has played
             # we don't do it immediately in case they were't done and just talking slow
-            if seconds_played > 1 and not commited_user_response:
+            if seconds_played > 0 and not commited_user_response:
                 commited_user_response = True
                 await self.stt.commit()
             if seconds_played > 0:
                 self.stt.enabled = False
+            if self.interrupted:
+                # can't call interrupt since we are inside of it
+                raise asyncio.CancelledError()
         async def interrupted(text, outputted_audio_duration):
             # if outputted less than 2 seconds of audio, just do blank
             if outputted_audio_duration < 2:

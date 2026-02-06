@@ -148,6 +148,17 @@ const calibrate = async () => {
   }
 };
 
+const interrupt = async () => {
+  ui.status.textContent = "Interrupting...";
+  try {
+    const res = await fetch("/api/interrupt", { method: "POST" });
+    if (!res.ok) throw new Error(await res.text());
+    ui.status.textContent = "Interrupted";
+  } catch (e) {
+    ui.status.textContent = e.message || "Failed to interrupt";
+  }
+};
+
 const playTestAudio = async () => {
   ui.status.textContent = "Playing test audio...";
   try {
@@ -170,6 +181,7 @@ document.addEventListener("DOMContentLoaded", () => {
     waves: $("waves"),
     calibrate: $("calibrate-btn"),
     testAudio: $("test-audio-btn"),
+    interrupt: $("interrupt-btn"),
   };
   ui.refresh.onclick = load;
   ui.input.host.onchange = () => renderSelectors("input");
@@ -180,6 +192,7 @@ document.addEventListener("DOMContentLoaded", () => {
   ui.output.add.onclick = () => mutate("POST", "output", pickConfig("output"));
   if (ui.calibrate) ui.calibrate.onclick = calibrate;
   if (ui.testAudio) ui.testAudio.onclick = playTestAudio;
+  if (ui.interrupt) ui.interrupt.onclick = interrupt;
   if (ui.toggleWaves) {
     ui.toggleWaves.onclick = async () => {
       const next = !state.ui.showWaveforms;
