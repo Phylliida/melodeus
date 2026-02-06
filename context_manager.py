@@ -74,6 +74,12 @@ class AsyncContextManager(object):
         with open(dest, "a", encoding="utf-8") as f:
             f.write(json.dumps(asdict(context_update)) + "\n")
 
+    def encode_context(self):
+        res = []
+        for message in self.messages:
+            res.append(message.author + ": " + message.message)
+        return "\n".join(res)
+
     async def fetch_current_state(self, callback):
         for message in self.messages:
             update = ContextUpdate(
