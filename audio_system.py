@@ -102,7 +102,7 @@ class AudioSystem(object):
             if not hasattr(self, "devices_last_calibration") or self.devices_last_calibration != devices:
                 self.devices_last_calibration = devices
                 print("Auto calibration")
-                await self.calibrate()
+                await self.calibrate(MAX_CALIBRATION_OFFSET_FRAMES, MAX_CALIBRATION_RETRY_ATTEMPTS)
                 print("Done auto calibration")
 
     async def __aexit__(self, exc_type, exc, tb):
@@ -126,7 +126,7 @@ class AudioSystem(object):
             del self.ready_input_device_callbacks
             del self.ready_output_device_callbacks
 
-    async def calibrate(self, max_offset_frames, max_calibration_attempts):
+    async def calibrate(self, max_offset_frames=MAX_CALIBRATION_OFFSET_FRAMES, max_calibration_attempts=MAX_CALIBRATION_RETRY_ATTEMPTS):
         # If we’re already on the processing task, run directly to avoid deadlock.
         if asyncio.current_task() is self.processing_task:
             await self.stream.calibrate(max_offset_frames, max_calibration_attempts, list(self.output_devices.values()), False)

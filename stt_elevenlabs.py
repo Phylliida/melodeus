@@ -78,6 +78,7 @@ class AsyncElevenLabsSTT(object):
     async def __aenter__(self):
         self.has_new_text = False
         self.cur_gain = 1.0
+        self.enabled = True
         self.gain_avg_mu = 0.99
         self.time_of_last_speech = time.time()
         self.transcript = ""
@@ -131,6 +132,8 @@ class AsyncElevenLabsSTT(object):
         print("Commited transcript")
         print(text)
         if has_meaningful_change(text, self.transcript):
+            # don't commit because this will interrupt them
+            '''
             self.schedule_emit(
                 STTResult(
                     text = text,
@@ -140,6 +143,7 @@ class AsyncElevenLabsSTT(object):
                     message_id = self.turn_id,
                 )
             )
+            '''
         self.has_new_text = False
         self.turn_id = str(uuid.uuid4())
         self.transcript = ""
@@ -163,7 +167,7 @@ class AsyncElevenLabsSTT(object):
             self.mixed_data[:] = 0
             for channel in range(len(channel_vads)):
                 vad = channel_vads[channel]
-                if vad:
+                if vad and self.enabled:
                     self.mixed_data += aec_frames[:,channel]
             R_target = 0.95
             avg_energy = np.sqrt(np.dot(self.mixed_data, self.mixed_data))
@@ -189,7 +193,6 @@ class AsyncElevenLabsSTT(object):
                 })
     async def commit(self):
         if self.has_new_text:
-            print("Commiting")
             await self.connection.commit()
             self.has_new_text = False
     async def _emit_stt(self, stt):

@@ -117,6 +117,8 @@ class AsyncWebsocketServer(object):
     async def audio_callback(self, input_channels, output_channels, audio_input_data, audio_output_data, aec_input_data, channel_vads):
         if not self.config.show_waveforms:
             return 
+        if not self.stt.enabled:
+            channel_vads = [False for _ in channel_vads]
         downsample_rate = 10 # we don't need full data
         if len(aec_input_data) > 0: # don't spam with empty things or it gets congested
             payload = {
@@ -166,9 +168,11 @@ class AsyncWebsocketServer(object):
             nonlocal commited_user_response
             # commit user resonse once enough audio has played
             # we don't do it immediately in case they were't done and just talking slow
-            if seconds_played > 2 and not commited_user_response:
+            if seconds_played > 1 and not commited_user_response:
                 commited_user_response = True
                 await self.stt.commit()
+            if seconds_played > 0:
+                self.stt.enabled = False
         async def interrupted(text, outputted_audio_duration):
             # if outputted less than 2 seconds of audio, just do blank
             if outputted_audio_duration < 2:
@@ -183,10 +187,13 @@ class AsyncWebsocketServer(object):
                     author=author_id,
                     message=text
                 )
+        async def finalize():
+            self.stt.enabled = True
 
         await self.tts.speak_text(
             tts_id=author_id,
             text_generator=text_generator_wrapper(text_generator),
             audio_played_callback=audio_played_callback,
-            interrupted_callback=interrupted
+            interrupted_callback=interrupted,
+            finalize=finalize
         )

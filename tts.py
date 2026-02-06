@@ -78,7 +78,7 @@ class AsyncTTS:
             print(traceback.print_exc())
             print("Error in osc emit")
 
-    async def _speak_text_helper(self, tts_id, text_generator: AsyncGenerator[str, None], audio_played_callback, interrupted_callback):
+    async def _speak_text_helper(self, tts_id, text_generator: AsyncGenerator[str, None], audio_played_callback, interrupted_callback, finalize):
         """
         Speak the given text (task that can be canceled)
         
@@ -294,13 +294,14 @@ class AsyncTTS:
                 except Exception as e:
                     print(f"TTS websocket close error")
                     print(traceback.print_exc())
+            await finalize()
             
-    async def speak_text(self, tts_id: str, text_generator: AsyncGenerator[str, None], audio_played_callback, interrupted_callback):
+    async def speak_text(self, tts_id: str, text_generator: AsyncGenerator[str, None], audio_played_callback, interrupted_callback, finalize):
         # interrupt (if already running)
         await self.interrupt()
 
         # start the task (this way it's cancellable and we don't need to spam checks)
-        self.speak_task = asyncio.create_task(self._speak_text_helper(tts_id, text_generator, audio_played_callback, interrupted_callback))
+        self.speak_task = asyncio.create_task(self._speak_text_helper(tts_id, text_generator, audio_played_callback, interrupted_callback, finalize))
 
         # wait for it to finish
         # await self.speak_task
