@@ -6,6 +6,10 @@ import websockets
 import asyncio
 import uuid
 import json
+import aiohttp
+
+BASE_URL = "http://172.22.146.1:8055"  # adjust if needed
+
 
 def serialize_context(update):
     return {
@@ -15,6 +19,62 @@ def serialize_context(update):
         "author": update.author,
         "message": update.message,
     }
+
+
+def _build_payload(prompt: str, n_predict: int) -> dict:
+    return {
+        "prompt": prompt,
+        "n_predict": n_predict,
+        "temperature": 1.0,
+        "top_k": 0,
+        "top_p": 1.0,
+        "min_p": 0.0,
+        "repeat_penalty": 1.0,
+        "stop": ["\n"],
+        "stream": True,
+    }
+
+def _extract_chunk(obj: dict) -> str:
+    # llama.cpp native
+    if isinstance(obj.get("content"), str):
+        return obj["content"]
+    if isinstance(obj.get("completion"), str):
+        return obj["completion"]
+    # OpenAI-style
+    if isinstance(obj.get("choices"), list) and obj["choices"]:
+        choice = obj["choices"][0] or {}
+        if isinstance(choice.get("text"), str):
+            return choice["text"]
+        delta = choice.get("delta") or choice.get("message") or {}
+        if isinstance(delta, dict):
+            return delta.get("content") or ""
+    return ""
+
+async def stream_generate(prompt: str, n_predict: int = 4000, timeout: float = 120.0):
+    url = f"{BASE_URL.rstrip('/')}/completion"  # swap to /v1/completions if needed
+    payload = _build_payload(prompt, n_predict)
+    tmo = aiohttp.ClientTimeout(total=timeout)
+    async with aiohttp.ClientSession(timeout=tmo) as session:
+        async with session.post(url, json=payload) as resp:
+            resp.raise_for_status()
+            async for line in resp.content:
+                if not line:
+                    continue
+                text = line.decode("utf-8", errors="ignore").strip()
+                if not text:
+                    continue
+                if text.startswith("data:"):
+                    text = text[len("data:"):].strip()
+                if text == "[DONE]":
+                    break
+                try:
+                    obj = json.loads(text)
+                except json.JSONDecodeError:
+                    continue
+                chunk = _extract_chunk(obj)
+                if chunk:
+                    yield chunk
+
 
 def b64(arr, k, dtype=np.float32):
     def block_max_mag(x, k):
@@ -146,10 +206,11 @@ class AsyncWebsocketServer(object):
         payload = serialize_context(update)
         await self.broadcast(json.dumps(payload))
 
+
     async def get_model_response(self, author_id):
         async def text_generator():
-            yield "Hello there the green beans are tasty! Do you think so?"
-            yield "Wow the green beans"
+            async for part in stream_generate("The onion is"):
+                yield part
         
         response_uuid = str(uuid.uuid4())
         # wraps the text generator to add it to context
