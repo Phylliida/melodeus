@@ -105,6 +105,7 @@ class AsyncWebsocketServer(object):
         self.stt = stt
         self.tts = tts
         self.context = context
+        self.generating = False
        
     async def __aenter__(self):
         self.i = 0
@@ -200,7 +201,8 @@ class AsyncWebsocketServer(object):
             uuid=stt_result.message_id,
             author=stt_result.speaker_name,
             message=stt_result.text)
-        await self.get_model_response("default")
+        if not self.generating: # don't interrupt
+            await self.get_model_response("default")
     
     async def context_callback(self, update):
         payload = serialize_context(update)
@@ -238,6 +240,8 @@ class AsyncWebsocketServer(object):
             if seconds_played > 0 and not commited_user_response:
                 commited_user_response = True
                 await self.stt.commit()
+            if seconds_played > 0.5:
+                self.generating = True
             if seconds_played > 0:
                 self.stt.enabled = False
             if self.interrupted:
@@ -259,6 +263,7 @@ class AsyncWebsocketServer(object):
                 )
         async def finalize():
             self.stt.enabled = True
+            self.generating = False
 
         await self.tts.speak_text(
             tts_id=author_id,

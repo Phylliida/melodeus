@@ -3,6 +3,30 @@ let ui;
 
 const state = { devices: { inputs: [], outputs: [] }, selected: { inputs: [], outputs: [] }, ui: { showWaveforms: true } };
 const contextRows = new Map();
+const editContext = async (uuid) => {
+  const row = contextRows.get(uuid);
+  if (!uuid || !row) return;
+  const draft = prompt("Edit message", row.dataset.message || "");
+  if (draft === null) return;
+  const author = row.dataset.author || "";
+  try {
+    await fetchJson(`/api/context/${encodeURIComponent(uuid)}`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ author, message: draft }),
+    });
+  } catch (e) {
+    if (ui?.status) ui.status.textContent = e.message || "Failed to edit message";
+  }
+};
+const deleteContext = async (uuid) => {
+  if (!uuid) return;
+  try {
+    await fetchJson(`/api/context/${encodeURIComponent(uuid)}`, { method: "DELETE" });
+  } catch (e) {
+    if (ui?.status) ui.status.textContent = e.message || "Failed to delete message";
+  }
+};
 const renderContextUpdate = (update) => {
   if (!update || update.type !== "context") return;
   const log = $("transcript-log");
@@ -19,14 +43,46 @@ const renderContextUpdate = (update) => {
   if (!row) {
     row = document.createElement("div");
     row.className = "pill";
+    row.style.display = "flex";
+    row.style.alignItems = "center";
+    row.style.gap = "8px";
     row.dataset.uuid = uuid;
     log.append(row);
     contextRows.set(uuid, row);
-  } else {
-    row.dataset.uuid = uuid;
   }
+  row.dataset.uuid = uuid;
+  row.dataset.author = update.author || "";
+  row.dataset.message = update.message || "";
+  row.replaceChildren();
   const author = update.author ? `${update.author}: ` : "";
-  row.textContent = `${author}${update.message || ""}`;
+  const text = document.createElement("span");
+  text.textContent = `${author}${update.message || ""}`;
+  const editBtn = document.createElement("button");
+  editBtn.type = "button";
+  editBtn.textContent = "Edit";
+  editBtn.style.width = "32px";
+  editBtn.style.height = "28px";
+  editBtn.style.padding = "0";
+  editBtn.style.marginLeft = "auto";
+  editBtn.style.background = "#fff";
+  editBtn.style.color = "var(--muted)";
+  editBtn.style.border = "1px solid var(--border)";
+  editBtn.style.borderRadius = "6px";
+  editBtn.style.cursor = "pointer";
+  editBtn.onclick = () => editContext(uuid);
+  const btn = document.createElement("button");
+  btn.type = "button";
+  btn.textContent = "×";
+  btn.style.width = "28px";
+  btn.style.height = "28px";
+  btn.style.padding = "0";
+  btn.style.marginLeft = "6px";
+  btn.style.background = "transparent";
+  btn.style.color = "var(--muted)";
+  btn.style.border = "none";
+  btn.style.cursor = "pointer";
+  btn.onclick = () => deleteContext(uuid);
+  row.append(text, editBtn, btn);
 };
 window.handleContextUpdate = renderContextUpdate;
 

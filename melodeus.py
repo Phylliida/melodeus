@@ -171,6 +171,20 @@ async def main():
                         def index():
                             return app.send_static_file("melodeus.html")
 
+                        @app.delete("/api/context/<msg_uuid>")
+                        async def delete_context_message(msg_uuid):
+                            await run_in_loop(context.delete(uuid=msg_uuid))
+                            return jsonify({"status": "ok"})
+
+                        @app.post("/api/context/<msg_uuid>")
+                        async def edit_context_message(msg_uuid):
+                            payload = request.get_json(force=True, silent=True) or {}
+                            if "message" not in payload:
+                                abort(400, description="Missing message")
+                            author = payload.get("author", "")
+                            message = payload.get("message") or ""
+                            await run_in_loop(context.update(uuid=msg_uuid, author=author, message=message))
+                            return jsonify({"status": "ok"})
                         
                         add_audio_system_device_callbacks(app, audio_system, ws_server, loop)
 
